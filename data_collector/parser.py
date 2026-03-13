@@ -44,7 +44,11 @@ CREATE TABLE IF NOT EXISTS markets (
     volume              REAL,
     liquidity           REAL,
     comment_count       INTEGER,
-    fees_enabled        INTEGER
+    fees_enabled        INTEGER,
+    neg_risk            INTEGER,  -- 1 если суб-рынок neg-risk группы
+    group_item_title    TEXT,     -- название исхода внутри группы ("0 - 0", "1 - 0" и т.д.)
+    submitted_by        TEXT,     -- адрес создателя рынка (выявление спам-фабрик)
+    cyom                INTEGER   -- 1 если "Create Your Own Market" (пользовательский спам)
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
@@ -141,6 +145,10 @@ def parse_market(data: dict) -> Optional[dict]:
 
     liquidity    = data.get("liquidity")
     fees_enabled = 1 if data.get("feesEnabled") else 0
+    neg_risk     = 1 if data.get("negRisk") else 0
+    group_item_title = data.get("groupItemTitle") or None
+    submitted_by = data.get("submitted_by") or data.get("submittedBy") or None
+    cyom         = 1 if data.get("cyom") else 0
 
     return {
         "id":               str(market_id),
@@ -156,6 +164,10 @@ def parse_market(data: dict) -> Optional[dict]:
         "liquidity":        liquidity,
         "comment_count":    comment_count,
         "fees_enabled":     fees_enabled,
+        "neg_risk":         neg_risk,
+        "group_item_title": group_item_title,
+        "submitted_by":     submitted_by,
+        "cyom":             cyom,
     }
 
 
@@ -243,11 +255,13 @@ def parse_day(conn: sqlite3.Connection, day_str: str):
                 INSERT OR IGNORE INTO markets
                     (id, question, description, category, resolution_source,
                      start_date, end_date, closed_time, duration_hours,
-                     volume, liquidity, comment_count, fees_enabled)
+                     volume, liquidity, comment_count, fees_enabled,
+                     neg_risk, group_item_title, submitted_by, cyom)
                 VALUES
                     (:id, :question, :description, :category, :resolution_source,
                      :start_date, :end_date, :closed_time, :duration_hours,
-                     :volume, :liquidity, :comment_count, :fees_enabled)
+                     :volume, :liquidity, :comment_count, :fees_enabled,
+                     :neg_risk, :group_item_title, :submitted_by, :cyom)
             """, market_row)
 
             for tr in token_rows:
