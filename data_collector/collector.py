@@ -129,14 +129,17 @@ def save_prices(end_date: str, market_id: str, token_id: str, history: list):
 # ── Логика одного дня ─────────────────────────────────────────────────────────
 
 def collect_day(day: date):
-    day_str = day.isoformat()
-    logger.info(f"Start downloading markets for {day_str}")
+    import time as _time
+    day_str    = day.isoformat()
+    t_day_start = _time.monotonic()
+
+    logger.info(f"[{day_str}] Start downloading markets")
 
     # 1. Fetch market list
     try:
         markets = fetch_markets_for_date(day)
     except Exception as e:
-        logger.error(f"{day_str}: failed to fetch markets — {e}")
+        logger.error(f"[{day_str}] Failed to fetch markets — {e}")
         return
 
     total       = len(markets)
@@ -147,7 +150,10 @@ def collect_day(day: date):
 
     PROGRESS_STEP = 100
 
+    logger.info(f"[{day_str}] Got {total} markets, saving JSONs...")
+
     # ── Phase 1: download market JSONs ───────────────────────────────────────
+    t0 = _time.monotonic()
     for i, market in enumerate(markets, 1):
         market_id = market.get("id")
         if not market_id:
@@ -161,15 +167,23 @@ def collect_day(day: date):
                 state_db.mark_downloaded(day_str, market_id)
                 mkt_new += 1
             except Exception as e:
-                logger.warning(f"{day_str} | {market_id}: failed to save market — {e}")
+                logger.warning(f"[{day_str}] {market_id}: failed to save market — {e}")
                 state_db.mark_error(day_str, market_id, str(e))
 
         if i % PROGRESS_STEP == 0:
-            logger.info(f"{day_str}: markets {i}/{total} saved")
+            elapsed = _time.monotonic() - t0
+            rate = i / elapsed if elapsed > 0 else 0
+            eta  = int((total - i) / rate) if rate > 0 else 0
+            logger.info(f"[{day_str}] Markets {i}/{total} saved — {rate:.0f}/s, ETA ~{eta}s")
 
-    logger.info(f"{day_str}: markets done — {mkt_new} new, {mkt_skipped} skipped. Starting price download...")
+    elapsed_markets = int(_time.monotonic() - t0)
+    logger.info(
+        f"[{day_str}] Markets done in {elapsed_markets}s — "
+        f"{mkt_new} new, {mkt_skipped} skipped. Starting price download..."
+    )
 
     # ── Phase 2: download price history ──────────────────────────────────────
+    t0 = _time.monotonic()
     for i, market in enumerate(markets, 1):
         market_id = market.get("id")
         if not market_id:
@@ -186,7 +200,7 @@ def collect_day(day: date):
             token_ids = []
 
         if not token_ids:
-            logger.warning(f"{day_str} | {market_id}: clobTokenIds empty, skipping prices")
+            logger.warning(f"[{day_str}] {market_id}: clobTokenIds empty, skipping prices")
             continue
 
         tokens_ok = 0
@@ -195,9 +209,9 @@ def collect_day(day: date):
                 history = fetch_price_history(token_id)
                 save_prices(day_str, market_id, token_id, history)
                 tokens_ok += 1
-                logger.debug(f"{day_str} | {market_id} | token={token_id}: {len(history)} points")
+                logger.debug(f"[{day_str}] {market_id} | token={token_id}: {len(history)} points")
             except Exception as e:
-                logger.warning(f"{day_str} | {market_id} | token={token_id}: price fetch error — {e}")
+                logger.warning(f"[{day_str}] {market_id} | token={token_id}: price fetch error — {e}")
                 price_err += 1
             time.sleep(SLEEP_PRICES)
 
@@ -211,10 +225,14 @@ def collect_day(day: date):
             )
 
         if i % PROGRESS_STEP == 0:
-            logger.info(f"{day_str}: prices {i}/{total} markets processed")
+            elapsed = _time.monotonic() - t0
+            rate = i / elapsed if elapsed > 0 else 0
+            eta  = int((total - i) / rate) if rate > 0 else 0
+            logger.info(f"[{day_str}] Prices {i}/{total} markets — {rate:.1f}/s, ETA ~{eta}s")
 
+    elapsed_total = int(_time.monotonic() - t_day_start)
     logger.info(
-        f"{day_str}: DONE | total: {total} | "
+        f"[{day_str}] DONE in {elapsed_total}s | total: {total} | "
         f"new: {mkt_new} | skipped: {mkt_skipped} | "
         f"prices ok: {price_ok} | price errors: {price_err}"
     )
