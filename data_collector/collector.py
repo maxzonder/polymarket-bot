@@ -145,12 +145,14 @@ def collect_day(day: date):
     price_ok    = 0
     price_err   = 0
 
-    for market in markets:
+    PROGRESS_STEP = 100
+
+    # ── Phase 1: download market JSONs ───────────────────────────────────────
+    for i, market in enumerate(markets, 1):
         market_id = market.get("id")
         if not market_id:
             continue
 
-        # 2. Market JSON
         if state_db.is_market_downloaded(day_str, market_id):
             mkt_skipped += 1
         else:
@@ -161,10 +163,20 @@ def collect_day(day: date):
             except Exception as e:
                 logger.warning(f"{day_str} | {market_id}: failed to save market — {e}")
                 state_db.mark_error(day_str, market_id, str(e))
-                continue
 
-        # 3. Price history (skip if already downloaded)
+        if i % PROGRESS_STEP == 0:
+            logger.info(f"{day_str}: markets {i}/{total} saved")
+
+    logger.info(f"{day_str}: markets done — {mkt_new} new, {mkt_skipped} skipped. Starting price download...")
+
+    # ── Phase 2: download price history ──────────────────────────────────────
+    for i, market in enumerate(markets, 1):
+        market_id = market.get("id")
+        if not market_id:
+            continue
+
         if state_db.is_prices_downloaded(day_str, market_id):
+            price_ok += 1
             continue
 
         raw_tokens = market.get("clobTokenIds", [])
@@ -197,6 +209,9 @@ def collect_day(day: date):
                 day_str, market_id,
                 f"prices: downloaded {tokens_ok}/{len(token_ids)} tokens"
             )
+
+        if i % PROGRESS_STEP == 0:
+            logger.info(f"{day_str}: prices {i}/{total} markets processed")
 
     logger.info(
         f"{day_str}: DONE | total: {total} | "
