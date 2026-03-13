@@ -19,7 +19,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from data_collector import state_db
+from data_collector import state_db, analyzer
 from utils.logger import setup_logger
 
 # ── Пути ──────────────────────────────────────────────────────────────────────
@@ -423,6 +423,7 @@ def run(start: date, end: date, skip_analytics: bool = False):
 
     if not skip_analytics:
         compute_token_analytics(conn)
+        analyzer.run(recompute=False)
 
     conn.close()
     logger.info("Parser finished.")
