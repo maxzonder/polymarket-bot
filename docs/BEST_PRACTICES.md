@@ -42,27 +42,26 @@ def get_logger(name: str) -> logging.Logger:
     return logger
 ```
 
-**Что логировать в сборщике (на уровне дня):**
+**Collector log examples (day level):**
 ```
-[INFO] collector.markets: 2026-02-15 — запрошено 340 рынков, скачано 340, пропущено (уже есть) 0
-[INFO] collector.prices:  2026-02-15 — запрошено 680 токенов, скачано 678, ошибок 2
-[WARNING] collector.prices: token_id=abc123 — HTTP 429, retried 3x, skipped
-[INFO] collector.summary: 2026-02-15 — DONE. Markets: 340, Price files: 678, Errors: 2, Time: 4m 12s
-```
-
-**Что логировать в парсере (на уровне дня):**
-```
-[INFO] parser: 2026-02-15 — начало парсинга, рынков в очереди: 340
-[INFO] parser: 2026-02-15 — записано в markets: 340, в raw_price_history: 127,440 точек
-[WARNING] parser: market_id=xyz — поле clobTokenIds пустое, пропущен
-[INFO] parser: 2026-02-15 — DONE. Time: 1m 03s
+[INFO] collector: 2026-02-15: start
+[INFO] collector: 2026-02-15: DONE | total: 340 | new: 340 | skipped: 0 | prices ok: 338 | price errors: 2
+[WARNING] collector: 2026-02-15 | abc123 | token=xyz: price fetch error — HTTP 429
+[WARNING] collector: 2026-02-15 | abc123: clobTokenIds empty, skipping prices
 ```
 
-**Уровни логирования:**
-- `DEBUG` — детали каждого запроса (только при отладке, по флагу)
-- `INFO` — прогресс и итоги за день
-- `WARNING` — пропущенные записи, временные ошибки, retry
-- `ERROR` — критические сбои (не смогли подключиться к БД и т.п.)
+**Parser log examples (day level):**
+```
+[INFO] parser: 2026-02-15: start, markets in queue: 340
+[INFO] parser: 2026-02-15: DONE | markets: 340 | price points: 127440 | time: 1m 03s
+[WARNING] parser: 2026-02-15 | market_id=xyz: clobTokenIds empty, skipped
+```
+
+**Log levels:**
+- `DEBUG` — per-request details (enabled via flag for troubleshooting only)
+- `INFO` — day-level start/done summaries
+- `WARNING` — skipped records, transient errors, retries
+- `ERROR` — critical failures (DB connection lost, etc.)
 
 ## 4. Отслеживание состояния сборщика (collector_state.db)
 
