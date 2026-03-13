@@ -69,7 +69,7 @@ def fetch_markets_for_date(day: date) -> list[dict]:
             "closed":          "true",
             "end_date_min":    f"{day_str}T00:00:00Z",
             "end_date_max":    f"{next_day}T00:00:00Z",
-            "volume_num_min":  100,
+            "volume_num_min":  50,    # отсекает мусор (Bitcoin Up/Down 5-мин и нулевые рынки) без потери реальных лебедей
             "limit":           PAGE_SIZE,
             "offset":          offset,
         }
