@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS token_analytics (
     min_price_ts            INTEGER,
     hours_to_close_at_min   REAL,
     max_price_after_min     REAL,
-    max_spike_multiplier    REAL,
+    max_spike_multiplier    REAL,   -- теоретический: max_price / min_price
+    real_spike_multiplier   REAL,   -- реалистичный: max_price / max(min_price, 0.01)
     hours_at_bottom         INTEGER,
     FOREIGN KEY (token_id) REFERENCES tokens(token_id)
 );
@@ -369,7 +370,8 @@ def compute_token_analytics(conn: sqlite3.Connection):
         after_min    = [(ts, p) for ts, p in prices_list if ts > min_price_ts]
 
         max_price_after_min  = max((p for _, p in after_min), default=min_price)
-        max_spike_multiplier = max_price_after_min / min_price
+        max_spike_multiplier  = max_price_after_min / min_price
+        real_spike_multiplier = max_price_after_min / max(min_price, 0.01)
         hours_to_close_at_min = (closed_time - min_price_ts) / 3600.0
 
         bottom_threshold = min_price * 1.5
@@ -380,11 +382,11 @@ def compute_token_analytics(conn: sqlite3.Connection):
                 INSERT OR REPLACE INTO token_analytics
                     (token_id, market_id, min_price, min_price_ts,
                      hours_to_close_at_min, max_price_after_min,
-                     max_spike_multiplier, hours_at_bottom)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     max_spike_multiplier, real_spike_multiplier, hours_at_bottom)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token_id, market_id, min_price, min_price_ts,
                   hours_to_close_at_min, max_price_after_min,
-                  max_spike_multiplier, hours_at_bottom))
+                  max_spike_multiplier, real_spike_multiplier, hours_at_bottom))
             ok += 1
         except Exception as e:
             logger.warning(f"[analytics] {token_id}: insert error — {e}")

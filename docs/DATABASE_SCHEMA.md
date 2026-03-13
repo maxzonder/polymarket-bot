@@ -77,7 +77,8 @@ Pre-computed статистика на токен. Заполняется ETL-с
 | `min_price_ts` | INTEGER | Unix timestamp момента минимума |
 | `hours_to_close_at_min` | REAL | `(closed_time - min_price_ts) / 3600` — сколько часов до закрытия было в момент дна |
 | `max_price_after_min` | REAL | Максимум цены **после** момента минимума (до закрытия) |
-| `max_spike_multiplier` | REAL | `max_price_after_min / min_price` — максимально возможный ROI от дна |
+| `max_spike_multiplier` | REAL | `max_price_after_min / min_price` — теоретический ROI от абсолютного дна |
+| `real_spike_multiplier` | REAL | `max_price_after_min / max(min_price, 0.01)` — реалистичный ROI при входе минимум по 1¢ |
 | `hours_at_bottom` | INTEGER | Количество часовых свечей подряд где цена была <= `min_price × 1.5`. Отсекает одиночные часовые "прострелы" вниз — реальный лебедь обычно лежит внизу несколько часов |
 
 ---
