@@ -66,11 +66,12 @@ def fetch_markets_for_date(day: date) -> list[dict]:
 
     while True:
         params = {
-            "closed":       "true",
-            "end_date_min": f"{day_str}T00:00:00Z",
-            "end_date_max": f"{next_day}T00:00:00Z",
-            "limit":        PAGE_SIZE,
-            "offset":       offset,
+            "closed":          "true",
+            "end_date_min":    f"{day_str}T00:00:00Z",
+            "end_date_max":    f"{next_day}T00:00:00Z",
+            "volume_num_min":  100,
+            "limit":           PAGE_SIZE,
+            "offset":          offset,
         }
         resp = requests.get(f"{GAMMA_BASE}/markets", params=params, timeout=30)
         resp.raise_for_status()
