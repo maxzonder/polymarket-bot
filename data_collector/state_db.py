@@ -59,6 +59,15 @@ def is_prices_downloaded(date: str, market_id: str) -> bool:
         return bool(row and row["prices_downloaded_at"])
 
 
+def is_market_parsed(date: str, market_id: str) -> bool:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT parsed_at FROM collection_state WHERE date=? AND market_id=?",
+            (date, market_id)
+        ).fetchone()
+        return bool(row and row["parsed_at"])
+
+
 def get_unparsed(date: str) -> list[str]:
     """Возвращает market_id где downloaded_at есть, но parsed_at пустой."""
     with _conn() as conn:
