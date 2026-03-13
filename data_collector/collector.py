@@ -71,8 +71,6 @@ def fetch_markets_for_date(day: date) -> list[dict]:
             "end_date_max": f"{next_day}T00:00:00Z",
             "limit":        PAGE_SIZE,
             "offset":       offset,
-            "order":        "end_date",
-            "ascending":    "true",
         }
         resp = requests.get(f"{GAMMA_BASE}/markets", params=params, timeout=30)
         resp.raise_for_status()
@@ -82,7 +80,7 @@ def fetch_markets_for_date(day: date) -> list[dict]:
             break
 
         markets.extend(page)
-        logger.debug(f"{day_str}: offset={offset}, страница={len(page)}")
+        logger.debug(f"{day_str}: offset={offset}, page_size={len(page)}")
 
         if len(page) < PAGE_SIZE:
             break
@@ -132,13 +130,13 @@ def save_prices(end_date: str, market_id: str, token_id: str, history: list):
 
 def collect_day(day: date):
     day_str = day.isoformat()
-    logger.info(f"{'='*20} {day_str}: начало {'='*20}")
+    logger.info(f"{'='*20} {day_str}: start {'='*20}")
 
-    # 1. Список рынков
+    # 1. Fetch market list
     try:
         markets = fetch_markets_for_date(day)
     except Exception as e:
-        logger.error(f"{day_str}: не удалось получить список рынков — {e}")
+        logger.error(f"{day_str}: failed to fetch markets — {e}")
         return
 
     total       = len(markets)
@@ -152,7 +150,7 @@ def collect_day(day: date):
         if not market_id:
             continue
 
-        # 2. JSON рынка
+        # 2. Market JSON
         if state_db.is_market_downloaded(day_str, market_id):
             mkt_skipped += 1
         else:
@@ -161,15 +159,14 @@ def collect_day(day: date):
                 state_db.mark_downloaded(day_str, market_id)
                 mkt_new += 1
             except Exception as e:
-                logger.warning(f"{day_str} | {market_id}: ошибка сохранения рынка — {e}")
+                logger.warning(f"{day_str} | {market_id}: failed to save market — {e}")
                 state_db.mark_error(day_str, market_id, str(e))
                 continue
 
-        # 3. История цен (если ещё не скачана)
+        # 3. Price history (skip if already downloaded)
         if state_db.is_prices_downloaded(day_str, market_id):
             continue
 
-        # Извлекаем token_id-шники (поле clobTokenIds — строка или список)
         raw_tokens = market.get("clobTokenIds", [])
         try:
             token_ids = json.loads(raw_tokens) if isinstance(raw_tokens, str) else raw_tokens
@@ -177,7 +174,7 @@ def collect_day(day: date):
             token_ids = []
 
         if not token_ids:
-            logger.warning(f"{day_str} | {market_id}: clobTokenIds пустой, цены пропущены")
+            logger.warning(f"{day_str} | {market_id}: clobTokenIds empty, skipping prices")
             continue
 
         tokens_ok = 0
@@ -186,9 +183,9 @@ def collect_day(day: date):
                 history = fetch_price_history(token_id)
                 save_prices(day_str, market_id, token_id, history)
                 tokens_ok += 1
-                logger.debug(f"{day_str} | {market_id} | token={token_id}: {len(history)} точек")
+                logger.debug(f"{day_str} | {market_id} | token={token_id}: {len(history)} points")
             except Exception as e:
-                logger.warning(f"{day_str} | {market_id} | token={token_id}: ошибка цен — {e}")
+                logger.warning(f"{day_str} | {market_id} | token={token_id}: price fetch error — {e}")
                 price_err += 1
             time.sleep(SLEEP_PRICES)
 
@@ -196,16 +193,15 @@ def collect_day(day: date):
             state_db.mark_prices_downloaded(day_str, market_id)
             price_ok += 1
         else:
-            # Частично скачали — запишем ошибку, при следующем запуске попробуем снова
             state_db.mark_error(
                 day_str, market_id,
-                f"prices: скачано {tokens_ok}/{len(token_ids)} токенов"
+                f"prices: downloaded {tokens_ok}/{len(token_ids)} tokens"
             )
 
     logger.info(
-        f"{day_str}: DONE | рынков: {total} | "
-        f"скачано новых: {mkt_new} | пропущено (уже есть): {mkt_skipped} | "
-        f"цены OK: {price_ok} | ошибки цен: {price_err}"
+        f"{day_str}: DONE | total: {total} | "
+        f"new: {mkt_new} | skipped: {mkt_skipped} | "
+        f"prices ok: {price_ok} | price errors: {price_err}"
     )
 
 
@@ -213,14 +209,14 @@ def collect_day(day: date):
 
 def run(start: date, end: date):
     state_db.init_db()
-    logger.info(f"Сбор данных: {start} → {end}")
+    logger.info(f"Collection started: {start} -> {end}")
 
     current = start
     while current <= end:
         collect_day(current)
         current += timedelta(days=1)
 
-    logger.info(f"Завершено: {start} → {end}")
+    logger.info(f"Collection finished: {start} -> {end}")
 
 
 if __name__ == "__main__":
