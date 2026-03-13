@@ -130,7 +130,7 @@ def save_prices(end_date: str, market_id: str, token_id: str, history: list):
 
 def collect_day(day: date):
     day_str = day.isoformat()
-    logger.info(f"{'='*20} {day_str}: start {'='*20}")
+    logger.info(f"Start downloading markets for {day_str}")
 
     # 1. Fetch market list
     try:
@@ -230,6 +230,8 @@ def run(start: date, end: date):
     while current <= end:
         collect_day(current)
         current += timedelta(days=1)
+        if current <= end:
+            logger.info(f"Moving to next date: {current}")
 
     logger.info(f"Collection finished: {start} -> {end}")
 
