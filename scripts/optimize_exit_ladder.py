@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
-Find the most profitable 5-step exit ladder for one trading day.
+Optimize exit schemes for one trading day using token_swans.
 
-Model assumptions:
-- Input data comes from token_swans in polymarket_dataset.db.
+Variants supported:
+1. full_exit_single:
+   - sell 100% at one target from the candidate list.
+2. ascending_ladder:
+   - exactly N strictly increasing steps.
+   - weights are optimized and must sum to 100%.
+3. fixed_tail_500:
+   - 90% is optimized across profitable targets.
+   - final 10% is always sold at 500x.
+   - total steps defaults to 5, so optimized front side has 4 steps.
+
+Execution model:
 - A swan is buyable if entry_volume_usdc >= stake.
 - A tranche at target X is fillable only if:
   1) possible_x >= X
   2) exit_volume_usdc is enough to cover cumulative gross proceeds sold up to that step.
-- Tranches are sold in order; if one step cannot be filled, later steps are not filled.
-
-Search space:
-- Targets are chosen from a discrete set, with repetition allowed.
-- Exactly 5 steps.
-- Weights are searched in configurable increments (default 10%) and must sum to 100%.
+- Steps are processed in order; if one step fails, later steps do not fill.
 
 This is a liquidity-aware approximation, not a full order-book simulator.
 """
@@ -27,11 +32,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
-
-DEFAULT_TARGETS = (10, 20, 30, 40, 50, 100, 200, 500, 1000)
+DEFAULT_TARGETS = (5, 10, 20, 30, 40, 50, 100, 200, 500, 1000)
 DEFAULT_STEPS = 5
-DEFAULT_WEIGHT_INCREMENT = 10  # percent
+DEFAULT_WEIGHT_INCREMENT = 10
 DEFAULT_TOP_N = 10
+DEFAULT_MODES = ("full_exit_single", "ascending_ladder", "fixed_tail_500")
 
 
 @dataclass(frozen=True)
@@ -46,11 +51,12 @@ class Swan:
 @dataclass(frozen=True)
 class Step:
     target_x: int
-    weight: float  # 0..1
+    weight: float
 
 
 @dataclass
 class SchemeResult:
+    mode: str
     steps: Tuple[Step, ...]
     buyable_swans: int
     total_cost_usd: float
@@ -61,7 +67,7 @@ class SchemeResult:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Optimize 5-step exit ladder for one day")
+    parser = argparse.ArgumentParser(description="Optimize exit schemes for one day")
     parser.add_argument("--db", default="polymarket_dataset.db", help="Path to SQLite DB")
     parser.add_argument("--date", required=True, help="Trading day, e.g. 2026-02-28")
     parser.add_argument("--stake", type=float, default=1.0, help="Stake per swan in USDC")
@@ -77,7 +83,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_WEIGHT_INCREMENT,
         help="Weight increment in percent. Default 10 means weights like 10%%, 20%%, ...",
     )
-    parser.add_argument("--top", type=int, default=DEFAULT_TOP_N, help="How many best schemes to print")
+    parser.add_argument("--top", type=int, default=DEFAULT_TOP_N, help="How many best schemes to print per mode")
+    parser.add_argument(
+        "--modes",
+        default=",".join(DEFAULT_MODES),
+        help="Comma-separated modes: full_exit_single,ascending_ladder,fixed_tail_500",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +97,15 @@ def parse_targets(raw: str) -> Tuple[int, ...]:
     if not targets:
         raise ValueError("No targets provided")
     return targets
+
+
+def parse_modes(raw: str) -> Tuple[str, ...]:
+    modes = tuple(x.strip() for x in raw.split(",") if x.strip())
+    allowed = set(DEFAULT_MODES)
+    bad = [m for m in modes if m not in allowed]
+    if bad:
+        raise ValueError(f"Unknown mode(s): {bad}")
+    return modes
 
 
 def load_swans(db_path: Path, date: str, stake: float) -> List[Swan]:
@@ -113,11 +133,12 @@ def load_swans(db_path: Path, date: str, stake: float) -> List[Swan]:
     ]
 
 
-def generate_weight_vectors(steps: int, increment_pct: int) -> Iterable[Tuple[float, ...]]:
+def generate_weight_vectors(steps: int, increment_pct: int, total_weight: float = 1.0) -> Iterable[Tuple[float, ...]]:
     if 100 % increment_pct != 0:
         raise ValueError("weight_increment must divide 100 exactly")
-    units_total = 100 // increment_pct
-    # Positive compositions only: each step gets at least one unit.
+    units_total = round(total_weight * 100 / increment_pct)
+    if units_total < steps:
+        raise ValueError("Not enough weight units to allocate at least one unit per step")
     for cuts in itertools.combinations(range(1, units_total), steps - 1):
         prev = 0
         parts = []
@@ -128,7 +149,7 @@ def generate_weight_vectors(steps: int, increment_pct: int) -> Iterable[Tuple[fl
         yield tuple(part * increment_pct / 100.0 for part in parts)
 
 
-def evaluate_scheme(swans: Sequence[Swan], stake: float, steps: Sequence[Step]) -> SchemeResult:
+def evaluate_scheme(swans: Sequence[Swan], stake: float, steps: Sequence[Step], mode: str) -> SchemeResult:
     fill_counts = [0] * len(steps)
     total_revenue = 0.0
 
@@ -148,6 +169,7 @@ def evaluate_scheme(swans: Sequence[Swan], stake: float, steps: Sequence[Step]) 
     total_profit = total_revenue - total_cost
     roi_pct = (total_profit / total_cost * 100.0) if total_cost else 0.0
     return SchemeResult(
+        mode=mode,
         steps=tuple(steps),
         buyable_swans=len(swans),
         total_cost_usd=total_cost,
@@ -158,52 +180,95 @@ def evaluate_scheme(swans: Sequence[Swan], stake: float, steps: Sequence[Step]) 
     )
 
 
-def optimize(
+def optimize_full_exit_single(swans: Sequence[Swan], stake: float, targets: Sequence[int]) -> List[SchemeResult]:
+    results = []
+    for target in targets:
+        steps = (Step(target_x=target, weight=1.0),)
+        results.append(evaluate_scheme(swans, stake, steps, mode="full_exit_single"))
+    results.sort(key=lambda r: (r.total_profit_usd, r.total_revenue_usd, r.roi_pct), reverse=True)
+    return results
+
+
+def optimize_ascending_ladder(
     swans: Sequence[Swan],
     stake: float,
     targets: Sequence[int],
     steps_count: int,
     weight_increment: int,
 ) -> List[SchemeResult]:
-    weight_vectors = list(generate_weight_vectors(steps_count, weight_increment))
-    target_vectors = itertools.combinations_with_replacement(targets, steps_count)
-
-    results: List[SchemeResult] = []
-    for target_vector in target_vectors:
+    results = []
+    weight_vectors = list(generate_weight_vectors(steps_count, weight_increment, total_weight=1.0))
+    for target_vector in itertools.combinations(targets, steps_count):
         for weight_vector in weight_vectors:
-            steps = tuple(
-                Step(target_x=target_x, weight=weight)
-                for target_x, weight in zip(target_vector, weight_vector)
-            )
-            results.append(evaluate_scheme(swans, stake, steps))
+            steps = tuple(Step(target_x=t, weight=w) for t, w in zip(target_vector, weight_vector))
+            results.append(evaluate_scheme(swans, stake, steps, mode="ascending_ladder"))
+    results.sort(key=lambda r: (r.total_profit_usd, r.total_revenue_usd, r.roi_pct), reverse=True)
+    return results
 
-    results.sort(
-        key=lambda r: (r.total_profit_usd, r.total_revenue_usd, r.roi_pct),
-        reverse=True,
-    )
+
+def optimize_fixed_tail_500(
+    swans: Sequence[Swan],
+    stake: float,
+    targets: Sequence[int],
+    steps_count: int,
+    weight_increment: int,
+) -> List[SchemeResult]:
+    if 500 not in targets:
+        raise ValueError("fixed_tail_500 mode requires 500 in --targets")
+    if steps_count < 2:
+        raise ValueError("fixed_tail_500 needs at least 2 steps")
+
+    front_steps = steps_count - 1
+    front_targets = tuple(t for t in targets if t < 500)
+    results = []
+    weight_vectors = list(generate_weight_vectors(front_steps, weight_increment, total_weight=0.9))
+    for target_vector in itertools.combinations_with_replacement(front_targets, front_steps):
+        for weight_vector in weight_vectors:
+            steps = tuple(Step(target_x=t, weight=w) for t, w in zip(target_vector, weight_vector))
+            steps = steps + (Step(target_x=500, weight=0.1),)
+            results.append(evaluate_scheme(swans, stake, steps, mode="fixed_tail_500"))
+    results.sort(key=lambda r: (r.total_profit_usd, r.total_revenue_usd, r.roi_pct), reverse=True)
     return results
 
 
 def format_steps(steps: Sequence[Step]) -> str:
-    return " | ".join(f"{int(step.weight * 100)}% @ {step.target_x}x" for step in steps)
+    return " | ".join(f"{int(round(step.weight * 100))}% @ {step.target_x}x" for step in steps)
+
+
+def print_mode_results(mode: str, results: Sequence[SchemeResult], top: int) -> None:
+    print(f"MODE={mode}")
+    if not results:
+        print("  no valid schemes for the given constraints")
+        print()
+        return
+    best = results[0]
+    print(f"  best_steps: {format_steps(best.steps)}")
+    print(f"  cost_usd: {best.total_cost_usd:.2f}")
+    print(f"  revenue_usd: {best.total_revenue_usd:.2f}")
+    print(f"  profit_usd: {best.total_profit_usd:.2f}")
+    print(f"  roi_pct: {best.roi_pct:.2f}")
+    print(f"  fills_by_step: {list(best.per_step_fill_counts)}")
+    print(f"  top_{top}:")
+    for idx, result in enumerate(results[:top], start=1):
+        print(
+            f"    {idx}. {format_steps(result.steps)} | "
+            f"profit=${result.total_profit_usd:.2f} | "
+            f"revenue=${result.total_revenue_usd:.2f} | "
+            f"roi={result.roi_pct:.2f}% | "
+            f"fills={list(result.per_step_fill_counts)}"
+        )
+    print()
 
 
 def main() -> None:
     args = parse_args()
     db_path = Path(args.db)
     targets = parse_targets(args.targets)
+    modes = parse_modes(args.modes)
 
     swans = load_swans(db_path, args.date, args.stake)
     if not swans:
         raise SystemExit(f"No buyable swans found for {args.date} with stake={args.stake}")
-
-    results = optimize(
-        swans=swans,
-        stake=args.stake,
-        targets=targets,
-        steps_count=args.steps,
-        weight_increment=args.weight_increment,
-    )
 
     print(f"date={args.date}")
     print(f"stake={args.stake}")
@@ -211,26 +276,28 @@ def main() -> None:
     print(f"candidate_targets={list(targets)}")
     print(f"steps={args.steps}")
     print(f"weight_increment={args.weight_increment}%")
+    print(f"modes={list(modes)}")
     print()
 
-    best = results[0]
-    print("BEST_SCHEME")
-    print(f"  steps: {format_steps(best.steps)}")
-    print(f"  cost_usd: {best.total_cost_usd:.2f}")
-    print(f"  revenue_usd: {best.total_revenue_usd:.2f}")
-    print(f"  profit_usd: {best.total_profit_usd:.2f}")
-    print(f"  roi_pct: {best.roi_pct:.2f}")
-    print(f"  fills_by_step: {list(best.per_step_fill_counts)}")
-    print()
+    if "full_exit_single" in modes:
+        print_mode_results(
+            "full_exit_single",
+            optimize_full_exit_single(swans, args.stake, targets),
+            args.top,
+        )
 
-    print(f"TOP_{args.top}_SCHEMES")
-    for idx, result in enumerate(results[: args.top], start=1):
-        print(
-            f"{idx}. {format_steps(result.steps)} | "
-            f"profit=${result.total_profit_usd:.2f} | "
-            f"revenue=${result.total_revenue_usd:.2f} | "
-            f"roi={result.roi_pct:.2f}% | "
-            f"fills={list(result.per_step_fill_counts)}"
+    if "ascending_ladder" in modes:
+        print_mode_results(
+            "ascending_ladder",
+            optimize_ascending_ladder(swans, args.stake, targets, args.steps, args.weight_increment),
+            args.top,
+        )
+
+    if "fixed_tail_500" in modes:
+        print_mode_results(
+            "fixed_tail_500",
+            optimize_fixed_tail_500(swans, args.stake, targets, args.steps, args.weight_increment),
+            args.top,
         )
 
 
