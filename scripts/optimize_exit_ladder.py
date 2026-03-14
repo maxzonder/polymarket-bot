@@ -9,9 +9,8 @@ Variants supported:
    - exactly N strictly increasing steps.
    - weights are optimized and must sum to 100%.
 3. fixed_tail_500:
-   - 90% is optimized across profitable targets.
+   - 90% is sold at one optimized single target.
    - final 10% is always sold at 500x.
-   - total steps defaults to 5, so optimized front side has 4 steps.
 
 Execution model:
 - A swan is buyable if entry_volume_usdc >= stake.
@@ -215,18 +214,14 @@ def optimize_fixed_tail_500(
 ) -> List[SchemeResult]:
     if 500 not in targets:
         raise ValueError("fixed_tail_500 mode requires 500 in --targets")
-    if steps_count < 2:
-        raise ValueError("fixed_tail_500 needs at least 2 steps")
-
-    front_steps = steps_count - 1
-    front_targets = tuple(t for t in targets if t < 500)
+    front_targets = tuple(t for t in targets if t != 500)
     results = []
-    weight_vectors = list(generate_weight_vectors(front_steps, weight_increment, total_weight=0.9))
-    for target_vector in itertools.combinations_with_replacement(front_targets, front_steps):
-        for weight_vector in weight_vectors:
-            steps = tuple(Step(target_x=t, weight=w) for t, w in zip(target_vector, weight_vector))
-            steps = steps + (Step(target_x=500, weight=0.1),)
-            results.append(evaluate_scheme(swans, stake, steps, mode="fixed_tail_500"))
+    for target in front_targets:
+        steps = (
+            Step(target_x=target, weight=0.9),
+            Step(target_x=500, weight=0.1),
+        )
+        results.append(evaluate_scheme(swans, stake, steps, mode="fixed_tail_500"))
     results.sort(key=lambda r: (r.total_profit_usd, r.total_revenue_usd, r.roi_pct), reverse=True)
     return results
 
