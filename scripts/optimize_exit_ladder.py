@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""
+Find the most profitable 5-step exit ladder for one trading day.
+
+Model assumptions:
+- Input data comes from token_swans in polymarket_dataset.db.
+- A swan is buyable if entry_volume_usdc >= stake.
+- A tranche at target X is fillable only if:
+  1) possible_x >= X
+  2) exit_volume_usdc is enough to cover cumulative gross proceeds sold up to that step.
+- Tranches are sold in order; if one step cannot be filled, later steps are not filled.
+
+Search space:
+- Targets are chosen from a discrete set, with repetition allowed.
+- Exactly 5 steps.
+- Weights are searched in configurable increments (default 10%) and must sum to 100%.
+
+This is a liquidity-aware approximation, not a full order-book simulator.
+"""
+
+from __future__ import annotations
+
+import argparse
+import itertools
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Sequence, Tuple
+
+
+DEFAULT_TARGETS = (10, 20, 30, 40, 50, 100, 200, 500, 1000)
+DEFAULT_STEPS = 5
+DEFAULT_WEIGHT_INCREMENT = 10  # percent
+DEFAULT_TOP_N = 10
+
+
+@dataclass(frozen=True)
+class Swan:
+    market_id: str
+    token_id: str
+    possible_x: float
+    entry_volume_usdc: float
+    exit_volume_usdc: float
+
+
+@dataclass(frozen=True)
+class Step:
+    target_x: int
+    weight: float  # 0..1
+
+
+@dataclass
+class SchemeResult:
+    steps: Tuple[Step, ...]
+    buyable_swans: int
+    total_cost_usd: float
+    total_revenue_usd: float
+    total_profit_usd: float
+    roi_pct: float
+    per_step_fill_counts: Tuple[int, ...]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Optimize 5-step exit ladder for one day")
+    parser.add_argument("--db", default="polymarket_dataset.db", help="Path to SQLite DB")
+    parser.add_argument("--date", required=True, help="Trading day, e.g. 2026-02-28")
+    parser.add_argument("--stake", type=float, default=1.0, help="Stake per swan in USDC")
+    parser.add_argument(
+        "--targets",
+        default=",".join(str(x) for x in DEFAULT_TARGETS),
+        help="Comma-separated candidate take-profit multipliers",
+    )
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS, help="Number of ladder steps")
+    parser.add_argument(
+        "--weight-increment",
+        type=int,
+        default=DEFAULT_WEIGHT_INCREMENT,
+        help="Weight increment in percent. Default 10 means weights like 10%%, 20%%, ...",
+    )
+    parser.add_argument("--top", type=int, default=DEFAULT_TOP_N, help="How many best schemes to print")
+    return parser.parse_args()
+
+
+def parse_targets(raw: str) -> Tuple[int, ...]:
+    targets = tuple(sorted({int(x.strip()) for x in raw.split(",") if x.strip()}))
+    if not targets:
+        raise ValueError("No targets provided")
+    return targets
+
+
+def load_swans(db_path: Path, date: str, stake: float) -> List[Swan]:
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    rows = cur.execute(
+        """
+        SELECT market_id, token_id, possible_x, entry_volume_usdc, exit_volume_usdc
+        FROM token_swans
+        WHERE date = ? AND entry_volume_usdc >= ?
+        """,
+        (date, stake),
+    ).fetchall()
+    conn.close()
+    return [
+        Swan(
+            market_id=row["market_id"],
+            token_id=row["token_id"],
+            possible_x=float(row["possible_x"]),
+            entry_volume_usdc=float(row["entry_volume_usdc"]),
+            exit_volume_usdc=float(row["exit_volume_usdc"]),
+        )
+        for row in rows
+    ]
+
+
+def generate_weight_vectors(steps: int, increment_pct: int) -> Iterable[Tuple[float, ...]]:
+    if 100 % increment_pct != 0:
+        raise ValueError("weight_increment must divide 100 exactly")
+    units_total = 100 // increment_pct
+    # Positive compositions only: each step gets at least one unit.
+    for cuts in itertools.combinations(range(1, units_total), steps - 1):
+        prev = 0
+        parts = []
+        for cut in cuts:
+            parts.append(cut - prev)
+            prev = cut
+        parts.append(units_total - prev)
+        yield tuple(part * increment_pct / 100.0 for part in parts)
+
+
+def evaluate_scheme(swans: Sequence[Swan], stake: float, steps: Sequence[Step]) -> SchemeResult:
+    fill_counts = [0] * len(steps)
+    total_revenue = 0.0
+
+    for swan in swans:
+        cumulative_required = 0.0
+        for idx, step in enumerate(steps):
+            tranche_gross = stake * step.weight * step.target_x
+            required_after_fill = cumulative_required + tranche_gross
+            if swan.possible_x >= step.target_x and swan.exit_volume_usdc >= required_after_fill:
+                total_revenue += tranche_gross
+                cumulative_required = required_after_fill
+                fill_counts[idx] += 1
+            else:
+                break
+
+    total_cost = len(swans) * stake
+    total_profit = total_revenue - total_cost
+    roi_pct = (total_profit / total_cost * 100.0) if total_cost else 0.0
+    return SchemeResult(
+        steps=tuple(steps),
+        buyable_swans=len(swans),
+        total_cost_usd=total_cost,
+        total_revenue_usd=total_revenue,
+        total_profit_usd=total_profit,
+        roi_pct=roi_pct,
+        per_step_fill_counts=tuple(fill_counts),
+    )
+
+
+def optimize(
+    swans: Sequence[Swan],
+    stake: float,
+    targets: Sequence[int],
+    steps_count: int,
+    weight_increment: int,
+) -> List[SchemeResult]:
+    weight_vectors = list(generate_weight_vectors(steps_count, weight_increment))
+    target_vectors = itertools.combinations_with_replacement(targets, steps_count)
+
+    results: List[SchemeResult] = []
+    for target_vector in target_vectors:
+        for weight_vector in weight_vectors:
+            steps = tuple(
+                Step(target_x=target_x, weight=weight)
+                for target_x, weight in zip(target_vector, weight_vector)
+            )
+            results.append(evaluate_scheme(swans, stake, steps))
+
+    results.sort(
+        key=lambda r: (r.total_profit_usd, r.total_revenue_usd, r.roi_pct),
+        reverse=True,
+    )
+    return results
+
+
+def format_steps(steps: Sequence[Step]) -> str:
+    return " | ".join(f"{int(step.weight * 100)}% @ {step.target_x}x" for step in steps)
+
+
+def main() -> None:
+    args = parse_args()
+    db_path = Path(args.db)
+    targets = parse_targets(args.targets)
+
+    swans = load_swans(db_path, args.date, args.stake)
+    if not swans:
+        raise SystemExit(f"No buyable swans found for {args.date} with stake={args.stake}")
+
+    results = optimize(
+        swans=swans,
+        stake=args.stake,
+        targets=targets,
+        steps_count=args.steps,
+        weight_increment=args.weight_increment,
+    )
+
+    print(f"date={args.date}")
+    print(f"stake={args.stake}")
+    print(f"buyable_swans={len(swans)}")
+    print(f"candidate_targets={list(targets)}")
+    print(f"steps={args.steps}")
+    print(f"weight_increment={args.weight_increment}%")
+    print()
+
+    best = results[0]
+    print("BEST_SCHEME")
+    print(f"  steps: {format_steps(best.steps)}")
+    print(f"  cost_usd: {best.total_cost_usd:.2f}")
+    print(f"  revenue_usd: {best.total_revenue_usd:.2f}")
+    print(f"  profit_usd: {best.total_profit_usd:.2f}")
+    print(f"  roi_pct: {best.roi_pct:.2f}")
+    print(f"  fills_by_step: {list(best.per_step_fill_counts)}")
+    print()
+
+    print(f"TOP_{args.top}_SCHEMES")
+    for idx, result in enumerate(results[: args.top], start=1):
+        print(
+            f"{idx}. {format_steps(result.steps)} | "
+            f"profit=${result.total_profit_usd:.2f} | "
+            f"revenue=${result.total_revenue_usd:.2f} | "
+            f"roi={result.roi_pct:.2f}% | "
+            f"fills={list(result.per_step_fill_counts)}"
+        )
+
+
+if __name__ == "__main__":
+    main()
