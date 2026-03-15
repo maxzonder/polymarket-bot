@@ -33,12 +33,12 @@ else:
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
-_PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-DATABASE_DIR = os.path.abspath(os.path.join(_PROJECT_ROOT, 'database'))
+from utils.paths import DATABASE_DIR, ensure_runtime_dirs
 
 PAGE_SIZE = 100
 SLEEP_MARKETS_PAGE = 0.05
 
+ensure_runtime_dirs()
 logger = setup_logger("collector")
 
 

@@ -37,10 +37,9 @@ else:
     from data_collector import state_db, analyzer
     from utils.logger import setup_logger
 
-_PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-DATABASE_DIR = os.path.abspath(os.path.join(_PROJECT_ROOT, 'database'))
-DB_PATH = os.path.abspath(os.path.join(_PROJECT_ROOT, 'polymarket_dataset.db'))
+from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
 
+ensure_runtime_dirs()
 logger = setup_logger("parser")
 
 SCHEMA = """

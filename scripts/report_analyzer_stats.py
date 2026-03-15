@@ -19,13 +19,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
+import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.paths import DB_PATH
 
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Build overview stats from token_swans")
-    ap.add_argument("--db", default="polymarket_dataset.db", help="Path to SQLite DB")
+    ap.add_argument("--db", default=str(DB_PATH), help="Path to SQLite DB")
     ap.add_argument("--date-from", help="Inclusive lower date bound, YYYY-MM-DD")
     ap.add_argument("--date-to", help="Inclusive upper date bound, YYYY-MM-DD")
     ap.add_argument("--top", type=int, default=10, help="How many top rows to print in leaderboard sections")

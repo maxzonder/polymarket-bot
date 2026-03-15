@@ -10,17 +10,17 @@ collector_state.db — операционный журнал пайплайна.
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from datetime import datetime, timezone
 
-_PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-STATE_DB_PATH = os.path.join(_PROJECT_ROOT, 'database', 'collector_state.db')
+from utils.paths import DATABASE_DIR, ensure_runtime_dirs
+
+STATE_DB_PATH = DATABASE_DIR / 'collector_state.db'
 
 
 def _conn() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(STATE_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(STATE_DB_PATH)
+    ensure_runtime_dirs()
+    conn = sqlite3.connect(str(STATE_DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
 

@@ -33,10 +33,9 @@ from typing import Optional
 
 from utils.logger import setup_logger
 
-_PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..")
-DB_PATH = os.path.abspath(os.path.join(_PROJECT_ROOT, "polymarket_dataset.db"))
-DATABASE_DIR = os.path.abspath(os.path.join(_PROJECT_ROOT, "database"))
+from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
 
+ensure_runtime_dirs()
 logger = setup_logger("analyzer")
 
 DEFAULT_MIN_ENTRY_LIQUIDITY = 10.0

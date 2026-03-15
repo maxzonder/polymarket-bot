@@ -27,10 +27,15 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import os
 import sqlite3
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from utils.paths import DB_PATH
 
 DEFAULT_TARGETS = (5, 10, 20, 30, 40, 50, 100, 200, 500, 1000)
 DEFAULT_STEPS = 5
@@ -68,7 +73,7 @@ class SchemeResult:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Optimize exit schemes for one day")
-    parser.add_argument("--db", default="polymarket_dataset.db", help="Path to SQLite DB")
+    parser.add_argument("--db", default=str(DB_PATH), help="Path to SQLite DB")
     parser.add_argument("--date", required=True, help="Trading day, e.g. 2026-02-28")
     parser.add_argument("--stake", type=float, default=1.0, help="Stake per swan in USDC")
     parser.add_argument(

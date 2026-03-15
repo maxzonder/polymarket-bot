@@ -35,13 +35,13 @@ else:
 
 DATA_API_BASE = "https://data-api.polymarket.com"
 
-_PROJECT_ROOT = os.path.join(os.path.dirname(__file__), "..")
-DATABASE_DIR = os.path.abspath(os.path.join(_PROJECT_ROOT, "database"))
+from utils.paths import DATABASE_DIR, ensure_runtime_dirs
 
 PAGE_LIMIT = 1000
 MAX_OFFSET = 3000
 SLEEP_TRADES = 0.1
 
+ensure_runtime_dirs()
 logger = setup_logger("trades_collector")
 
 
