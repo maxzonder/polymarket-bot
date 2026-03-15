@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Optimize exit schemes for one trading day using token_swans.
+Optimize exit schemes for one trading day using token_swans_v3.
 
 Variants supported:
 1. full_exit_single:
@@ -14,6 +14,7 @@ Variants supported:
 
 Execution model:
 - A swan is buyable if entry_volume_usdc >= stake.
+- Data source: token_swans_v3 (real swans only).
 - A tranche at target X is fillable only if:
   1) possible_x >= X
   2) exit_volume_usdc is enough to cover cumulative gross proceeds sold up to that step.
@@ -114,7 +115,7 @@ def load_swans(db_path: Path, date: str, stake: float) -> List[Swan]:
     rows = cur.execute(
         """
         SELECT market_id, token_id, possible_x, entry_volume_usdc, exit_volume_usdc
-        FROM token_swans
+        FROM token_swans_v3
         WHERE date = ? AND entry_volume_usdc >= ?
         """,
         (date, stake),
