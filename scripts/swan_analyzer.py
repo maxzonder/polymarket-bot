@@ -1,24 +1,25 @@
 """
-swan_analyzer.py — Improved Swan Detector
+swan_analyzer.py — Improved Swan Detector (v2)
 
 Отличия от analyzer.py (Zigzag):
 1. Учитывает финальную выплату $1 при разрешении рынка (is_winner=1).
-   Реальный икс = 1.0 / entry_min_price, а не просто max_price / entry_min_price.
-2. Не пропускает "удержанные" победы (токен вырос и остался наверху до закрытия).
-   Событие записывается не только при откате, но и при любом значимом росте.
+   real_x = 1.0 / entry_min_price для победителей (не просто max_price / entry_min_price).
+2. Не пропускает "удержанные" победы — токен вырос и остался наверху до закрытия.
 3. Одно событие на один вход в зону дна (не множество зигзагов на один рынок).
+4. Нет фильтра по времени — стратегия рестинг-лимиток не зависит от длительности.
+   Нам важна только ликвидность: сколько можно купить на дне и сколько можно продать на выходе.
 
-Логика:
-    Для каждого токена:
-    - Найти момент, когда цена упала ниже entry_threshold (по умолчанию $0.02)
-    - Посчитать ликвидность и длительность на дне
-    - Посчитать real_x = 1/entry_min если winner, иначе max_price_after / entry_min
-    - Записать в таблицу swans_v2
+Фильтры:
+    - entry_volume_usdc >= min_entry_usdc  (ликвидность на дне — можно войти)
+    - exit_volume_usdc >= min_exit_usdc    (ликвидность на выходе — можно продать)
+      Для победителей (is_winner=1) выход = выплата $1 от Polymarket, exit_volume не требуется.
+    - real_x >= min_real_x
 
 Использование:
     python scripts/swan_analyzer.py --recompute
     python scripts/swan_analyzer.py --date 2026-02-28
     python scripts/swan_analyzer.py --date-from 2026-02-01 --date-to 2026-02-28
+    python scripts/swan_analyzer.py --recompute --min-entry-usdc 1.0 --min-exit-usdc 5.0 --target-exit-x 5
 """
 
 from __future__ import annotations
@@ -40,37 +41,40 @@ logger = setup_logger("swan_analyzer")
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 DEFAULT_ENTRY_THRESHOLD = 0.02   # цена дна: < $0.02 = зона входа
-DEFAULT_MIN_ENTRY_USDC = 10.0    # мин. ликвидность на дне
-DEFAULT_MIN_REAL_X = 5.0         # минимальный реальный икс чтобы считать "лебедем"
-DEFAULT_MIN_FLOOR_MINUTES = 5.0  # мин. время сидения на дне
+DEFAULT_MIN_ENTRY_USDC  = 1.0    # мин. ликвидность на дне (объём сделок < threshold)
+DEFAULT_MIN_EXIT_USDC   = 5.0    # мин. ликвидность на выходе (объём сделок >= exit_price)
+DEFAULT_TARGET_EXIT_X   = 5.0    # целевой выход для проверки exit_liquidity
+DEFAULT_MIN_REAL_X      = 5.0    # минимальный реальный икс
 
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS swans_v2 (
-    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_id                    TEXT NOT NULL,
-    market_id                   TEXT NOT NULL,
-    date                        TEXT NOT NULL,
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_id                TEXT NOT NULL,
+    market_id               TEXT NOT NULL,
+    date                    TEXT NOT NULL,
 
     -- Параметры запуска анализа
-    entry_threshold             REAL NOT NULL,
-    min_entry_liquidity         REAL NOT NULL,
-    min_real_x                  REAL NOT NULL,
+    entry_threshold         REAL NOT NULL,
+    min_entry_liquidity     REAL NOT NULL,
+    min_exit_liquidity      REAL NOT NULL,
+    target_exit_x           REAL NOT NULL,
+    min_real_x              REAL NOT NULL,
 
     -- Зона входа (дно)
-    entry_min_price             REAL NOT NULL,
-    entry_volume_usdc           REAL NOT NULL,
-    entry_trade_count           INTEGER NOT NULL,
-    entry_ts_first              INTEGER NOT NULL,
-    entry_ts_last               INTEGER NOT NULL,
-    floor_duration_seconds      INTEGER NOT NULL,
+    entry_min_price         REAL NOT NULL,
+    entry_volume_usdc       REAL NOT NULL,
+    entry_trade_count       INTEGER NOT NULL,
+    entry_ts_first          INTEGER NOT NULL,
+    entry_ts_last           INTEGER NOT NULL,
 
     -- Выход / результат
-    max_price_in_history        REAL NOT NULL,
-    last_price_in_history       REAL NOT NULL,
-    is_winner                   INTEGER NOT NULL DEFAULT 0,
-    real_x                      REAL NOT NULL,
-    resolution_x                REAL NOT NULL,
-    time_to_last_trade_hours    REAL,
+    target_exit_price       REAL NOT NULL,
+    exit_volume_usdc        REAL NOT NULL,   -- объём сделок >= target_exit_price (0 для победителей)
+    max_price_in_history    REAL NOT NULL,
+    last_price_in_history   REAL NOT NULL,
+    is_winner               INTEGER NOT NULL DEFAULT 0,
+    real_x                  REAL NOT NULL,   -- итоговый икс (с учётом выплаты $1 для победителей)
+    resolution_x            REAL NOT NULL,   -- 1/entry если winner, иначе = real_x
 
     UNIQUE(token_id, date)
 )
@@ -103,6 +107,7 @@ def load_trades(date_str: str, market_id: str, token_id: str) -> list[dict]:
 
 
 def _sum_usdc(trades: list[dict]) -> float:
+    """Суммирует объём в USDC (price * size) по списку трейдов."""
     total = 0.0
     for t in trades:
         try:
@@ -117,20 +122,29 @@ def analyze_token(
     is_winner: int,
     entry_threshold: float,
     min_entry_usdc: float,
+    min_exit_usdc: float,
+    target_exit_x: float,
     min_real_x: float,
-    min_floor_minutes: float,
 ) -> Optional[dict]:
     """
     Анализирует историю трейдов одного токена.
     Возвращает dict с метриками или None если лебедь не найден.
+
+    Логика:
+    1. Найти первую сделку ниже entry_threshold → это вход в зону дна
+    2. Собрать все сделки пока цена < entry_threshold → entry_volume
+    3. Проверить entry_volume >= min_entry_usdc
+    4. Для не-победителей: проверить exit_volume >= min_exit_usdc
+       exit_volume = объём сделок по цене >= entry_min_price * target_exit_x
+    5. Для победителей (is_winner=1): Polymarket сам выплачивает $1 → exit проверять не нужно
+    6. real_x = 1/entry_min если winner, иначе max(price_after) / entry_min
     """
-    if len(trades) < 2:
+    if not trades:
         return None
 
     prices = [float(t["price"]) for t in trades]
 
-    # --- Найти зону дна ---
-    # Ищем первый трейд ниже entry_threshold
+    # --- 1. Найти вход в зону дна ---
     floor_start_idx = None
     for i, p in enumerate(prices):
         if p < entry_threshold:
@@ -138,9 +152,10 @@ def analyze_token(
             break
 
     if floor_start_idx is None:
-        return None  # цена никогда не падала до порога
+        return None
 
-    # Собрать все трейды пока цена остаётся < entry_threshold (contiguous zone)
+    # --- 2. Собрать все трейды в зоне дна ---
+    # (непрерывная зона, с допуском на кратковременные выбросы вверх)
     floor_trades = []
     floor_end_idx = floor_start_idx
     for i in range(floor_start_idx, len(trades)):
@@ -148,8 +163,7 @@ def analyze_token(
             floor_trades.append(trades[i])
             floor_end_idx = i
         else:
-            # Допускаем небольшие всплески выше порога (шум)
-            # Но если цена ушла выше threshold и больше не возвращалась — выходим
+            # Допускаем до 5 трейдов выше порога — могут быть шумовые сделки
             returned = any(p < entry_threshold for p in prices[i:i + 5])
             if not returned:
                 break
@@ -157,7 +171,7 @@ def analyze_token(
     if not floor_trades:
         return None
 
-    # --- Метрики зоны входа ---
+    # --- 3. Проверить ликвидность на входе ---
     entry_volume = _sum_usdc(floor_trades)
     if entry_volume < min_entry_usdc:
         return None
@@ -165,53 +179,55 @@ def analyze_token(
     entry_min_price = min(float(t["price"]) for t in floor_trades)
     entry_ts_first = int(floor_trades[0]["timestamp"])
     entry_ts_last = int(floor_trades[-1]["timestamp"])
-    floor_duration_sec = max(0, entry_ts_last - entry_ts_first)
+    target_exit_price = entry_min_price * target_exit_x
 
-    if floor_duration_sec < min_floor_minutes * 60:
-        return None
-
-    # --- Метрики после зоны входа ---
+    # --- 4. Метрики после зоны входа ---
     after_floor = trades[floor_end_idx + 1:]
-    if not after_floor and is_winner == 0:
-        return None  # нет движения и не победил
-
     max_price_after = max((float(t["price"]) for t in after_floor), default=entry_min_price)
     max_price_overall = max(prices)
     last_price = prices[-1]
 
-    # --- Считаем real_x ---
-    # Если рынок разрешился в нашу пользу — Polymarket заплатит $1 за токен
+    # --- 5. Ликвидность на выходе (только для не-победителей) ---
+    exit_volume = 0.0
+    if is_winner == 1:
+        # Polymarket выплачивает $1 — exit ликвидность не нужна
+        exit_volume = 0.0
+    else:
+        # Считаем объём сделок по цене >= target_exit_price (после зоны входа)
+        exit_trades = [t for t in after_floor if float(t["price"]) >= target_exit_price]
+        exit_volume = _sum_usdc(exit_trades)
+        if exit_volume < min_exit_usdc:
+            return None
+
+    # --- 6. Считаем real_x ---
     if is_winner == 1:
         real_x = 1.0 / entry_min_price
     else:
-        # Используем максимальную цену после зоны входа
         real_x = max_price_after / entry_min_price if max_price_after > entry_min_price else 1.0
 
-    # resolution_x — "чистый" икс от разрешения (только для победителей)
     resolution_x = (1.0 / entry_min_price) if is_winner == 1 else real_x
 
     if real_x < min_real_x:
         return None
 
-    last_trade_ts = int(trades[-1]["timestamp"])
-    time_to_last_hours = (last_trade_ts - entry_ts_first) / 3600.0
-
     return {
         "entry_threshold": entry_threshold,
         "min_entry_liquidity": min_entry_usdc,
+        "min_exit_liquidity": min_exit_usdc,
+        "target_exit_x": target_exit_x,
         "min_real_x": min_real_x,
         "entry_min_price": entry_min_price,
         "entry_volume_usdc": entry_volume,
         "entry_trade_count": len(floor_trades),
         "entry_ts_first": entry_ts_first,
         "entry_ts_last": entry_ts_last,
-        "floor_duration_seconds": floor_duration_sec,
+        "target_exit_price": target_exit_price,
+        "exit_volume_usdc": exit_volume,
         "max_price_in_history": max_price_overall,
         "last_price_in_history": last_price,
         "is_winner": is_winner,
         "real_x": real_x,
         "resolution_x": resolution_x,
-        "time_to_last_trade_hours": time_to_last_hours,
     }
 
 
@@ -223,8 +239,9 @@ def run(
     recompute: bool = False,
     entry_threshold: float = DEFAULT_ENTRY_THRESHOLD,
     min_entry_usdc: float = DEFAULT_MIN_ENTRY_USDC,
+    min_exit_usdc: float = DEFAULT_MIN_EXIT_USDC,
+    target_exit_x: float = DEFAULT_TARGET_EXIT_X,
     min_real_x: float = DEFAULT_MIN_REAL_X,
-    min_floor_minutes: float = DEFAULT_MIN_FLOOR_MINUTES,
 ) -> None:
     ensure_runtime_dirs()
 
@@ -273,11 +290,10 @@ def run(
     logger.info(
         f"Processing {total} tokens | "
         f"threshold=${entry_threshold}, min_entry=${min_entry_usdc}, "
-        f"min_real_x={min_real_x}x, min_floor={min_floor_minutes}m"
+        f"min_exit=${min_exit_usdc}, target_exit={target_exit_x}x, min_real_x={min_real_x}x"
     )
 
     ok = no_trades = no_swan = rejected = errors = 0
-    swans_total = 0
     t0 = time.monotonic()
 
     for i, (token_id, market_id, is_winner) in enumerate(tokens, 1):
@@ -307,8 +323,9 @@ def run(
                 is_winner=is_winner or 0,
                 entry_threshold=entry_threshold,
                 min_entry_usdc=min_entry_usdc,
+                min_exit_usdc=min_exit_usdc,
+                target_exit_x=target_exit_x,
                 min_real_x=min_real_x,
-                min_floor_minutes=min_floor_minutes,
             )
         except Exception as e:
             logger.warning(f"{token_id}: analysis error — {e}")
@@ -324,22 +341,27 @@ def run(
                 """
                 INSERT INTO swans_v2 (
                     token_id, market_id, date,
-                    entry_threshold, min_entry_liquidity, min_real_x,
+                    entry_threshold, min_entry_liquidity, min_exit_liquidity,
+                    target_exit_x, min_real_x,
                     entry_min_price, entry_volume_usdc, entry_trade_count,
-                    entry_ts_first, entry_ts_last, floor_duration_seconds,
+                    entry_ts_first, entry_ts_last,
+                    target_exit_price, exit_volume_usdc,
                     max_price_in_history, last_price_in_history,
-                    is_winner, real_x, resolution_x, time_to_last_trade_hours
+                    is_winner, real_x, resolution_x
                 ) VALUES (
                     :token_id, :market_id, :date,
-                    :entry_threshold, :min_entry_liquidity, :min_real_x,
+                    :entry_threshold, :min_entry_liquidity, :min_exit_liquidity,
+                    :target_exit_x, :min_real_x,
                     :entry_min_price, :entry_volume_usdc, :entry_trade_count,
-                    :entry_ts_first, :entry_ts_last, :floor_duration_seconds,
+                    :entry_ts_first, :entry_ts_last,
+                    :target_exit_price, :exit_volume_usdc,
                     :max_price_in_history, :last_price_in_history,
-                    :is_winner, :real_x, :resolution_x, :time_to_last_trade_hours
+                    :is_winner, :real_x, :resolution_x
                 ) ON CONFLICT(token_id, date) DO UPDATE SET
                     real_x=excluded.real_x,
                     is_winner=excluded.is_winner,
-                    resolution_x=excluded.resolution_x
+                    resolution_x=excluded.resolution_x,
+                    exit_volume_usdc=excluded.exit_volume_usdc
                 """,
                 {
                     "token_id": token_id,
@@ -350,7 +372,6 @@ def run(
             )
             conn.commit()
             ok += 1
-            swans_total += 1
         except Exception as e:
             logger.warning(f"{token_id}: DB insert error — {e}")
             rejected += 1
@@ -363,46 +384,51 @@ def run(
             logger.info(
                 f"{i}/{total} — {rate:.0f}/s ETA ~{eta}s | "
                 f"ok={ok} no_trades={no_trades} no_swan={no_swan} "
-                f"rejected={rejected} swans_total={swans_total}"
+                f"rejected={rejected} errors={errors}"
             )
 
     elapsed = int(time.monotonic() - t0)
-
-    # Финальная статистика
     row = conn.execute(
-        "SELECT COUNT(*), AVG(real_x), MAX(real_x), "
-        "SUM(is_winner), AVG(entry_volume_usdc) FROM swans_v2"
+        "SELECT COUNT(*), AVG(real_x), MAX(real_x), SUM(is_winner), AVG(entry_volume_usdc) FROM swans_v2"
     ).fetchone()
 
     logger.info(
         f"Done in {elapsed}s | ok={ok} no_trades={no_trades} no_swan={no_swan} "
-        f"rejected={rejected} errors={errors} swans_total={swans_total}"
+        f"rejected={rejected} errors={errors}"
     )
     if row and row[0]:
         winners = row[3] or 0
         logger.info(
-            f"Stats: total_swans={row[0]}, avg_real_x={row[1]:.2f}, "
-            f"max_real_x={row[2]:.0f}, winners={winners} ({winners/row[0]*100:.0f}%), "
-            f"avg_entry_liq=${row[4]:.2f}"
+            f"Stats: total={row[0]}, avg_real_x={row[1]:.2f}x, max_real_x={row[2]:.0f}x, "
+            f"winners={winners} ({winners/row[0]*100:.0f}%), avg_entry_liq=${row[4]:.2f}"
         )
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Polymarket Swan Analyzer v2 — учитывает выплату $1 при разрешении")
-    ap.add_argument("--date", metavar="YYYY-MM-DD", help="Только один день")
-    ap.add_argument("--date-from", metavar="YYYY-MM-DD", help="Начало диапазона")
-    ap.add_argument("--date-to", metavar="YYYY-MM-DD", help="Конец диапазона")
-    ap.add_argument("--recompute", action="store_true", help="Пересчитать заново (очищает swans_v2)")
+    ap = argparse.ArgumentParser(
+        description="Swan Analyzer v2 — no time filters, only entry+exit liquidity"
+    )
+    ap.add_argument("--date", metavar="YYYY-MM-DD")
+    ap.add_argument("--date-from", metavar="YYYY-MM-DD")
+    ap.add_argument("--date-to", metavar="YYYY-MM-DD")
+    ap.add_argument("--recompute", action="store_true", help="Очистить swans_v2 и пересчитать")
     ap.add_argument("--entry-threshold", type=float, default=DEFAULT_ENTRY_THRESHOLD,
                     help=f"Порог цены дна (default: ${DEFAULT_ENTRY_THRESHOLD})")
-    ap.add_argument("--min-entry-usdc", type=float, default=DEFAULT_MIN_ENTRY_USDC)
+    ap.add_argument("--min-entry-usdc", type=float, default=DEFAULT_MIN_ENTRY_USDC,
+                    help=f"Мин. ликвидность на входе (default: ${DEFAULT_MIN_ENTRY_USDC})")
+    ap.add_argument("--min-exit-usdc", type=float, default=DEFAULT_MIN_EXIT_USDC,
+                    help=f"Мин. ликвидность на выходе (default: ${DEFAULT_MIN_EXIT_USDC})")
+    ap.add_argument("--target-exit-x", type=float, default=DEFAULT_TARGET_EXIT_X,
+                    help=f"Целевой икс для проверки exit liquidity (default: {DEFAULT_TARGET_EXIT_X}x)")
     ap.add_argument("--min-real-x", type=float, default=DEFAULT_MIN_REAL_X)
-    ap.add_argument("--min-floor-minutes", type=float, default=DEFAULT_MIN_FLOOR_MINUTES)
     args = ap.parse_args()
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+
+    # Пересоздаём таблицу (схема изменилась — убрали floor_duration, добавили exit_volume)
+    conn.execute("DROP TABLE IF EXISTS swans_v2") if args.recompute else None
     init_db(conn)
 
     run(
@@ -410,11 +436,12 @@ def main() -> None:
         filter_date=args.date,
         date_from=args.date_from,
         date_to=args.date_to,
-        recompute=args.recompute,
+        recompute=False,  # уже очищено выше если recompute
         entry_threshold=args.entry_threshold,
         min_entry_usdc=args.min_entry_usdc,
+        min_exit_usdc=args.min_exit_usdc,
+        target_exit_x=args.target_exit_x,
         min_real_x=args.min_real_x,
-        min_floor_minutes=args.min_floor_minutes,
     )
     conn.close()
 
