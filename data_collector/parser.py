@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -96,7 +97,7 @@ def parse_ts(s: Optional[str]) -> Optional[int]:
 
 CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("crypto", (
-        "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "doge", "xrp", "usd", "gold", "silver",
+        "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "doge", "xrp", "gold", "silver",
         "oil", "nasdaq", "s&p", "spy", "qqq", "fed", "cpi", "rate cut", "treasury", "eur", "jpy", "rial",
     )),
     ("sports", (
@@ -163,7 +164,7 @@ def infer_category(data: dict) -> Optional[str]:
     ])).lower()
 
     for category, keywords in CATEGORY_KEYWORDS:
-        if any(keyword in haystack for keyword in keywords):
+        if any(re.search(rf"\b{re.escape(k)}\b", haystack) for k in keywords):
             return category
 
     return None
