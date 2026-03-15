@@ -1,77 +1,74 @@
 """
 Polymarket Data Collector
 
-Скачивает закрытые рынки за указанный диапазон дат и историю цен по каждому токену.
+Downloads closed market JSONs for a given date range.
 
-Структура файлов:
+Structure:
     database/
         yyyy-mm-dd/
-            {market_id}.json               ← полный объект Market (Gamma API)
-            {market_id}_hours/
-                {token_id}.json            ← history [{t, p}, ...] (CLOB /prices-history)
+            {market_id}.json   ← full Market object from Gamma API
 
-Использование:
+Usage:
     python -m data_collector.collector --start 2026-01-01 --end 2026-01-31
 """
+
+from __future__ import annotations
+
 import argparse
 import json
 import os
+import sys
 import time
 from datetime import date, timedelta
 
 import requests
 
-from data_collector import state_db
-from utils.logger import setup_logger
+if __package__:
+    from data_collector import state_db
+    from utils.logger import setup_logger
+else:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from data_collector import state_db
+    from utils.logger import setup_logger
 
-# ── Константы ─────────────────────────────────────────────────────────────────
-GAMMA_BASE   = "https://gamma-api.polymarket.com"
-CLOB_BASE    = "https://clob.polymarket.com"
+GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 _PROJECT_ROOT = os.path.join(os.path.dirname(__file__), '..')
-DATABASE_DIR  = os.path.abspath(os.path.join(_PROJECT_ROOT, 'database'))
+DATABASE_DIR = os.path.abspath(os.path.join(_PROJECT_ROOT, 'database'))
 
 PAGE_SIZE = 100
-
-# Задержки из API_LIMITS.md:
-#   /markets       — 30 req/sec  → sleep 0.05s
-#   /prices-history — 100 req/sec → sleep 0.15s (небольшой запас)
 SLEEP_MARKETS_PAGE = 0.05
-SLEEP_PRICES       = 0.15
 
 logger = setup_logger("collector")
 
-
-# ── Пути ──────────────────────────────────────────────────────────────────────
 
 def _market_json_path(end_date: str, market_id: str) -> str:
     return os.path.join(DATABASE_DIR, end_date, f"{market_id}.json")
 
 
-def _hours_dir(end_date: str, market_id: str) -> str:
-    return os.path.join(DATABASE_DIR, end_date, f"{market_id}_hours")
-
-
-# ── Запросы к API ─────────────────────────────────────────────────────────────
-
 def fetch_markets_for_date(day: date) -> list[dict]:
     """
-    Возвращает все закрытые рынки с end_date == day.
-    Пагинирует через offset до тех пор, пока страница не окажется неполной.
+    Returns all closed markets with end_date == day.
+
+    Important:
+    - include_tag=true so market JSON contains tags/category-like metadata.
+    - paginates with offset until page is short.
     """
-    day_str  = day.isoformat()
+    day_str = day.isoformat()
     next_day = (day + timedelta(days=1)).isoformat()
 
-    markets, offset = [], 0
+    markets: list[dict] = []
+    offset = 0
 
     while True:
         params = {
-            "closed":          "true",
-            "end_date_min":    f"{day_str}T00:00:00Z",
-            "end_date_max":    f"{next_day}T00:00:00Z",
-            "volume_num_min":  50,    # отсекает мусор (Bitcoin Up/Down 5-мин и нулевые рынки) без потери реальных лебедей
-            "limit":           PAGE_SIZE,
-            "offset":          offset,
+            "closed": "true",
+            "include_tag": "true",
+            "end_date_min": f"{day_str}T00:00:00Z",
+            "end_date_max": f"{next_day}T00:00:00Z",
+            "volume_num_min": 50,
+            "limit": PAGE_SIZE,
+            "offset": offset,
         }
         resp = requests.get(f"{GAMMA_BASE}/markets", params=params, timeout=30)
         resp.raise_for_status()
@@ -92,26 +89,8 @@ def fetch_markets_for_date(day: date) -> list[dict]:
     return markets
 
 
-def fetch_price_history(token_id: str) -> list[dict]:
-    """
-    Скачивает почасовую историю цен токена за всё время (interval=max, fidelity=60).
-    Возвращает список [{t: unix_ts, p: float}, ...].
-    """
-    params = {
-        "market":   token_id,
-        "interval": "max",
-        "fidelity": 60,
-    }
-    resp = requests.get(f"{CLOB_BASE}/prices-history", params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json().get("history", [])
-
-
-# ── Сохранение файлов ─────────────────────────────────────────────────────────
-
 def save_market(end_date: str, market: dict) -> str:
-    """Сохраняет JSON рынка. Возвращает market_id."""
-    market_id = market["id"]
+    market_id = str(market["id"])
     path = _market_json_path(end_date, market_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -119,127 +98,51 @@ def save_market(end_date: str, market: dict) -> str:
     return market_id
 
 
-def save_prices(end_date: str, market_id: str, token_id: str, history: list):
-    """Сохраняет историю цен токена в {market_id}_hours/{token_id}.json."""
-    out_dir = _hours_dir(end_date, market_id)
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, f"{token_id}.json"), "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False)
-
-
-# ── Логика одного дня ─────────────────────────────────────────────────────────
-
 def collect_day(day: date):
     import time as _time
-    day_str    = day.isoformat()
+
+    day_str = day.isoformat()
     t_day_start = _time.monotonic()
+    logger.info(f"[{day_str}] Fetching markets...")
 
-    logger.info(f"[{day_str}] Start downloading markets")
-
-    # 1. Fetch market list
     try:
         markets = fetch_markets_for_date(day)
     except Exception as e:
         logger.error(f"[{day_str}] Failed to fetch markets — {e}")
         return
 
-    total       = len(markets)
-    mkt_new     = 0
-    mkt_skipped = 0
-    price_ok    = 0
-    price_err   = 0
-
+    total = len(markets)
+    saved = 0
+    errors = 0
     PROGRESS_STEP = 100
 
     logger.info(f"[{day_str}] Got {total} markets, saving JSONs...")
 
-    # ── Phase 1: download market JSONs ───────────────────────────────────────
     t0 = _time.monotonic()
     for i, market in enumerate(markets, 1):
         market_id = market.get("id")
         if not market_id:
             continue
 
-        if state_db.is_market_downloaded(day_str, market_id):
-            mkt_skipped += 1
-        else:
-            try:
-                save_market(day_str, market)
-                state_db.mark_downloaded(day_str, market_id)
-                mkt_new += 1
-            except Exception as e:
-                logger.warning(f"[{day_str}] {market_id}: failed to save market — {e}")
-                state_db.mark_error(day_str, market_id, str(e))
-
-        if i % PROGRESS_STEP == 0:
-            elapsed = _time.monotonic() - t0
-            rate = i / elapsed if elapsed > 0 else 0
-            eta  = int((total - i) / rate) if rate > 0 else 0
-            logger.info(f"[{day_str}] Markets {i}/{total} saved — {rate:.0f}/s, ETA ~{eta}s")
-
-    elapsed_markets = int(_time.monotonic() - t0)
-    logger.info(
-        f"[{day_str}] Markets done in {elapsed_markets}s — "
-        f"{mkt_new} new, {mkt_skipped} skipped. Starting price download..."
-    )
-
-    # ── Phase 2: download price history ──────────────────────────────────────
-    t0 = _time.monotonic()
-    for i, market in enumerate(markets, 1):
-        market_id = market.get("id")
-        if not market_id:
-            continue
-
-        if state_db.is_prices_downloaded(day_str, market_id):
-            price_ok += 1
-            continue
-
-        raw_tokens = market.get("clobTokenIds", [])
         try:
-            token_ids = json.loads(raw_tokens) if isinstance(raw_tokens, str) else raw_tokens
-        except Exception:
-            token_ids = []
-
-        if not token_ids:
-            logger.warning(f"[{day_str}] {market_id}: clobTokenIds empty, skipping prices")
-            continue
-
-        tokens_ok = 0
-        for token_id in token_ids:
-            try:
-                history = fetch_price_history(token_id)
-                save_prices(day_str, market_id, token_id, history)
-                tokens_ok += 1
-                logger.debug(f"[{day_str}] {market_id} | token={token_id}: {len(history)} points")
-            except Exception as e:
-                logger.warning(f"[{day_str}] {market_id} | token={token_id}: price fetch error — {e}")
-                price_err += 1
-            time.sleep(SLEEP_PRICES)
-
-        if tokens_ok == len(token_ids):
-            state_db.mark_prices_downloaded(day_str, market_id)
-            price_ok += 1
-        else:
-            state_db.mark_error(
-                day_str, market_id,
-                f"prices: downloaded {tokens_ok}/{len(token_ids)} tokens"
-            )
+            save_market(day_str, market)
+            state_db.mark_downloaded(day_str, str(market_id))
+            saved += 1
+        except Exception as e:
+            logger.warning(f"[{day_str}] {market_id}: failed to save market — {e}")
+            state_db.mark_error(day_str, str(market_id), str(e))
+            errors += 1
 
         if i % PROGRESS_STEP == 0:
             elapsed = _time.monotonic() - t0
             rate = i / elapsed if elapsed > 0 else 0
-            eta  = int((total - i) / rate) if rate > 0 else 0
-            logger.info(f"[{day_str}] Prices {i}/{total} markets — {rate:.1f}/s, ETA ~{eta}s")
+            eta = int((total - i) / rate) if rate > 0 else 0
+            logger.info(f"[{day_str}] {i}/{total} saved — {rate:.0f}/s, ETA ~{eta}s")
 
     elapsed_total = int(_time.monotonic() - t_day_start)
-    logger.info(
-        f"[{day_str}] DONE in {elapsed_total}s | total: {total} | "
-        f"new: {mkt_new} | skipped: {mkt_skipped} | "
-        f"prices ok: {price_ok} | price errors: {price_err}"
-    )
+    logger.info(f"[{day_str}] DONE in {elapsed_total}s | total: {total} | saved: {saved} | errors: {errors}")
 
 
-# ── Точка входа ───────────────────────────────────────────────────────────────
 
 def run(start: date, end: date):
     state_db.init_db()
@@ -256,11 +159,9 @@ def run(start: date, end: date):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Polymarket Data Collector — скачивает рынки и историю цен по диапазону дат"
-    )
+    parser = argparse.ArgumentParser(description="Polymarket Data Collector — downloads market JSONs for a date range")
     parser.add_argument("--start", required=True, metavar="YYYY-MM-DD", help="Начальная дата (включительно)")
-    parser.add_argument("--end",   required=True, metavar="YYYY-MM-DD", help="Конечная дата (включительно)")
+    parser.add_argument("--end", required=True, metavar="YYYY-MM-DD", help="Конечная дата (включительно)")
     args = parser.parse_args()
 
     run(
