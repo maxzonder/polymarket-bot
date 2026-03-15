@@ -60,37 +60,38 @@ GET https://gamma-api.polymarket.com/markets?closed=true&end_date_min=2026-02-01
 
 ---
 
-## 2. CLOB API — История цен
+## 2. Data API — История сделок (Raw Trades)
 
-### `GET /prices-history`
-**Используется:** Data Collector (скачать историю цен токенов для анализа).
+### `GET /trades` (или скачивание через S3 дампы)
+**Используется:** Data Collector (скачать тиковую историю сделок для анализа).
+Вместо агрегированного графика мы используем сырые сделки для точного определения экстремумов и объемов.
 
-**Параметры:**
-- `market` (required) — ID токена (`asset_id` / `clob_token_id`)
-- `startTs` — начальный timestamp (unix, опционально)
-- `endTs` — конечный timestamp (unix, опционально)
-- `interval` — интервал: `max`, `all`, `1m`, `1w`, `1d`, `6h`, `1h`
-- `fidelity` — точность в минутах (default: 1 минута). Для почасовых данных — `60`.
-
-**Пример (почасовые данные токена за всё время):**
+**Пример (через REST):**
 ```
-GET https://clob.polymarket.com/prices-history?market=<token_id>&interval=max&fidelity=60
+GET https://data-api.polymarket.com/trades?market=<market_id>
 ```
 
 **Ответ:**
 ```json
-{
-  "history": [
-    {"t": 1706745600, "p": 0.03},
-    {"t": 1706749200, "p": 0.07},
-    ...
-  ]
-}
+[
+  {
+    "id": "...",
+    "transaction_hash": "...",
+    "timestamp": "2026-02-14T10:00:00Z",
+    "price": "0.03",
+    "size": "500.0",
+    "side": "BUY",
+    "asset_id": "...",
+    "market": "..."
+  }
+]
 ```
-- `t` — unix timestamp
-- `p` — цена (0.00 – 1.00)
+- `timestamp` — время сделки
+- `price` — цена (0.00 – 1.00)
+- `size` — количество акций
+- `side` — направление
 
-> ⚠️ `market` параметр принимает `token_id` (из `clobTokenIds`), не `market_id`. Для бинарного рынка у нас два токена (YES и NO) — скачиваем оба.
+> ⚠️ Для массового скачивания истории лучше использовать ежедневные дампы трейдов, предоставляемые Polymarket, чтобы не упираться в лимиты REST API.
 
 ---
 
@@ -174,12 +175,12 @@ tp_order = client.get_order(order_id)  # конкретный ордер по ID
 |----------|-------|
 | `GET /markets` (Gamma) | 300 req / 10s |
 | `GET /events` (Gamma) | 500 req / 10s |
-| `GET /prices-history` (CLOB) | 1,000 req / 10s |
+| `GET /trades` (Data) | зависит от Cloudflare / лучше S3 |
 | `GET /book` (CLOB) | 1,500 req / 10s |
 | `POST /order` (CLOB) | 3,500 req / 10s (burst) |
 | `GET /orders` (CLOB) | 900 req / 10s |
 
-> Лимиты через Cloudflare — при превышении запросы **throttle** (задержка), а не reject. Для Data Collector: sleep 0.1–0.3s между запросами к `/prices-history` достаточно. Для Screener (раз в 5-10 мин): лимиты некритичны.
+> Лимиты через Cloudflare — при превышении запросы **throttle** (задержка), а не reject. Для Data Collector: делаем sleep 0.1–0.3s между запросами. Для Screener (раз в 5-10 мин): лимиты некритичны.
 
 ---
 

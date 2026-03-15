@@ -12,10 +12,10 @@
 - `GET /events` (список событий) — **500 запросов / 10 сек** (50 req/sec)
 - `GET /public-search` — **350 запросов / 10 сек** (35 req/sec)
 
-### Мониторинг рынка и история (CLOB API)
-*Базовый URL: `https://clob.polymarket.com`*
+### Мониторинг рынка и история (CLOB API & Data API)
+*Базовый URL: `https://clob.polymarket.com` и `https://data-api.polymarket.com`*
 - `GET /book` (биржевой стакан) — **1 500 запросов / 10 сек** (150 req/sec)
-- `GET /prices-history` (история цен для бэктеста) — **1 000 запросов / 10 сек** (100 req/sec)
+- `GET /trades` (история сделок Data API) — **лимитируется стандартно, но лучше качать через S3 дампы или с задержкой**
 - `GET /price` (цена лучшего бида/аска) — **1 500 запросов / 10 сек** (150 req/sec)
 
 ### Торговые операции (CLOB API)

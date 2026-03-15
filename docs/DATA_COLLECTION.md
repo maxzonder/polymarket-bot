@@ -31,7 +31,7 @@
 - использует пагинацию `limit/offset`;
 - передаёт `include_tag=true`, чтобы сохранить tags и category-related metadata;
 - сохраняет сырой market JSON в:
-  - `database/YYYY-MM-DD/{market_id}.json`
+  - `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}.json`
 
 Текущий мягкий операционный фильтр:
 - `volume_num_min=50`
@@ -48,7 +48,7 @@
   - `filterType=CASH`
   - `filterAmount=10`
 - сохраняет данные в:
-  - `database/YYYY-MM-DD/{market_id}_trades/{token_id}.json`
+  - `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}_trades/{token_id}.json`
 
 Почему нужен фильтр `CASH >= 10`:
 - публичный `/trades` жёстко ограничен пагинацией;
@@ -62,8 +62,8 @@
 
 ### 3. Parser
 Что делает:
-- читает market JSON из `database/`;
-- нормализует метаданные в SQLite `polymarket_dataset.db`;
+- читает market JSON из `$POLYMARKET_DATA_DIR/database/`;
+- нормализует метаданные в SQLite `$POLYMARKET_DATA_DIR/polymarket_dataset.db`;
 - обновляет только:
   - `markets`
   - `tokens`
@@ -119,9 +119,9 @@ Analyzer:
 ## Что хранится где
 
 ### Raw files
-- `database/YYYY-MM-DD/{market_id}.json`
+- `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}.json`
   - сырой market object
-- `database/YYYY-MM-DD/{market_id}_trades/{token_id}.json`
+- `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}_trades/{token_id}.json`
   - сырые сделки по токену
 
 ### SQLite
@@ -135,7 +135,7 @@ Legacy-слои убраны из runtime:
 - `token_analytics`
 
 ### Pipeline state
-Операционное состояние хранится в `database/collector_state.db`.
+Операционное состояние хранится в `$POLYMARKET_DATA_DIR/database/collector_state.db`.
 
 Текущие статусы:
 - `downloaded_at`
@@ -165,7 +165,7 @@ Legacy-слои убраны из runtime:
 - Пайплайн должен быть идемпотентным: любой этап можно перезапустить.
 - Долгие процессы на сервере запускать через `tmux`.
 - Collector markets пишет в один лог:
-  - `logs/collector.log`
+  - `$POLYMARKET_DATA_DIR/logs/collector.log`
 - Любые эвристики сначала проверяются на сырых данных, а потом попадают в архитектуру.
 - Для анализа swans нельзя подменять raw trades агрегированными данными.
 
