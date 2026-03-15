@@ -107,7 +107,62 @@ CREATE TABLE IF NOT EXISTS collection_state (
 - **Причина:** Их архитектура рассчитана на "Фундаментальный анализ" (агент гуглит новости, чтобы предсказать исход и торговать вероятностями). 
 - **Наша стратегия:** Мы торгуем математику и неэффективность ценообразования. Парсинг новостей добавляет сложность и сжигает бюджет на API-ключи. Наш Скринер реагирует только на цифры из REST API.
 
-## 7. Мониторинг открытых позиций (REST polling)
+## 7. Рабочий процесс разработки (Development Workflow)
+
+### Структура окружения
+- **Локалка** `/home/agent/projects/polymarket-bot` — разработка, коммиты, пуш
+- **GitHub** `git@github.com:maxzonder/polymarket-bot.git` — source of truth для кода
+- **Сервер** `/home/polybot/polymarket-bot` — только runtime, данные в `/home/polybot/.polybot`
+
+### Разделение кода и данных
+- **Код** — в git-репозитории
+- **Данные** (database, sqlite, logs) — **вне репо**, в `POLYMARKET_DATA_DIR=/home/polybot/.polybot`
+- Переменная читается из `.env` через `python-dotenv` (см. `utils/paths.py`)
+
+### Стандартный деплой кода на сервер
+```bash
+# 1. Коммит локально
+git add -A && git commit -m "..."
+
+# 2. Пуш в GitHub
+GIT_SSH_COMMAND='ssh -i /home/agent/.openclaw/lebedevaemk_github_priv.key -o StrictHostKeyChecking=no' \
+  git push origin main
+
+# 3. Пулл на сервере
+ssh polybot@135.181.134.96 'cd ~/polymarket-bot && \
+  GIT_SSH_COMMAND="ssh -i /home/polybot/lebedevaemk_github_priv.key -o StrictHostKeyChecking=no" \
+  git pull --ff-only'
+```
+
+### Синхронизация ТОЛЬКО кода (без затирания данных)
+- **Никогда не использовать `rsync --delete` в папке с данными.**
+- Для деплоя кода — только `git pull` на сервере.
+- Если нужна ручная синхронизация файлов — `scp` или `rsync` **без** `--delete`.
+
+### Запуск пайплайна на сервере (через tmux)
+```bash
+# Markets
+tmux new-session -d -s collector \
+  ".venv/bin/python -m data_collector.collector --start 2026-02-01 --end 2026-02-28 > /home/polybot/.polybot/logs/collector.log 2>&1"
+
+# Raw trades (после завершения collector)
+tmux new-session -d -s trades \
+  ".venv/bin/python -m data_collector.trades_collector --start 2026-02-01 --end 2026-02-28 >> /home/polybot/.polybot/logs/collector.log 2>&1"
+
+# Parser (после trades)
+tmux new-session -d -s parser \
+  ".venv/bin/python -m data_collector.parser --start 2026-02-01 --end 2026-02-28 > /home/polybot/.polybot/logs/parser.log 2>&1"
+
+# Analyzer (после parser)
+tmux new-session -d -s analyzer \
+  ".venv/bin/python -m data_collector.analyzer --recompute > /home/polybot/.polybot/logs/analyzer.log 2>&1"
+```
+
+### Правило логов
+- Все collector-запуски пишут в `logs/collector.log` — один файл, без суффиксов дат.
+- Не создавать `collector_2026-02-01.log`, `collector_feb.log` и т.д.
+
+## 8. Мониторинг открытых позиций (REST polling)
 **Решение: REST polling через `py-clob-client`, раз в 1-2 минуты.**
 
 **Почему не WebSocket:**
