@@ -1,3 +1,0 @@
-2026-03-12 19:56:44 | INFO     | MarketDiscovery | Connecting to Polymarket Gamma API...
-2026-03-12 19:56:44 | WARNING  | MarketDiscovery | Rate limit approaching!
-2026-03-12 19:56:44 | ERROR    | MarketDiscovery | Failed to fetch market data: Connection timeout.
