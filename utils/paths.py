@@ -3,6 +3,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+except ImportError:
+    pass
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = PROJECT_ROOT
 DATA_DIR = Path(os.environ.get("POLYMARKET_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser()
