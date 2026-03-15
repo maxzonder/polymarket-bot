@@ -1,1 +1,2 @@
-# polymarket-bot
+#Where to start?
+Read /doc/index.md
