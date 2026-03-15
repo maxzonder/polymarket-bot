@@ -131,43 +131,40 @@ def analyze_token(
     Возвращает dict с метриками или None если лебедь не найден.
 
     Логика:
-    1. Найти первую сделку ниже entry_threshold → это вход в зону дна
-    2. Собрать все сделки пока цена < entry_threshold → entry_volume
-    3. Проверить entry_volume >= min_entry_usdc
-    4. Для не-победителей: проверить exit_volume >= min_exit_usdc
-       exit_volume = объём сделок по цене >= entry_min_price * target_exit_x
-    5. Для победителей (is_winner=1): Polymarket сам выплачивает $1 → exit проверять не нужно
-    6. real_x = 1/entry_min если winner, иначе max(price_after) / entry_min
+    1. Найти глобальный минимум цены по всей истории токена
+       (не первый вход в зону — рынок мог несколько раз проваливаться)
+    2. Если min_price >= entry_threshold → не лебедь
+    3. Построить зону дна вокруг глобального минимума:
+       все трейды в окне ±lookback от минимума с ценой < entry_threshold
+    4. Проверить entry_volume >= min_entry_usdc
+    5. Для не-победителей: проверить exit_volume >= min_exit_usdc
+       exit_volume = объём сделок после зоны дна по цене >= entry_min_price * target_exit_x
+    6. Для победителей (is_winner=1): Polymarket выплачивает $1 → exit не нужен
+    7. real_x = 1/entry_min если winner, иначе max(price_after_floor) / entry_min
     """
     if not trades:
         return None
 
     prices = [float(t["price"]) for t in trades]
 
-    # --- 1. Найти вход в зону дна ---
-    floor_start_idx = None
-    for i, p in enumerate(prices):
-        if p < entry_threshold:
-            floor_start_idx = i
-            break
+    # --- 1. Глобальный минимум ---
+    global_min = min(prices)
+    if global_min >= entry_threshold:
+        return None  # цена никогда не падала до порога
 
-    if floor_start_idx is None:
-        return None
+    global_min_idx = prices.index(global_min)
 
-    # --- 2. Собрать все трейды в зоне дна ---
-    # (непрерывная зона, с допуском на кратковременные выбросы вверх)
-    floor_trades = []
-    floor_end_idx = floor_start_idx
-    for i in range(floor_start_idx, len(trades)):
-        if prices[i] < entry_threshold:
-            floor_trades.append(trades[i])
-            floor_end_idx = i
-        else:
-            # Допускаем до 5 трейдов выше порога — могут быть шумовые сделки
-            returned = any(p < entry_threshold for p in prices[i:i + 5])
-            if not returned:
-                break
+    # --- 2. Зона дна вокруг глобального минимума ---
+    # Расширяем в обе стороны пока цена < entry_threshold
+    floor_start = global_min_idx
+    while floor_start > 0 and prices[floor_start - 1] < entry_threshold:
+        floor_start -= 1
 
+    floor_end = global_min_idx
+    while floor_end < len(prices) - 1 and prices[floor_end + 1] < entry_threshold:
+        floor_end += 1
+
+    floor_trades = trades[floor_start: floor_end + 1]
     if not floor_trades:
         return None
 
@@ -176,13 +173,13 @@ def analyze_token(
     if entry_volume < min_entry_usdc:
         return None
 
-    entry_min_price = min(float(t["price"]) for t in floor_trades)
+    entry_min_price = global_min
     entry_ts_first = int(floor_trades[0]["timestamp"])
     entry_ts_last = int(floor_trades[-1]["timestamp"])
     target_exit_price = entry_min_price * target_exit_x
 
-    # --- 4. Метрики после зоны входа ---
-    after_floor = trades[floor_end_idx + 1:]
+    # --- 4. Метрики после зоны дна ---
+    after_floor = trades[floor_end + 1:]
     max_price_after = max((float(t["price"]) for t in after_floor), default=entry_min_price)
     max_price_overall = max(prices)
     last_price = prices[-1]
@@ -193,7 +190,7 @@ def analyze_token(
         # Polymarket выплачивает $1 — exit ликвидность не нужна
         exit_volume = 0.0
     else:
-        # Считаем объём сделок по цене >= target_exit_price (после зоны входа)
+        # Считаем объём сделок по цене >= target_exit_price (после зоны дна)
         exit_trades = [t for t in after_floor if float(t["price"]) >= target_exit_price]
         exit_volume = _sum_usdc(exit_trades)
         if exit_volume < min_exit_usdc:
