@@ -1,2 +1,2 @@
 # Where to start?
-Read /doc/index.md
+Read /docs/INDEX.md
