@@ -63,6 +63,11 @@ def get_logger(name: str) -> logging.Logger:
 - `WARNING` — skipped records, transient errors, retries
 - `ERROR` — critical failures (DB connection lost, etc.)
 
+**Правило имени лога:**
+- Для всех ручных и фоновых запусков коллектора использовать один и тот же файл: `logs/collector.log`.
+- Не плодить отдельные файлы вида `collector_*.log` под даты, диапазоны или разовые прогоны.
+- Если нужен контекст конкретного запуска, он должен различаться именем `tmux`-сессии или сообщением в самом логе, а не именем лог-файла.
+
 ## 4. Отслеживание состояния сборщика (collector_state.db)
 
 Отдельная SQLite-база `collector_state.db` — операционный журнал сборщика. **Не смешивать с `polymarket_raw.db`** (аналитические данные).
