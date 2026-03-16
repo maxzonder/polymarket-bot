@@ -134,19 +134,27 @@ class PositionMonitor:
 
             best_ask = book.best_ask
             if best_ask is not None and best_ask <= bid_price:
-                # Simulate fill
+                # Cap fill quantity at available ask depth to avoid simulating
+                # fills against an empty book.
+                # Intentionally simplified: no queue priority, no partial fill
+                # accumulation across cycles, fill assumed at exact limit price.
+                available_depth = book.ask_depth_at(bid_price)
+                fill_quantity = min(float(order["size"]), available_depth)
+                if fill_quantity < 0.0001:
+                    continue  # no real depth at this level — skip
                 self.clob.paper_simulate_fill(order["order_id"], best_ask)
                 conn.close()
                 self.om.on_entry_filled(
                     order_id=order["order_id"],
                     token_id=token_id,
                     market_id=order["market_id"],
-                    fill_price=bid_price,      # we get filled at our limit price
-                    fill_quantity=float(order["size"]),
+                    fill_price=bid_price,      # filled at our limit price
+                    fill_quantity=fill_quantity,
                 )
                 logger.info(
                     f"[DRY] Simulated BUY fill: {order['order_id'][:8]} "
-                    f"@ ${bid_price:.5f} (market ask=${best_ask:.5f})"
+                    f"@ ${bid_price:.5f} qty={fill_quantity:.2f} "
+                    f"(market ask=${best_ask:.5f} depth={available_depth:.2f})"
                 )
                 conn = self._conn()
 

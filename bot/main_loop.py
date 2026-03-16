@@ -154,8 +154,8 @@ class BotRunner:
             if not mc.scanner_entry and not mc.use_resting_bids:
                 continue
 
-            # For scanner entry (fast_tp): buy immediately at current price
-            if mc.scanner_entry and candidate.current_price <= min(mc.entry_price_levels):
+            # For scanner entry (fast_tp / balanced): market already in the valid entry zone
+            if mc.scanner_entry and candidate.current_price <= mc.entry_price_max:
                 results = await asyncio.to_thread(
                     self.order_manager.process_candidate, candidate
                 )

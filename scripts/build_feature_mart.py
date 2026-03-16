@@ -139,12 +139,17 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         conn.execute(idx)
     conn.commit()
 
-    logger.info("Loading swans_v2 joined with markets + tokens...")
+    # ── Candidate universe: all resolved tokens, not just swan events ─────────
+    # Positive: token has a matching swans_v2 row → real dip + measurable outcome
+    # Negative: token resolved without hitting a swan event → real_x = 1.0
+    # Only include markets with closed_time > 0 (resolved, ground truth available)
+    # and non-zero volume (market was actually tradable).
+    logger.info("Loading candidate universe: tokens LEFT JOIN swans_v2 ...")
     rows = conn.execute("""
         SELECT
-            s.token_id,
-            s.market_id,
-            s.date,
+            t.token_id,
+            t.market_id,
+            COALESCE(s.date, DATE(m.closed_time, 'unixepoch')) AS date,
             m.category,
             m.volume,
             m.liquidity,
@@ -160,16 +165,20 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             s.entry_trade_count,
             s.entry_ts_first,
             s.entry_ts_last,
-            s.is_winner,
-            s.real_x,
-            s.resolution_x
-        FROM swans_v2 s
-        JOIN markets m ON s.market_id = m.id
-        JOIN tokens t ON s.token_id = t.token_id
+            -- for negatives use token-level winner flag; for positives swan is_winner overrides
+            COALESCE(s.is_winner, t.is_winner) AS is_winner,
+            COALESCE(s.real_x, 1.0)            AS real_x,
+            COALESCE(s.resolution_x, 1.0)      AS resolution_x
+        FROM tokens t
+        JOIN markets m ON t.market_id = m.id
+        LEFT JOIN swans_v2 s ON s.token_id = t.token_id
+        WHERE m.closed_time > 0
+          AND m.volume > 0
     """).fetchall()
 
     total = len(rows)
-    logger.info(f"Processing {total} swans_v2 rows...")
+    positives = sum(1 for r in rows if r[12] is not None)  # entry_min_price not NULL
+    logger.info(f"Processing {total} candidate rows ({positives} positives, {total - positives} negatives)...")
     t0 = time.monotonic()
     inserted = updated = 0
 
@@ -190,7 +199,8 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             cyom = int(row[10] or 0)
             closed_time = int(row[11] or 0)
 
-            entry_min_price = float(row[12] or 0)
+            # Swan-derived features are NULL for negatives (no floor event)
+            entry_min_price = float(row[12]) if row[12] is not None else None
             entry_volume_usdc = float(row[13] or 0)
             entry_trade_count = int(row[14] or 0)
             entry_ts_first = int(row[15] or 0)
@@ -322,6 +332,18 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         labels = ["<5x", "5-20x", "20-50x", "50-100x", "100x+"]
         label = labels[bucket] if bucket < len(labels) else f"bucket_{bucket}"
         logger.info(f"  {label}: {cnt} rows ({100*cnt/max(stats[0],1):.1f}%)")
+
+    # Sanity check: label distributions must not be degenerate
+    tp5_cnt = conn.execute("SELECT SUM(tp_5x_hit) FROM feature_mart").fetchone()[0] or 0
+    tb0_cnt = conn.execute("SELECT COUNT(*) FROM feature_mart WHERE tail_bucket=0").fetchone()[0] or 0
+    if tp5_cnt == stats[0]:
+        logger.warning("LABEL SANITY: tp_5x_hit is constant 1 — negatives may be missing")
+    if tb0_cnt == 0:
+        logger.warning("LABEL SANITY: tail_bucket=0 is absent — negatives may be missing")
+    logger.info(
+        f"Label sanity: tp_5x_hit={tp5_cnt}/{stats[0]} "
+        f"tail_bucket_0={tb0_cnt}/{stats[0]}"
+    )
 
 
 def main() -> None:

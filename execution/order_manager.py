@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from api.clob_client import ClobClient, OrderResult
+from api.clob_client import ClobClient, OrderResult, get_orderbook
 from api.gamma_client import fetch_market
 from config import BotConfig
 from strategy.screener import EntryCandidate
@@ -35,6 +35,10 @@ ensure_runtime_dirs()
 logger = setup_logger("order_manager")
 
 POSITIONS_DB = DATA_DIR / "positions.db"
+
+# Minimum total ask size (tokens) available at-or-below price_level to place a bid.
+# Prevents placing orders in empty/garbage markets.
+MIN_ASK_DEPTH_TOKENS = 1.0
 
 
 def _init_positions_db(conn: sqlite3.Connection) -> None:
@@ -170,6 +174,22 @@ class OrderManager:
             if self._count_open_positions(conn) >= self.mc.max_open_positions:
                 logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping")
                 break
+
+            # ── Depth / liquidity gate ─────────────────────────────────────
+            # Fetch real per-token orderbook; reject if insufficient ask depth
+            # at our price level (protects against garbage / un-tradable markets).
+            try:
+                book = get_orderbook(candidate.token_id)
+                ask_depth = book.ask_depth_at(price_level)
+                if ask_depth < MIN_ASK_DEPTH_TOKENS:
+                    logger.debug(
+                        f"Depth gate: skip {candidate.token_id[:16]} @ ${price_level:.5f} "
+                        f"ask_depth={ask_depth:.2f} < {MIN_ASK_DEPTH_TOKENS}"
+                    )
+                    continue
+            except Exception as e:
+                logger.debug(f"Orderbook check failed for {candidate.token_id[:16]}: {e}")
+                continue
 
             label = f"resting_{candidate.market_info.market_id}_{price_level}"
             result = self.clob.place_limit_order(
@@ -333,14 +353,14 @@ class OrderManager:
         )
 
     def on_tp_filled(self, order_id: str, fill_price: float, fill_quantity: float) -> None:
-        """Called when a TP SELL order gets filled."""
+        """Called when a TP SELL order gets filled. Accumulates partial PnL into position."""
         now = int(time.time())
         conn = self._conn()
         conn.execute(
             "UPDATE tp_orders SET status='matched' WHERE order_id=?",
             (order_id,),
         )
-        # Find position and compute partial PnL
+        # Find position and persist partial PnL
         row = conn.execute(
             "SELECT p.position_id, p.entry_price FROM tp_orders t "
             "JOIN positions p ON t.position_id = p.position_id "
@@ -349,7 +369,13 @@ class OrderManager:
         ).fetchone()
         if row:
             entry_price = float(row["entry_price"])
+            position_id = row["position_id"]
             pnl = (fill_price - entry_price) * fill_quantity
+            conn.execute(
+                "UPDATE positions SET realized_pnl = COALESCE(realized_pnl, 0) + ? "
+                "WHERE position_id=?",
+                (pnl, position_id),
+            )
             logger.info(
                 f"TP filled: order={order_id[:8]} @ ${fill_price:.5f} "
                 f"qty={fill_quantity:.2f} pnl=${pnl:.4f}"
@@ -371,11 +397,14 @@ class OrderManager:
         for pos in positions:
             moonbag_qty = float(pos["moonbag_quantity"])
             entry_price = float(pos["entry_price"])
-            pnl = (resolution_price - entry_price) * moonbag_qty
+            # Moonbag delta: add on top of TP PnL already accumulated in realized_pnl
+            moonbag_pnl = (resolution_price - entry_price) * moonbag_qty
 
             conn.execute(
-                "UPDATE positions SET status='resolved', closed_at=?, realized_pnl=? WHERE position_id=?",
-                (now, pnl, pos["position_id"]),
+                "UPDATE positions SET status='resolved', closed_at=?, "
+                "realized_pnl = COALESCE(realized_pnl, 0) + ? "
+                "WHERE position_id=?",
+                (now, moonbag_pnl, pos["position_id"]),
             )
             # Cancel any remaining TP orders
             conn.execute(
@@ -384,7 +413,7 @@ class OrderManager:
             )
             logger.info(
                 f"Position resolved: {pos['position_id'][:8]} token={token_id[:16]} "
-                f"winner={is_winner} moonbag_pnl=${pnl:.4f}"
+                f"winner={is_winner} moonbag_pnl=${moonbag_pnl:.4f}"
             )
 
         conn.commit()
