@@ -142,7 +142,7 @@ class PositionMonitor:
                 fill_quantity = min(float(order["size"]), available_depth)
                 if fill_quantity < 0.0001:
                     continue  # no real depth at this level — skip
-                self.clob.paper_simulate_fill(order["order_id"], best_ask)
+                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=fill_quantity)
                 conn.close()
                 self.om.on_entry_filled(
                     order_id=order["order_id"],
@@ -173,12 +173,18 @@ class PositionMonitor:
 
             best_bid = book.best_bid
             if best_bid is not None and best_bid >= sell_price:
-                self.clob.paper_simulate_fill(tp["order_id"], best_bid)
+                # Cap fill quantity at available bid depth — same realism principle as BUY side.
+                available_bid_depth = book.bid_depth_at(sell_price)
+                fill_qty = min(float(tp["sell_quantity"]), available_bid_depth)
+                if fill_qty < 0.0001:
+                    continue  # no real bid depth at sell level — skip
+                self.clob.paper_simulate_fill(tp["order_id"], best_bid, fill_size=fill_qty)
                 conn.close()
-                self.om.on_tp_filled(tp["order_id"], sell_price, float(tp["sell_quantity"]))
+                self.om.on_tp_filled(tp["order_id"], sell_price, fill_qty)
                 logger.info(
                     f"[DRY] Simulated SELL fill: {tp['order_id'][:8]} "
-                    f"{tp['label']} @ ${sell_price:.5f} (bid=${best_bid:.5f})"
+                    f"{tp['label']} @ ${sell_price:.5f} qty={fill_qty:.2f} "
+                    f"(bid=${best_bid:.5f} depth={available_bid_depth:.2f})"
                 )
                 conn = self._conn()
 

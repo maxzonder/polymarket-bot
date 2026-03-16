@@ -36,9 +36,11 @@ logger = setup_logger("order_manager")
 
 POSITIONS_DB = DATA_DIR / "positions.db"
 
-# Minimum total ask size (tokens) available at-or-below price_level to place a bid.
-# Prevents placing orders in empty/garbage markets.
-MIN_ASK_DEPTH_TOKENS = 1.0
+# Minimum bid size at the top-of-book required to place a resting bid.
+# We check top-of-book activity, not depth at our (future) bid level,
+# because resting bids are placed BELOW current price — ask depth at our
+# price level will naturally be zero until the market dips there.
+MIN_TOP_BOOK_TOKENS = 1.0
 
 
 def _init_positions_db(conn: sqlite3.Connection) -> None:
@@ -176,15 +178,23 @@ class OrderManager:
                 break
 
             # ── Depth / liquidity gate ─────────────────────────────────────
-            # Fetch real per-token orderbook; reject if insufficient ask depth
-            # at our price level (protects against garbage / un-tradable markets).
+            # Fetch real per-token orderbook. Reject dead / garbage books.
+            # We check top-of-book activity, NOT depth at our bid price level:
+            # resting bids are placed below current price, so ask depth at the
+            # bid level is normally zero — that is expected, not a rejection signal.
             try:
                 book = get_orderbook(candidate.token_id)
-                ask_depth = book.ask_depth_at(price_level)
-                if ask_depth < MIN_ASK_DEPTH_TOKENS:
+                if book.best_ask is None or book.best_bid is None:
                     logger.debug(
-                        f"Depth gate: skip {candidate.token_id[:16]} @ ${price_level:.5f} "
-                        f"ask_depth={ask_depth:.2f} < {MIN_ASK_DEPTH_TOKENS}"
+                        f"Depth gate: dead book (no asks or bids) for "
+                        f"{candidate.token_id[:16]} @ ${price_level:.5f}"
+                    )
+                    continue
+                top_bid_depth = book.bid_depth_at(book.best_bid)
+                if top_bid_depth < MIN_TOP_BOOK_TOKENS:
+                    logger.debug(
+                        f"Depth gate: thin top-of-book for {candidate.token_id[:16]} "
+                        f"top_bid_depth={top_bid_depth:.2f} < {MIN_TOP_BOOK_TOKENS}"
                     )
                     continue
             except Exception as e:

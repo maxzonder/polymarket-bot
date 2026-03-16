@@ -139,12 +139,23 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         conn.execute(idx)
     conn.commit()
 
-    # ── Candidate universe: all resolved tokens, not just swan events ─────────
+    # ── Candidate universe: screener-gated resolved tokens ────────────────────
+    # We approximate the "could have been a bot candidate" universe using the
+    # same volume thresholds the live screener applies, so that negatives are
+    # realistic missed opportunities rather than arbitrary resolved tokens.
+    #
     # Positive: token has a matching swans_v2 row → real dip + measurable outcome
-    # Negative: token resolved without hitting a swan event → real_x = 1.0
-    # Only include markets with closed_time > 0 (resolved, ground truth available)
-    # and non-zero volume (market was actually tradable).
-    logger.info("Loading candidate universe: tokens LEFT JOIN swans_v2 ...")
+    # Negative: token passed volume gate, resolved, but no swan event detected
+    #           → real_x = 1.0, all tp_*_hit = 0, tail_bucket = 0
+    #
+    # We cannot apply a price gate here because historical per-token prices are
+    # not stored in markets/tokens — that would require raw trades. Volume gating
+    # is sufficient to exclude obviously-irrelevant markets (huge liquid markets
+    # and trivially-thin zero-activity markets).
+    SCREENER_MIN_VOLUME = 50.0      # same as BotConfig.min_volume_usdc
+    SCREENER_MAX_VOLUME = 50_000.0  # same as BotConfig.max_volume_usdc
+
+    logger.info("Loading candidate universe (screener-gated): tokens LEFT JOIN swans_v2 ...")
     rows = conn.execute("""
         SELECT
             t.token_id,
@@ -173,12 +184,18 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         JOIN markets m ON t.market_id = m.id
         LEFT JOIN swans_v2 s ON s.token_id = t.token_id
         WHERE m.closed_time > 0
-          AND m.volume > 0
-    """).fetchall()
+          AND m.volume >= :min_vol
+          AND m.volume <= :max_vol
+          AND m.duration_hours > 0
+    """, {"min_vol": SCREENER_MIN_VOLUME, "max_vol": SCREENER_MAX_VOLUME}).fetchall()
 
     total = len(rows)
-    positives = sum(1 for r in rows if r[12] is not None)  # entry_min_price not NULL
-    logger.info(f"Processing {total} candidate rows ({positives} positives, {total - positives} negatives)...")
+    positives = sum(1 for r in rows if r[12] is not None)  # entry_min_price not NULL = swan positive
+    logger.info(
+        f"Processing {total} candidate rows "
+        f"({positives} positives, {total - positives} negatives) "
+        f"[vol {SCREENER_MIN_VOLUME}–{SCREENER_MAX_VOLUME} USDC gate applied]"
+    )
     t0 = time.monotonic()
     inserted = updated = 0
 

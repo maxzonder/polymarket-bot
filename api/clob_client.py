@@ -258,10 +258,19 @@ class ClobClient:
         conn.close()
         return [dict(r) for r in rows]
 
-    def paper_simulate_fill(self, order_id: str, fill_price: float) -> None:
+    def paper_simulate_fill(
+        self,
+        order_id: str,
+        fill_price: float,
+        fill_size: Optional[float] = None,
+    ) -> None:
         """
         Called by FillEmulator: mark paper order as matched.
         Only fills if fill_price crosses the order price.
+
+        fill_size: actual filled quantity (depth-capped). If None, uses full order size.
+        This keeps paper_orders.filled_size consistent with what on_entry_filled /
+        on_tp_filled receive, preventing position-state divergence.
         """
         now = int(time.time())
         conn = sqlite3.connect(str(self.paper_db_path))
@@ -281,9 +290,10 @@ class ClobClient:
             or (side == "SELL" and fill_price >= order_price)
         )
         if should_fill:
+            actual_filled = fill_size if fill_size is not None else float(row["size"])
             conn.execute(
-                "UPDATE paper_orders SET status='matched', filled_size=size, updated_at=? WHERE order_id=?",
-                (now, order_id),
+                "UPDATE paper_orders SET status='matched', filled_size=?, updated_at=? WHERE order_id=?",
+                (actual_filled, now, order_id),
             )
         conn.commit()
         conn.close()
