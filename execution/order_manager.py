@@ -234,6 +234,96 @@ class OrderManager:
         conn.close()
         return results
 
+    def process_scanner_entry(self, candidate: EntryCandidate) -> list[OrderResult]:
+        """
+        Immediate BUY for scanner-entry modes (fast_tp, balanced) when the token
+        is already inside the valid entry zone.
+
+        Executes at the real per-token best_ask from the orderbook — not at a
+        pre-computed resting-bid ladder level. Does NOT iterate suggested_entry_levels.
+        """
+        conn = self._conn()
+        now = int(time.time())
+
+        if self._count_open_positions(conn) >= self.mc.max_open_positions:
+            logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping scanner entry")
+            conn.close()
+            return []
+
+        try:
+            book = get_orderbook(candidate.token_id)
+            if book.best_ask is None or book.best_bid is None:
+                logger.debug(f"Scanner entry: dead book for {candidate.token_id[:16]}")
+                conn.close()
+                return []
+            top_bid_depth = book.bid_depth_at(book.best_bid)
+            if top_bid_depth < MIN_TOP_BOOK_TOKENS:
+                logger.debug(
+                    f"Scanner entry: thin top-of-book for {candidate.token_id[:16]} "
+                    f"top_bid_depth={top_bid_depth:.2f}"
+                )
+                conn.close()
+                return []
+            execution_price = book.best_ask
+        except Exception as e:
+            logger.debug(f"Orderbook check failed (scanner entry) for {candidate.token_id[:16]}: {e}")
+            conn.close()
+            return []
+
+        from strategy.scorer import ResolutionScore
+        dummy_res = ResolutionScore(
+            category=candidate.market_info.category,
+            sample_count=10,
+            p_winner=candidate.resolution_score,
+            avg_real_x=5.0,
+            p_20x=0.05, p_50x=0.02, p_100x=0.01,
+            avg_resolution_x=10.0,
+            tail_ev=candidate.resolution_score * 10,
+            score=candidate.resolution_score,
+        )
+        sized = self.risk.size_position(
+            token_id=candidate.token_id,
+            entry_price=execution_price,
+            resolution_score=dummy_res,
+            open_positions=self._count_open_positions(conn),
+        )
+        if sized is None:
+            logger.debug(f"Risk rejected scanner entry: {candidate.token_id[:16]} @ ${execution_price:.5f}")
+            conn.close()
+            return []
+
+        label = f"scanner_{candidate.market_info.market_id}"
+        result = self.clob.place_limit_order(
+            token_id=candidate.token_id,
+            side="BUY",
+            price=execution_price,
+            size=sized.token_quantity,
+            label=label,
+        )
+
+        if result.status in ("live", "matched"):
+            self._save_resting_order(
+                conn=conn,
+                order_id=result.order_id,
+                token_id=candidate.token_id,
+                market_id=candidate.market_info.market_id,
+                price=execution_price,
+                size=sized.token_quantity,
+                expires_at=now + self.config.resting_order_ttl,
+                mode=self.mc.name,
+            )
+            logger.info(
+                f"Scanner BUY: {candidate.market_info.question[:50]!r} "
+                f"token={candidate.token_id[:16]} @ ${execution_price:.5f} "
+                f"qty={sized.token_quantity:.2f} order_id={result.order_id}"
+            )
+        else:
+            logger.warning(f"Scanner entry failed: {result.error} | {candidate.token_id[:16]}")
+
+        conn.commit()
+        conn.close()
+        return [result] if result.status in ("live", "matched") else []
+
     def _get_active_resting_prices(self, conn: sqlite3.Connection, token_id: str) -> set[float]:
         rows = conn.execute(
             "SELECT price FROM resting_orders WHERE token_id=? AND status='live'",

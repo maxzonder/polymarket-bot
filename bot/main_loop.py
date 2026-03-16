@@ -154,14 +154,16 @@ class BotRunner:
             if not mc.scanner_entry and not mc.use_resting_bids:
                 continue
 
-            # For scanner entry (fast_tp / balanced): market already in the valid entry zone
+            # For scanner entry (fast_tp / balanced): token already in valid entry zone.
+            # Execute immediately at best ask — do NOT use resting-bid ladder semantics.
             if mc.scanner_entry and candidate.current_price <= mc.entry_price_max:
                 results = await asyncio.to_thread(
-                    self.order_manager.process_candidate, candidate
+                    self.order_manager.process_scanner_entry, candidate
                 )
                 placed_count += len(results)
 
-            # For resting bids (balanced / big_swan): pre-position at levels below current
+            # For resting bids (balanced / big_swan): pre-position below current price.
+            # Only fires when price is above entry zone (scanner path did not trigger).
             elif mc.use_resting_bids:
                 results = await asyncio.to_thread(
                     self.order_manager.process_candidate, candidate

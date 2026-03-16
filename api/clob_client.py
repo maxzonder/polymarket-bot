@@ -317,11 +317,13 @@ class ClobClient:
             (token_id,),
         ).fetchall()
         for buy in buys:
-            pnl = (resolved_at - buy["price"]) * buy["size"]
+            # Use filled_size (actual quantity received) not order size
+            filled = buy["filled_size"] if buy["filled_size"] else buy["size"]
+            pnl = (resolved_at - buy["price"]) * filled
             conn.execute(
                 "INSERT INTO paper_pnl (order_id, token_id, entry_price, exit_price, size, pnl_usdc, recorded_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (buy["order_id"], token_id, buy["price"], resolved_at, buy["size"], pnl, now),
+                (buy["order_id"], token_id, buy["price"], resolved_at, filled, pnl, now),
             )
         conn.commit()
         conn.close()
