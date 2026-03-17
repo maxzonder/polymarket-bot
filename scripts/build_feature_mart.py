@@ -1,12 +1,14 @@
 """
 Build Feature Mart — denormalized training table for big_swan_mode scorer.
 
-Joins: markets + tokens + swans_v2 + raw trade stats
+Joins: markets + tokens + token_swans (Dec+Jan+Feb window only)
 Output: table `feature_mart` in polymarket_dataset.db
 
 Run:
     python scripts/build_feature_mart.py
     python scripts/build_feature_mart.py --recompute
+
+Working window: strictly Dec 2025 + Jan 2026 + Feb 2026. March rows are excluded.
 
 Features (per ТЗ section F):
   market metadata:   category, volume, duration_hours, fees_enabled, comment_count
@@ -15,18 +17,18 @@ Features (per ТЗ section F):
   temporal:          time_to_resolution_hours, entry_hour_of_day
   category/pattern:  category, is_neg_risk, cyom
 
-Labels (per ТЗ section F):
+Scoring (issue #5 approved design):
+  price_score        (0–4): based on entry_min_price bucket
+  neglect_score      (0–3): based on entry_trade_count bucket (inverse: fewer = better)
+  freshness_score    (0–2): based on floor_duration_seconds (inverse: fresher = better)
+  swan_score         (0–9): price_score + neglect_score + freshness_score
+  NULL for negatives (no swan event detected)
+
+Labels:
   tp_5x_hit, tp_10x_hit, tp_20x_hit
   is_winner
-  real_x, resolution_x
-  tail_bucket        (0: <5x, 1: 5–20x, 2: 20–50x, 3: 50–100x, 4: 100x+)
-  floor_duration_seconds
-  entry_volume_usdc
-  time_to_resolution_hours
-
-Classification labels:  is_winner, tp_5x_hit, tp_10x_hit, tp_20x_hit, tail_bucket
-Regression labels:      real_x, resolution_x, time_to_resolution_hours
-Ranking labels:         tail_bucket (ordinal), real_x
+  real_x   (= token_swans.possible_x for positives, 1.0 for negatives)
+  tail_bucket (0: <5x, 1: 5–20x, 2: 20–50x, 3: 50–100x, 4: 100x+)
 """
 
 from __future__ import annotations
@@ -89,6 +91,13 @@ CREATE TABLE IF NOT EXISTS feature_mart (
     is_politics             INTEGER,
     is_geopolitics          INTEGER,
 
+    -- ── Scoring (issue #5 approved design) ──────────────────────────────────
+    -- NULL for negatives (no swan event); 0–N for positives
+    price_score             INTEGER,   -- 0–4: entry_min_price bucket
+    neglect_score           INTEGER,   -- 0–3: entry_trade_count bucket (inverse)
+    freshness_score         INTEGER,   -- 0–2: floor_duration_seconds bucket (inverse)
+    swan_score              INTEGER,   -- 0–9: price + neglect + freshness
+
     -- ── Labels ───────────────────────────────────────────────────────────────
     -- Classification
     tp_5x_hit               INTEGER,   -- 1 if real_x >= 5
@@ -97,7 +106,7 @@ CREATE TABLE IF NOT EXISTS feature_mart (
     is_winner               INTEGER,   -- 1 if token resolved at $1
 
     -- Regression
-    real_x                  REAL,
+    real_x                  REAL,      -- possible_x for positives, 1.0 for negatives
     resolution_x            REAL,
 
     -- Ranking (ordinal bucket for tail)
@@ -155,7 +164,10 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
     SCREENER_MIN_VOLUME = 50.0      # same as BotConfig.min_volume_usdc
     SCREENER_MAX_VOLUME = 50_000.0  # same as BotConfig.max_volume_usdc
 
-    logger.info("Loading candidate universe (screener-gated): tokens LEFT JOIN swans_v2 ...")
+    # Working window: strictly Dec 2025 + Jan 2026 + Feb 2026
+    WINDOW_MONTHS = ('2025-12', '2026-01', '2026-02')
+
+    logger.info("Loading candidate universe (screener-gated, Dec+Jan+Feb): tokens LEFT JOIN token_swans ...")
     rows = conn.execute("""
         SELECT
             t.token_id,
@@ -176,21 +188,25 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             s.entry_trade_count,
             s.entry_ts_first,
             s.entry_ts_last,
-            -- for negatives use token-level winner flag; for positives swan is_winner overrides
-            COALESCE(s.is_winner, t.is_winner) AS is_winner,
-            COALESCE(s.real_x, 1.0)            AS real_x,
-            COALESCE(s.resolution_x, 1.0)      AS resolution_x
+            s.duration_entry_zone_seconds,
+            t.is_winner                        AS is_winner,
+            COALESCE(s.possible_x, 1.0)        AS real_x,
+            COALESCE(s.possible_x, 1.0)        AS resolution_x
         FROM tokens t
         JOIN markets m ON t.market_id = m.id
-        LEFT JOIN swans_v2 s ON s.token_id = t.token_id
+        LEFT JOIN token_swans s ON s.token_id = t.token_id
         WHERE m.closed_time > 0
           AND m.volume >= :min_vol
           AND m.volume <= :max_vol
           AND m.duration_hours > 0
+          AND substr(COALESCE(s.date, DATE(m.closed_time, 'unixepoch')), 1, 7)
+              IN ('2025-12', '2026-01', '2026-02')
     """, {"min_vol": SCREENER_MIN_VOLUME, "max_vol": SCREENER_MAX_VOLUME}).fetchall()
 
     total = len(rows)
     positives = sum(1 for r in rows if r[12] is not None)  # entry_min_price not NULL = swan positive
+    months = set(r[2][:7] for r in rows if r[2])
+    logger.info(f"Date window covered: {sorted(months)}")
     logger.info(
         f"Processing {total} candidate rows "
         f"({positives} positives, {total - positives} negatives) "
@@ -222,16 +238,53 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             entry_trade_count = int(row[14] or 0)
             entry_ts_first = int(row[15] or 0)
             entry_ts_last = int(row[16] or 0)
-            is_winner = int(row[17] or 0)
-            real_x = float(row[18] or 1.0)
-            resolution_x = float(row[19] or real_x)
+            duration_entry_zone_stored = row[17]  # from token_swans directly
+            is_winner = int(row[18] or 0)
+            real_x = float(row[19] or 1.0)
+            resolution_x = float(row[20] or real_x)
 
             # Log-transforms
             log_volume = math.log1p(volume)
             log_liquidity = math.log1p(liquidity)
 
-            # Floor duration
-            floor_duration_seconds = max(0.0, entry_ts_last - entry_ts_first)
+            # Floor duration — use stored column if available, fallback to ts diff
+            if duration_entry_zone_stored is not None:
+                floor_duration_seconds = float(duration_entry_zone_stored)
+            else:
+                floor_duration_seconds = max(0.0, entry_ts_last - entry_ts_first)
+
+            # ── Swan score (issue #5) — NULL for negatives ─────────────────────
+            if entry_min_price is not None:
+                if entry_min_price <= 0.01:
+                    price_score = 4
+                elif entry_min_price <= 0.02:
+                    price_score = 3
+                elif entry_min_price <= 0.03:
+                    price_score = 2
+                elif entry_min_price <= 0.04:
+                    price_score = 1
+                else:
+                    price_score = 0
+
+                if entry_trade_count <= 10:
+                    neglect_score = 3
+                elif entry_trade_count <= 30:
+                    neglect_score = 2
+                elif entry_trade_count <= 100:
+                    neglect_score = 1
+                else:
+                    neglect_score = 0
+
+                if floor_duration_seconds < 3600:
+                    freshness_score = 2
+                elif floor_duration_seconds < 86400:
+                    freshness_score = 1
+                else:
+                    freshness_score = 0
+
+                swan_score = price_score + neglect_score + freshness_score
+            else:
+                price_score = neglect_score = freshness_score = swan_score = None
 
             # Avg trade size at floor
             avg_trade_size = entry_volume_usdc / max(entry_trade_count, 1)
@@ -276,6 +329,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     floor_duration_seconds, avg_trade_size_usdc,
                     time_to_resolution_hours, entry_dow, entry_hour_utc,
                     is_sports, is_crypto, is_politics, is_geopolitics,
+                    price_score, neglect_score, freshness_score, swan_score,
                     tp_5x_hit, tp_10x_hit, tp_20x_hit, is_winner,
                     real_x, resolution_x, tail_bucket
                 ) VALUES (
@@ -288,6 +342,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?
                 ) ON CONFLICT(token_id, date) DO UPDATE SET
                     real_x=excluded.real_x,
@@ -296,7 +351,11 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     tail_bucket=excluded.tail_bucket,
                     tp_5x_hit=excluded.tp_5x_hit,
                     tp_10x_hit=excluded.tp_10x_hit,
-                    tp_20x_hit=excluded.tp_20x_hit
+                    tp_20x_hit=excluded.tp_20x_hit,
+                    price_score=excluded.price_score,
+                    neglect_score=excluded.neglect_score,
+                    freshness_score=excluded.freshness_score,
+                    swan_score=excluded.swan_score
                 """,
                 (
                     token_id, market_id, date,
@@ -307,6 +366,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     floor_duration_seconds, avg_trade_size,
                     time_to_resolution_hours, entry_dow, entry_hour_utc,
                     is_sports, is_crypto, is_politics, is_geopolitics,
+                    price_score, neglect_score, freshness_score, swan_score,
                     tp_5x_hit, tp_10x_hit, tp_20x_hit, is_winner,
                     real_x, resolution_x, bucket,
                 ),
@@ -361,6 +421,35 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         f"Label sanity: tp_5x_hit={tp5_cnt}/{stats[0]} "
         f"tail_bucket_0={tb0_cnt}/{stats[0]}"
     )
+
+    # ── Score cohort validation ────────────────────────────────────────────────
+    logger.info("Score cohort validation (positives only):")
+    cohorts = conn.execute("""
+        SELECT
+            CASE
+                WHEN swan_score >= 7 THEN 'high  (7-9)'
+                WHEN swan_score >= 4 THEN 'mid   (4-6)'
+                ELSE                      'low   (0-3)'
+            END AS cohort,
+            swan_score,
+            COUNT(*) AS n,
+            ROUND(AVG(real_x), 1) AS avg_x,
+            ROUND(100.0 * SUM(CASE WHEN real_x >= 20 THEN 1 ELSE 0 END) / COUNT(*), 1) AS tail_pct
+        FROM feature_mart
+        WHERE swan_score IS NOT NULL
+        GROUP BY cohort
+        ORDER BY MIN(swan_score) DESC
+    """).fetchall()
+    for c in cohorts:
+        logger.info(f"  {c[0]}: n={c[2]}, avg_x={c[3]}, tail%={c[4]}%")
+
+    score_dist = conn.execute("""
+        SELECT swan_score, COUNT(*) FROM feature_mart
+        WHERE swan_score IS NOT NULL
+        GROUP BY swan_score ORDER BY swan_score DESC
+    """).fetchall()
+    dist_str = "  ".join(f"{s}:{n}" for s, n in score_dist)
+    logger.info(f"Score distribution (score:count): {dist_str}")
 
 
 def main() -> None:
