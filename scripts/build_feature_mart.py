@@ -159,10 +159,15 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
     #
     # We cannot apply a price gate here because historical per-token prices are
     # not stored in markets/tokens — that would require raw trades. Volume gating
-    # is sufficient to exclude obviously-irrelevant markets (huge liquid markets
-    # and trivially-thin zero-activity markets).
-    SCREENER_MIN_VOLUME = 50.0      # same as BotConfig.min_volume_usdc
-    SCREENER_MAX_VOLUME = 50_000.0  # same as BotConfig.max_volume_usdc
+    # is sufficient to exclude trivially-thin zero-activity markets.
+    #
+    # NOTE: SCREENER_MAX_VOLUME is intentionally removed. The original $50k cap
+    # was misaligned with the black-swan strategy: 90% of the approved baseline
+    # universe (issue #4) lives in markets with total volume > $50k. A market
+    # with $500k total volume can still have a token at 1¢ with only $200 in
+    # floor trades — a valid candidate. Per-token floor activity (entry_volume_usdc)
+    # is the right gate, not market-level total volume.
+    SCREENER_MIN_VOLUME = 50.0      # exclude trivially thin markets (no activity)
 
     # Working window: strictly Dec 2025 + Jan 2026 + Feb 2026
     WINDOW_MONTHS = ('2025-12', '2026-01', '2026-02')
@@ -197,11 +202,10 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         LEFT JOIN token_swans s ON s.token_id = t.token_id
         WHERE m.closed_time > 0
           AND m.volume >= :min_vol
-          AND m.volume <= :max_vol
           AND m.duration_hours > 0
           AND substr(COALESCE(s.date, DATE(m.closed_time, 'unixepoch')), 1, 7)
               IN ('2025-12', '2026-01', '2026-02')
-    """, {"min_vol": SCREENER_MIN_VOLUME, "max_vol": SCREENER_MAX_VOLUME}).fetchall()
+    """, {"min_vol": SCREENER_MIN_VOLUME}).fetchall()
 
     total = len(rows)
     positives = sum(1 for r in rows if r[12] is not None)  # entry_min_price not NULL = swan positive
@@ -210,7 +214,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
     logger.info(
         f"Processing {total} candidate rows "
         f"({positives} positives, {total - positives} negatives) "
-        f"[vol {SCREENER_MIN_VOLUME}–{SCREENER_MAX_VOLUME} USDC gate applied]"
+        f"[vol >= {SCREENER_MIN_VOLUME} USDC gate applied]"
     )
     t0 = time.monotonic()
     inserted = updated = 0
