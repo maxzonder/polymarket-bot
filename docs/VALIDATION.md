@@ -15,8 +15,8 @@ No live API calls, no credentials required. Exits 0 if all pass, 1 if any fail.
 | 1 | `scanner_entry` | `fast_tp_mode` | Token inside entry zone → `process_scanner_entry()` buys at `best_ask`, NOT at ladder levels |
 | 2 | `resting_bid` | `big_swan_mode` | Token above zone → `process_candidate()` places resting bids at all levels below current price |
 | 3 | `partial_fill_realism` | `big_swan_mode` | Dry-run fill is capped at `ask_depth_at(bid_price)`; `filled_size` in paper DB matches position `token_quantity` |
-| 4 | `tp_pnl_accounting` | `balanced_mode` | TP fill accumulates `realized_pnl`; winner resolution adds moonbag delta on top (additive, not overwrite) |
-| 5 | `losing_resolution` | `balanced_mode` | Loser resolution sets negative moonbag PnL correctly |
+| 4 | `tp_pnl_accounting` | `big_swan_mode` | TP fill accumulates `realized_pnl`; winner resolution adds moonbag delta on top (additive, not overwrite) |
+| 5 | `losing_resolution` | `big_swan_mode` | Loser resolution sets negative moonbag PnL correctly |
 
 ## Invariants checked
 
@@ -31,7 +31,7 @@ No live API calls, no credentials required. Exits 0 if all pass, 1 if any fail.
 - All scenarios use isolated `tempfile.TemporaryDirectory()` — no shared state, no files written to the project
 - `get_orderbook` is patched in both `execution.order_manager` and `execution.position_monitor` namespaces
 - `ClobClient` runs in `dry_run=True` mode with a temp paper DB
-- `OrderManager._db_path` is overridden post-construction to point to a temp positions DB
+- `execution.order_manager.POSITIONS_DB` is patched at module level before `OrderManager` is constructed, so `_init_db()` never touches the real data directory
 
 ## Current limitations
 

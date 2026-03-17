@@ -72,7 +72,12 @@ def fake_candidate(price, entry_levels, mode_config):
 
 
 def make_om(tmp_dir: Path, mode_config, balance=100.0):
-    """Build an OrderManager wired to a temp DB with a paper ClobClient."""
+    """Build an OrderManager wired to a temp DB with a paper ClobClient.
+
+    POSITIONS_DB is patched at the module level before construction so the
+    OrderManager constructor (which calls _init_db()) never touches the real
+    data directory — not even once.
+    """
     config = BotConfig(
         mode=mode_config.name,
         dry_run=True,
@@ -84,10 +89,10 @@ def make_om(tmp_dir: Path, mode_config, balance=100.0):
         paper_db_path=tmp_dir / "paper.db",
     )
     risk = RiskManager(mode_config, balance_usdc=balance)
-    om = OrderManager(config, clob, risk)
-    # Override to temp DB so tests don't pollute the real data directory
-    om._db_path = str(tmp_dir / "positions.db")
-    om._init_db()
+    tmp_positions_db = tmp_dir / "positions.db"
+    with patch("execution.order_manager.POSITIONS_DB", tmp_positions_db):
+        om = OrderManager(config, clob, risk)
+    # _db_path is already set to tmp path by the patched constructor
     return om, config, clob
 
 
@@ -104,6 +109,16 @@ def read_position(db_path: str, token_id: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM positions WHERE token_id=? ORDER BY opened_at DESC LIMIT 1",
         (token_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def read_paper_order(paper_db_path: str, order_id: str) -> dict | None:
+    conn = sqlite3.connect(paper_db_path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM paper_orders WHERE order_id=?", (order_id,)
     ).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -265,6 +280,18 @@ def scenario_partial_fill_realism() -> tuple[bool, str]:
         if abs(actual_qty - 0.5) > 1e-6:
             return False, f"Expected token_quantity=0.5 (depth-capped), got {actual_qty}"
 
+        # Also verify paper_orders.filled_size is consistent with position state.
+        # This is the full consistency claim: paper DB and position DB must agree.
+        paper_order = read_paper_order(str(tmp_dir / "paper.db"), order_id)
+        if paper_order is None:
+            return False, "Paper order not found after fill"
+        actual_filled_size = float(paper_order.get("filled_size") or 0.0)
+        if abs(actual_filled_size - 0.5) > 1e-6:
+            return False, (
+                f"paper_orders.filled_size={actual_filled_size}, "
+                f"expected 0.5 (should match position token_quantity)"
+            )
+
         return True, ""
 
 
@@ -327,11 +354,15 @@ def scenario_tp_pnl_accounting() -> tuple[bool, str]:
         if tp_order is None:
             return False, "No non-moonbag TP order found"
 
-        # Trigger TP fill: 1.0 token at 0.05
+        # Use the actual TP order quantity from the system — not a hardcoded value.
+        # For big_swan_mode entry at 0.01, 2.0 tokens: tp_5x sell_qty = 2.0 * 0.20 = 0.40
+        tp_fill_qty = float(tp_order["sell_quantity"])
+        tp_fill_price = float(tp_order["sell_price"])
+
         om.on_tp_filled(
             order_id=tp_order["order_id"],
-            fill_price=0.05,
-            fill_quantity=1.0,
+            fill_price=tp_fill_price,
+            fill_quantity=tp_fill_qty,
         )
 
         # Check intermediate PnL
@@ -339,10 +370,13 @@ def scenario_tp_pnl_accounting() -> tuple[bool, str]:
         if pos is None:
             return False, "Position not found after TP fill"
 
-        expected_tp_pnl = (0.05 - 0.01) * 1.0  # 0.04
+        expected_tp_pnl = (tp_fill_price - 0.01) * tp_fill_qty
         actual_pnl = float(pos["realized_pnl"] or 0.0)
         if abs(actual_pnl - expected_tp_pnl) > 1e-6:
-            return False, f"After TP fill, expected realized_pnl={expected_tp_pnl}, got {actual_pnl}"
+            return False, (
+                f"After TP fill, expected realized_pnl={expected_tp_pnl:.6f} "
+                f"(price={tp_fill_price} qty={tp_fill_qty}), got {actual_pnl:.6f}"
+            )
 
         # Now market resolves as winner
         om.on_market_resolved(token_id="tok_yes", is_winner=True)
