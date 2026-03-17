@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS markets (
     fees_enabled        INTEGER,
     neg_risk            INTEGER,
     group_item_title    TEXT,
-    cyom                INTEGER
+    cyom                INTEGER,
+    restricted          INTEGER,
+    volume_1wk          REAL
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
@@ -77,6 +79,11 @@ CREATE INDEX IF NOT EXISTS idx_tokens_market ON tokens(market_id);
 
 def init_db(conn: sqlite3.Connection):
     conn.executescript(SCHEMA)
+    # Migrate existing DBs: add columns added after initial schema deployment
+    for col, col_type in [("restricted", "INTEGER"), ("volume_1wk", "REAL")]:
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(markets)").fetchall()}
+        if col not in existing:
+            conn.execute(f"ALTER TABLE markets ADD COLUMN {col} {col_type}")
     conn.commit()
 
 
@@ -202,6 +209,8 @@ def parse_market(data: dict) -> Optional[dict]:
     neg_risk = 1 if data.get("negRisk") else 0
     group_item_title = data.get("groupItemTitle") or None
     cyom = 1 if data.get("cyom") else 0
+    restricted = 1 if data.get("restricted") else 0
+    volume_1wk = data.get("volume1wk") or data.get("volume1wkClob")
 
     return {
         "id": str(market_id),
@@ -220,6 +229,8 @@ def parse_market(data: dict) -> Optional[dict]:
         "neg_risk": neg_risk,
         "group_item_title": group_item_title,
         "cyom": cyom,
+        "restricted": restricted,
+        "volume_1wk": volume_1wk,
     }
 
 
@@ -261,12 +272,14 @@ INSERT INTO markets (
     id, question, description, category, resolution_source,
     start_date, end_date, closed_time, duration_hours,
     volume, liquidity, comment_count, fees_enabled,
-    neg_risk, group_item_title, cyom
+    neg_risk, group_item_title, cyom,
+    restricted, volume_1wk
 ) VALUES (
     :id, :question, :description, :category, :resolution_source,
     :start_date, :end_date, :closed_time, :duration_hours,
     :volume, :liquidity, :comment_count, :fees_enabled,
-    :neg_risk, :group_item_title, :cyom
+    :neg_risk, :group_item_title, :cyom,
+    :restricted, :volume_1wk
 )
 ON CONFLICT(id) DO UPDATE SET
     question=excluded.question,
@@ -283,7 +296,9 @@ ON CONFLICT(id) DO UPDATE SET
     fees_enabled=excluded.fees_enabled,
     neg_risk=excluded.neg_risk,
     group_item_title=excluded.group_item_title,
-    cyom=excluded.cyom
+    cyom=excluded.cyom,
+    restricted=excluded.restricted,
+    volume_1wk=excluded.volume_1wk
 """
 
 TOKEN_UPSERT_SQL = """
