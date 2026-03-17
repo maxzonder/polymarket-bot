@@ -305,6 +305,7 @@ class ClobClient:
         """
         now = int(time.time())
         conn = sqlite3.connect(str(self.paper_db_path))
+        conn.row_factory = sqlite3.Row
         # Mark open SELL orders
         conn.execute(
             "UPDATE paper_orders SET status='resolved', updated_at=? "
