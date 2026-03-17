@@ -166,15 +166,21 @@ def _insert_resting_order(
     size: float,
     expires_at: int,
     mode: str,
+    label: str = "",
 ) -> None:
-    """Insert a paper BUY order into resting_orders so on_entry_filled can mark it matched."""
+    """Insert a paper BUY order into resting_orders so on_entry_filled can mark it matched.
+
+    label is stored in resting_orders.label and used for event-level PnL attribution:
+    format 'replay_{collection_date}_{price}' lets callers extract the event date
+    by joining positions → resting_orders on entry_order_id.
+    """
     now = int(time.time())
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT OR REPLACE INTO resting_orders "
-        "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode) "
-        "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?)",
-        (order_id, token_id, market_id, price, size, now, expires_at, mode),
+        "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode, label) "
+        "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?, ?)",
+        (order_id, token_id, market_id, price, size, now, expires_at, mode, label),
     )
     conn.commit()
     conn.close()
@@ -231,12 +237,16 @@ def replay_candidate(
 
     for level in entry_levels:
         token_qty = mc.stake_usdc / level
+        # Label format: 'replay_{collection_date}_{level}'
+        # The collection_date prefix is used by cohort_report for event-level PnL attribution
+        # (same token_id can appear on multiple dates; label disambiguates them).
+        event_label = f"replay_{collection_date}_{level}"
         result = clob.place_limit_order(
             token_id=token_id,
             side="BUY",
             price=level,
             size=token_qty,
-            label=f"replay_{level}",
+            label=event_label,
         )
         if result.status == "live":
             _insert_resting_order(
@@ -248,6 +258,7 @@ def replay_candidate(
                 token_qty,
                 expires_at,
                 mc.name,
+                label=event_label,
             )
             pending_buys[result.order_id] = {
                 "price": level,

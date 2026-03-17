@@ -159,6 +159,7 @@ def run(months: tuple[str, ...], limit: Optional[int], output_dir: Path) -> None
         r = replay_candidate(candidate, om, clob, mc, str(positions_db))
         r["swan_score"] = candidate.get("swan_score")
         r["token_id"] = candidate["token_id"]
+        r["date"] = candidate["date"]   # needed for (token_id, date) event attribution
         results.append(r)
         if i % 200 == 0:
             logger.info(f"  {i}/{len(candidates)} processed ({time.monotonic()-t0:.0f}s)")
@@ -166,18 +167,34 @@ def run(months: tuple[str, ...], limit: Optional[int], output_dir: Path) -> None
     elapsed = time.monotonic() - t0
     logger.info(f"Replay done in {elapsed:.0f}s")
 
-    # Pull per-token PnL from positions.db
+    # Pull per-event PnL from positions.db.
+    # Join positions → resting_orders on entry_order_id to recover the event date
+    # embedded in the label ('replay_{collection_date}_{level}').
+    # This gives (token_id, event_date) granularity, preventing double-counting
+    # when the same token_id appears as a signal on multiple dates.
     pnl_conn = sqlite3.connect(str(positions_db))
     pnl_conn.row_factory = sqlite3.Row
     pnl_rows = pnl_conn.execute(
-        "SELECT token_id, SUM(realized_pnl) AS pnl, SUM(entry_size_usdc) AS stake "
-        "FROM positions GROUP BY token_id"
+        """
+        SELECT
+            p.token_id,
+            SUBSTR(r.label, 8, 10) AS event_date,
+            SUM(p.realized_pnl)    AS pnl,
+            SUM(p.entry_size_usdc) AS stake
+        FROM positions p
+        JOIN resting_orders r ON p.entry_order_id = r.order_id
+        WHERE r.label LIKE 'replay_%'
+        GROUP BY p.token_id, event_date
+        """
     ).fetchall()
     pnl_conn.close()
-    pnl_by_token = {r["token_id"]: (float(r["pnl"] or 0), float(r["stake"] or 0))
-                    for r in pnl_rows}
+    # Key: (token_id, event_date) → (pnl, stake)
+    pnl_by_event: dict[tuple, tuple] = {
+        (r["token_id"], r["event_date"]): (float(r["pnl"] or 0), float(r["stake"] or 0))
+        for r in pnl_rows
+    }
 
-    # Aggregate by cohort
+    # Aggregate by cohort — each result row is one (token_id, date) event
     cohorts: dict[str, dict] = {}
     for r in results:
         label = cohort_label(r.get("swan_score"))
@@ -192,9 +209,11 @@ def run(months: tuple[str, ...], limit: Optional[int], output_dir: Path) -> None
             c["filled"] += 1
         c["total_entries"] += r.get("filled_entries", 0)
         c["total_tps"] += r.get("filled_tps", 0)
-        token_pnl, token_stake = pnl_by_token.get(r.get("token_id", ""), (0.0, 0.0))
-        c["pnl"] += token_pnl
-        c["stake"] += token_stake
+        event_pnl, event_stake = pnl_by_event.get(
+            (r.get("token_id", ""), r.get("date", "")), (0.0, 0.0)
+        )
+        c["pnl"] += event_pnl
+        c["stake"] += event_stake
 
     print_report(cohorts, elapsed, len(candidates), months, positions_db)
 
