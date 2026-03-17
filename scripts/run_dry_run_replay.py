@@ -5,11 +5,20 @@ Replays token_swans events in chronological order through the same entry/TP/reso
 path as live big_swan_mode — paper orders only, no live API calls.
 
 Signal source : token_swans (entry data only — no exit leakage)
-Fill model    : conservative — BUY fills on first trade at price <= bid_price;
-                TP fills on first trade at price >= tp_price;
-                fill_quantity = min(order_tokens, trade.size)
+Fill model    : conservative — BUY fills at limit price on first trade <= bid_price
+                AFTER entry_ts_first; TP fills at limit price on first trade >= tp_price;
+                per-trade liquidity is consumed sequentially across all pending orders.
 State machine : OrderManager.on_entry_filled / on_tp_filled / on_market_resolved
 Paper DB      : isolated per-run directory under data/replay_runs/<timestamp>/
+
+Correctness properties (v2):
+  1. Temporal gate   — orders only become active at/after entry_ts_first
+  2. Liquidity drain — each trade's size budget is shared across all fills from that print
+  3. Partial fills   — orders stay pending until fully filled; qty reduces each fill
+  4. Stable dedup    — ROW_NUMBER() picks the exact row with max possible_x per (token_id, date)
+
+Known limitation: wall-clock time.time() is used for DB record timestamps, not replay-time.
+This does not affect fill logic or PnL — only order created_at / expires_at fields.
 
 Usage:
     python3 scripts/run_dry_run_replay.py --start 2026-02-01 --end 2026-02-07
@@ -60,38 +69,49 @@ def load_candidates(
 ) -> list[dict]:
     """
     Load deduplicated token_swans candidates within the baseline universe.
-    Deduplicates (token_id, date) by taking the row with max possible_x.
+
+    Uses ROW_NUMBER() to pick the single exact row with the highest possible_x
+    per (token_id, date) — every field comes from the same consistent row.
     Ordered by entry_ts_first ascending (chronological replay order).
     """
     rows = conn.execute(
         """
+        WITH ranked AS (
+            SELECT
+                ts.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ts.token_id, ts.date
+                    ORDER BY ts.possible_x DESC, ts.rowid ASC
+                ) AS rn
+            FROM token_swans ts
+            WHERE ts.entry_min_price   <= :emax
+              AND ts.entry_volume_usdc >= :evol
+              AND ts.entry_trade_count >= :etc
+              AND ts.date >= :start
+              AND ts.date <= :end
+        )
         SELECT
-            ts.token_id,
-            ts.market_id,
-            ts.date,
-            ts.entry_min_price,
-            ts.entry_volume_usdc,
-            ts.entry_trade_count,
-            MAX(ts.possible_x)      AS possible_x,
-            MIN(ts.entry_ts_first)  AS entry_ts_first,
-            MAX(ts.entry_ts_last)   AS entry_ts_last,
+            r.token_id,
+            r.market_id,
+            r.date,
+            r.entry_min_price,
+            r.entry_volume_usdc,
+            r.entry_trade_count,
+            r.possible_x,
+            r.entry_ts_first,
+            r.entry_ts_last,
             m.closed_time,
             m.duration_hours,
             m.volume_1wk,
             t.is_winner,
             t.outcome_name
-        FROM token_swans ts
-        JOIN markets m ON ts.market_id = m.id
-        JOIN tokens  t ON ts.token_id  = t.token_id
-        WHERE ts.entry_min_price    <= :emax
-          AND ts.entry_volume_usdc  >= :evol
-          AND ts.entry_trade_count  >= :etc
-          AND m.duration_hours      >= :dh
+        FROM ranked r
+        JOIN markets m ON r.market_id = m.id
+        JOIN tokens  t ON r.token_id  = t.token_id
+        WHERE r.rn = 1
+          AND m.duration_hours     >= :dh
           AND (m.volume_1wk IS NULL OR m.volume_1wk >= :vwk)
-          AND ts.date >= :start
-          AND ts.date <= :end
-        GROUP BY ts.token_id, ts.date
-        ORDER BY MIN(ts.entry_ts_first) ASC
+        ORDER BY r.entry_ts_first ASC
         """,
         {
             "emax": ENTRY_PRICE_MAX,
@@ -169,12 +189,19 @@ def replay_candidate(
 ) -> dict:
     """
     Drive one swan candidate through the full entry → TP → resolution path.
+
+    Correctness properties enforced here:
+    1. Temporal gate   : BUY fills only checked for trades at/after entry_ts_first
+    2. Liquidity drain : each trade's token budget shared sequentially across all fills
+    3. Partial fills   : order stays pending with reduced qty until fully consumed
+
     Returns a result dict summarising what happened.
     """
     token_id = candidate["token_id"]
     market_id = candidate["market_id"]
     collection_date = candidate["date"]
     entry_min_price = float(candidate["entry_min_price"])
+    entry_ts_first = int(candidate["entry_ts_first"])
     is_winner = bool(candidate["is_winner"])
     outcome_name = candidate.get("outcome_name") or ""
 
@@ -189,10 +216,12 @@ def replay_candidate(
         return {"status": "no_levels", "token_id": token_id, "market_id": market_id,
                 "entry_min_price": entry_min_price}
 
-    # Place paper resting BUY orders
+    # Place paper resting BUY orders.
+    # pending_buys: order_id → {price, remaining_qty}
+    # Orders are not checked for fills until entry_ts_first (temporal gate).
     now_ts = int(time.time())
     expires_at = now_ts + 86400 * 60  # long TTL — replay doesn't expire orders
-    pending_buys: dict[str, dict] = {}  # order_id → {price, token_qty}
+    pending_buys: dict[str, dict] = {}
 
     for level in entry_levels:
         token_qty = mc.stake_usdc / level
@@ -214,7 +243,7 @@ def replay_candidate(
                 expires_at,
                 mc.name,
             )
-            pending_buys[result.order_id] = {"price": level, "token_qty": token_qty}
+            pending_buys[result.order_id] = {"price": level, "remaining_qty": token_qty}
 
     if not pending_buys:
         return {"status": "no_orders", "token_id": token_id, "market_id": market_id}
@@ -224,47 +253,62 @@ def replay_candidate(
 
     # Process trades in ascending timestamp order
     for trade in trades:
+        trade_ts = int(trade["timestamp"])
         trade_price = float(trade["price"])
-        trade_size = float(trade["size"])  # tokens
+        trade_budget = float(trade["size"])  # tokens available from this print
 
-        # ── Check resting BUY fills ────────────────────────────────────────────
-        # Fill when a trade occurs at or below our bid price.
-        # Use the limit bid price as fill price (limit order semantics).
-        for order_id, order in list(pending_buys.items()):
-            bid_price = order["price"]
-            if trade_price <= bid_price:
-                fill_qty = min(order["token_qty"], trade_size)
-                clob.paper_simulate_fill(order_id, bid_price, fill_qty)
-                try:
-                    om.on_entry_filled(
-                        order_id=order_id,
-                        token_id=token_id,
-                        market_id=market_id,
-                        fill_price=bid_price,
-                        fill_quantity=fill_qty,
-                        outcome_name=outcome_name,
-                    )
-                except Exception as e:
-                    logger.warning(f"on_entry_filled error {token_id[:16]}: {e}")
-                del pending_buys[order_id]
-                filled_entries += 1
+        # ── Check resting BUY fills (only at/after signal time) ───────────────
+        # Fix 1: temporal gate — orders are inactive before the floor event.
+        if trade_ts >= entry_ts_first and pending_buys:
+            for order_id, order in list(pending_buys.items()):
+                if trade_budget <= 0:
+                    break  # Fix 2: this print's liquidity is exhausted
+                bid_price = order["price"]
+                if trade_price <= bid_price:
+                    # Fix 3: partial fill — consume only what the trade can supply
+                    fill_qty = min(order["remaining_qty"], trade_budget)
+                    trade_budget -= fill_qty
+                    order["remaining_qty"] -= fill_qty
+
+                    clob.paper_simulate_fill(order_id, bid_price, fill_qty)
+                    try:
+                        om.on_entry_filled(
+                            order_id=order_id,
+                            token_id=token_id,
+                            market_id=market_id,
+                            fill_price=bid_price,
+                            fill_quantity=fill_qty,
+                            outcome_name=outcome_name,
+                        )
+                    except Exception as e:
+                        logger.warning(f"on_entry_filled error {token_id[:16]}: {e}")
+                    filled_entries += 1
+
+                    # Only remove from pending if fully filled
+                    if order["remaining_qty"] <= 1e-9:
+                        del pending_buys[order_id]
 
         # ── Check TP SELL fills ────────────────────────────────────────────────
-        # Query live SELL orders from paper DB; fill when trade crosses the limit price.
+        # TP orders can fill any time after they're placed (no temporal gate needed —
+        # they're placed by on_entry_filled which already enforced the entry gate).
         open_sells = [
             o for o in clob.get_open_orders(token_id)
             if o.get("side") == "SELL"
         ]
-        for tp_order in open_sells:
-            tp_price = float(tp_order["price"])
-            if trade_price >= tp_price:
-                fill_qty = min(float(tp_order["size"]), trade_size)
-                clob.paper_simulate_fill(tp_order["order_id"], tp_price, fill_qty)
-                try:
-                    om.on_tp_filled(tp_order["order_id"], tp_price, fill_qty)
-                except Exception as e:
-                    logger.warning(f"on_tp_filled error {token_id[:16]}: {e}")
-                filled_tps += 1
+        if open_sells and trade_budget > 0:
+            for tp_order in open_sells:
+                if trade_budget <= 0:
+                    break
+                tp_price = float(tp_order["price"])
+                if trade_price >= tp_price:
+                    fill_qty = min(float(tp_order["size"]), trade_budget)
+                    trade_budget -= fill_qty
+                    clob.paper_simulate_fill(tp_order["order_id"], tp_price, fill_qty)
+                    try:
+                        om.on_tp_filled(tp_order["order_id"], tp_price, fill_qty)
+                    except Exception as e:
+                        logger.warning(f"on_tp_filled error {token_id[:16]}: {e}")
+                    filled_tps += 1
 
     # ── Market resolution ──────────────────────────────────────────────────────
     try:
@@ -308,7 +352,6 @@ def print_summary(results: list[dict], positions_db_path: str, mode: str) -> Non
 
     roi_pct = (total_pnl / total_stake * 100) if total_stake > 0 else 0.0
 
-    # Per-cohort breakdown from results
     winner_entries = sum(r.get("filled_entries", 0) for r in ok if r.get("is_winner"))
     winner_candidates = sum(1 for r in ok if r.get("is_winner"))
 
@@ -332,9 +375,9 @@ def print_summary(results: list[dict], positions_db_path: str, mode: str) -> Non
     print(f"  Signal quality check:")
     print(f"    Winners in signal  : {winner_candidates}/{len(ok)}"
           f"  ({100*winner_candidates/len(ok):.0f}%)" if ok else "    Winners in signal  : 0/0")
-    print(f"    Entry fills from winners: {winner_entries}/{total_entries}"
+    print(f"    Entry fills winners: {winner_entries}/{total_entries}"
           f"  ({100*winner_entries/total_entries:.0f}%)" if total_entries else
-          f"    Entry fills from winners: 0/0")
+          f"    Entry fills winners: 0/0")
     print(sep)
 
 
