@@ -112,7 +112,7 @@ BALANCED_MODE = ModeConfig(
 BIG_SWAN_MODE = ModeConfig(
     name="big_swan_mode",
     # wide range — we pre-position early, resting bids at floor levels
-    entry_price_levels=(0.001, 0.002, 0.005, 0.01),
+    entry_price_levels=(0.001, 0.005, 0.01),
     entry_price_max=0.30,       # screen markets with price up to 30c
     use_resting_bids=True,
     scanner_entry=False,        # ONLY resting bids; no chasing dips
