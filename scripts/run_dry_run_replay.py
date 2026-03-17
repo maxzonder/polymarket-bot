@@ -11,11 +11,13 @@ Fill model    : conservative — BUY fills at limit price on first trade <= bid_
 State machine : OrderManager.on_entry_filled / on_tp_filled / on_market_resolved
 Paper DB      : isolated per-run directory under data/replay_runs/<timestamp>/
 
-Correctness properties (v2):
-  1. Temporal gate   — orders only become active at/after entry_ts_first
-  2. Liquidity drain — each trade's size budget is shared across all fills from that print
-  3. Partial fills   — orders stay pending until fully filled; qty reduces each fill
-  4. Stable dedup    — ROW_NUMBER() picks the exact row with max possible_x per (token_id, date)
+Correctness properties (v3):
+  1. Temporal gate    — orders only become active at/after entry_ts_first
+  2. Liquidity drain  — each trade's size budget is shared across all fills from that print
+  3. Partial fills    — orders stay pending until fully filled; qty reduces each fill
+  4. Stable dedup     — ROW_NUMBER() picks the exact row with max possible_x per (token_id, date)
+  5. Single dispatch  — on_entry_filled called exactly once per order; filled_entries ==
+                        Positions opened always holds (no duplicate positions per order)
 
 Known limitation: wall-clock time.time() is used for DB record timestamps, not replay-time.
 This does not affect fill logic or PnL — only order created_at / expires_at fields.
@@ -191,9 +193,11 @@ def replay_candidate(
     Drive one swan candidate through the full entry → TP → resolution path.
 
     Correctness properties enforced here:
-    1. Temporal gate   : BUY fills only checked for trades at/after entry_ts_first
-    2. Liquidity drain : each trade's token budget shared sequentially across all fills
-    3. Partial fills   : order stays pending with reduced qty until fully consumed
+    1. Temporal gate    : BUY fills only checked for trades at/after entry_ts_first
+    2. Liquidity drain  : each trade's token budget shared sequentially across all fills
+    3. Partial fills    : order stays pending with reduced qty until fully consumed
+    4. Single dispatch  : on_entry_filled called exactly once per order (at full fill or
+                          trade-file end); filled_entries == Positions opened always holds
 
     Returns a result dict summarising what happened.
     """
@@ -217,7 +221,9 @@ def replay_candidate(
                 "entry_min_price": entry_min_price}
 
     # Place paper resting BUY orders.
-    # pending_buys: order_id → {price, remaining_qty}
+    # pending_buys: order_id → {price, remaining_qty, filled_qty}
+    # filled_qty accumulates across partial fills; on_entry_filled is called
+    # exactly ONCE per order — when fully consumed or after the last trade.
     # Orders are not checked for fills until entry_ts_first (temporal gate).
     now_ts = int(time.time())
     expires_at = now_ts + 86400 * 60  # long TTL — replay doesn't expire orders
@@ -243,13 +249,37 @@ def replay_candidate(
                 expires_at,
                 mc.name,
             )
-            pending_buys[result.order_id] = {"price": level, "remaining_qty": token_qty}
+            pending_buys[result.order_id] = {
+                "price": level,
+                "remaining_qty": token_qty,
+                "filled_qty": 0.0,
+            }
 
     if not pending_buys:
         return {"status": "no_orders", "token_id": token_id, "market_id": market_id}
 
     filled_entries = 0
     filled_tps = 0
+
+    def _dispatch_entry(order_id: str, order: dict) -> None:
+        """Call on_entry_filled exactly once for a completed/flushed order."""
+        nonlocal filled_entries
+        total_fill = order["filled_qty"]
+        if total_fill <= 1e-9:
+            return
+        clob.paper_simulate_fill(order_id, order["price"], total_fill)
+        try:
+            om.on_entry_filled(
+                order_id=order_id,
+                token_id=token_id,
+                market_id=market_id,
+                fill_price=order["price"],
+                fill_quantity=total_fill,
+                outcome_name=outcome_name,
+            )
+        except Exception as e:
+            logger.warning(f"on_entry_filled error {token_id[:16]}: {e}")
+        filled_entries += 1
 
     # Process trades in ascending timestamp order
     for trade in trades:
@@ -258,39 +288,28 @@ def replay_candidate(
         trade_budget = float(trade["size"])  # tokens available from this print
 
         # ── Check resting BUY fills (only at/after signal time) ───────────────
-        # Fix 1: temporal gate — orders are inactive before the floor event.
+        # Temporal gate: orders inactive before the floor event.
+        # Liquidity drain: trade_budget is shared sequentially across all fills.
+        # Partial fills: on_entry_filled deferred until order fully consumed.
         if trade_ts >= entry_ts_first and pending_buys:
             for order_id, order in list(pending_buys.items()):
                 if trade_budget <= 0:
-                    break  # Fix 2: this print's liquidity is exhausted
+                    break
                 bid_price = order["price"]
                 if trade_price <= bid_price:
-                    # Fix 3: partial fill — consume only what the trade can supply
                     fill_qty = min(order["remaining_qty"], trade_budget)
                     trade_budget -= fill_qty
                     order["remaining_qty"] -= fill_qty
+                    order["filled_qty"] += fill_qty
 
-                    clob.paper_simulate_fill(order_id, bid_price, fill_qty)
-                    try:
-                        om.on_entry_filled(
-                            order_id=order_id,
-                            token_id=token_id,
-                            market_id=market_id,
-                            fill_price=bid_price,
-                            fill_quantity=fill_qty,
-                            outcome_name=outcome_name,
-                        )
-                    except Exception as e:
-                        logger.warning(f"on_entry_filled error {token_id[:16]}: {e}")
-                    filled_entries += 1
-
-                    # Only remove from pending if fully filled
                     if order["remaining_qty"] <= 1e-9:
+                        # Order fully filled — dispatch position + TP orders now
+                        _dispatch_entry(order_id, order)
                         del pending_buys[order_id]
 
         # ── Check TP SELL fills ────────────────────────────────────────────────
-        # TP orders can fill any time after they're placed (no temporal gate needed —
-        # they're placed by on_entry_filled which already enforced the entry gate).
+        # TP orders are placed by on_entry_filled; they appear in paper_orders
+        # as live SELL orders. Fill when trade price crosses the limit.
         open_sells = [
             o for o in clob.get_open_orders(token_id)
             if o.get("side") == "SELL"
@@ -309,6 +328,12 @@ def replay_candidate(
                     except Exception as e:
                         logger.warning(f"on_tp_filled error {token_id[:16]}: {e}")
                     filled_tps += 1
+
+    # Flush any orders that were partially filled but not fully consumed by end of trades.
+    # This ensures every touched order produces exactly one position.
+    for order_id, order in list(pending_buys.items()):
+        if order["filled_qty"] > 1e-9:
+            _dispatch_entry(order_id, order)
 
     # ── Market resolution ──────────────────────────────────────────────────────
     try:
