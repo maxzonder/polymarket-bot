@@ -103,7 +103,7 @@ def positions_summary(conn: sqlite3.Connection, since_ts: int) -> dict:
         """
         SELECT
             COUNT(*)                                AS total,
-            SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS closed,
+            SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS resolved,
             SUM(CASE WHEN status='open'     THEN 1 ELSE 0 END) AS open,
             SUM(CASE WHEN realized_pnl > 0  THEN 1 ELSE 0 END) AS profitable,
             SUM(entry_size_usdc)                    AS total_stake,
@@ -209,13 +209,13 @@ def print_report(
 
     print(f"\n  POSITIONS")
     print(f"  Total opened               : {pos.get('total', 0)}")
-    print(f"  Closed                     : {pos.get('closed', 0)}")
+    print(f"  Resolved                   : {pos.get('resolved', 0)}")
     print(f"  Still open                 : {pos.get('open', 0)}")
     print(f"  Profitable                 : {pos.get('profitable', 0)}")
     if total_stake > 0:
         print(f"  Stake deployed             : ${total_stake:.4f}")
         print(f"  Realized PnL               : ${total_pnl:+.4f}")
-        print(f"  ROI (closed only)          : {roi:+.1f}%")
+        print(f"  ROI (resolved only)        : {roi:+.1f}%")
 
     # ── vs Replay baseline ───────────────────────────────────────────────────
     b = REPLAY_BASELINE
