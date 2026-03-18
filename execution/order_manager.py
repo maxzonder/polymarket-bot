@@ -169,7 +169,7 @@ class OrderManager:
                 order_id,
             ),
         )
-        conn.close()
+        # Do NOT close conn here — caller owns the connection lifecycle.
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)

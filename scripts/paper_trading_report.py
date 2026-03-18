@@ -15,6 +15,16 @@ Usage:
     python3 scripts/paper_trading_report.py
     python3 scripts/paper_trading_report.py --db /path/to/positions.db
     python3 scripts/paper_trading_report.py --since 2026-03-18   # filter by date
+
+How to start the live dry-run bot (no real capital):
+    python3 main.py                   # dry_run=True by default, big_swan_mode
+    DRY_RUN=true python3 main.py      # explicit
+    BOT_MODE=big_swan_mode DRY_RUN=true python3 main.py
+
+Position lifecycle (order_manager.py):
+    resting_orders.status : live → matched | cancelled
+    positions.status      : open → resolved
+    tp_orders.status      : live → matched
 """
 from __future__ import annotations
 
@@ -70,7 +80,7 @@ def order_outcomes(conn: sqlite3.Connection, since_ts: int) -> dict:
             -- positions opened from this order
             COUNT(p.position_id) AS positions_opened,
             -- TP orders from those positions
-            SUM(CASE WHEN tp.status = 'filled' THEN 1 ELSE 0 END) AS tp_filled,
+            SUM(CASE WHEN tp.status = 'matched' THEN 1 ELSE 0 END) AS tp_filled,
             -- time from order placed to position opened
             MIN(p.opened_at - r.created_at)  AS min_ttf_s,
             MAX(p.opened_at - r.created_at)  AS max_ttf_s,
@@ -93,9 +103,9 @@ def positions_summary(conn: sqlite3.Connection, since_ts: int) -> dict:
         """
         SELECT
             COUNT(*)                                AS total,
-            SUM(CASE WHEN status='closed' THEN 1 ELSE 0 END) AS closed,
-            SUM(CASE WHEN status='open'   THEN 1 ELSE 0 END) AS open,
-            SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) AS profitable,
+            SUM(CASE WHEN status='resolved' THEN 1 ELSE 0 END) AS closed,
+            SUM(CASE WHEN status='open'     THEN 1 ELSE 0 END) AS open,
+            SUM(CASE WHEN realized_pnl > 0  THEN 1 ELSE 0 END) AS profitable,
             SUM(entry_size_usdc)                    AS total_stake,
             SUM(COALESCE(realized_pnl, 0))          AS total_pnl
         FROM positions
@@ -209,7 +219,14 @@ def print_report(
 
     # ── vs Replay baseline ───────────────────────────────────────────────────
     b = REPLAY_BASELINE
-    print(f"\n  VS REPLAY BASELINE (#8/#9, high cohort, pruned stack)")
+    # Replay baseline scope: big_swan_mode, entry_levels=(0.001,0.005,0.010),
+    # swan_score >= 7, Dec 2025 + Jan 2026 + Feb 2026, ~1,022 positions.
+    # Live paper trading scope: same mode/config, current live markets.
+    # Comparison is directionally valid but not apples-to-apples:
+    # replay used historical fills; live uses real orderbook fills.
+    # Use the gap to detect systematic differences, not for exact alpha projection.
+    print(f"\n  VS REPLAY BASELINE (#8/#9 | big_swan_mode, swan>=7, pruned stack)")
+    print(f"  NOTE: replay=historical fills; live=real orderbook — gap shows execution realism")
     print(f"  {'Metric':<30}  {'Live':>10}  {'Replay':>10}  {'Gap':>8}")
     print(f"  {'-'*30}  {'-'*10}  {'-'*10}  {'-'*8}")
 
