@@ -248,16 +248,30 @@ def print_report(results: list[dict], top_k: int, elapsed: float) -> None:
     print()
     if len(wr_values) >= 2:
         spread = max(wr_values) - min(wr_values)
-        if spread > 5:
-            verdict = (
-                f"Content signal SHOWS separation ({spread:.1f}pp spread across "
-                "similarity quartiles). Worth investigating further."
-            )
-        else:
+        # Check monotonicity: a real signal should be either consistently
+        # increasing or consistently decreasing across Q1→Q4.
+        # Non-monotonic (e.g. W-shape) indicates noise even if spread looks large.
+        diffs = [wr_values[i+1] - wr_values[i] for i in range(len(wr_values) - 1)]
+        monotonic = all(d >= 0 for d in diffs) or all(d <= 0 for d in diffs)
+
+        if spread <= 5:
             verdict = (
                 f"Content signal does NOT separate cohorts ({spread:.1f}pp spread). "
                 "Semantic similarity adds no predictive power beyond swan_score. "
                 "Close the content hypothesis."
+            )
+        elif not monotonic:
+            verdict = (
+                f"Content signal shows {spread:.1f}pp spread but the pattern is "
+                f"NON-MONOTONIC ({' → '.join(f'{v:.1f}%' for v in wr_values)}). "
+                "Non-monotonic separation across distance quartiles is consistent "
+                "with noise, not a directional signal. "
+                "Close the content hypothesis."
+            )
+        else:
+            verdict = (
+                f"Content signal SHOWS monotonic separation ({spread:.1f}pp). "
+                "Worth investigating further."
             )
         print(f"  Verdict : {verdict}")
 
