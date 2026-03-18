@@ -138,6 +138,7 @@ class OrderManager:
         conn = sqlite3.connect(self._db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         _init_positions_db(conn)
+        conn.close()
 
     def _log_scan(
         self,
@@ -562,9 +563,13 @@ class OrderManager:
                 "WHERE position_id=?",
                 (now, moonbag_pnl, pos["position_id"]),
             )
-            # Cancel any remaining TP orders
+            # Cancel any remaining TP orders (live and moonbag)
             conn.execute(
                 "UPDATE tp_orders SET status='cancelled' WHERE position_id=? AND status='live'",
+                (pos["position_id"],),
+            )
+            conn.execute(
+                "UPDATE tp_orders SET status='cancelled' WHERE position_id=? AND status='moonbag'",
                 (pos["position_id"],),
             )
             logger.info(
@@ -575,8 +580,7 @@ class OrderManager:
         conn.commit()
         conn.close()
 
-        if is_winner:
-            self.clob.paper_record_resolution(token_id, 1.0)
+        self.clob.paper_record_resolution(token_id, 1.0 if is_winner else 0.0)
 
     # ── Stale order cleanup ───────────────────────────────────────────────────
 

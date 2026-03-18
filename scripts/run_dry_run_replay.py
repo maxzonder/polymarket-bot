@@ -342,9 +342,18 @@ def replay_candidate(
 
     # Flush any orders that were partially filled but not fully consumed by end of trades.
     # This ensures every touched order produces exactly one position.
+    # Orders with zero fills are marked 'cancelled' so they don't pollute live-order counts.
+    conn = sqlite3.connect(positions_db_path)
     for order_id, order in list(pending_buys.items()):
         if order["filled_qty"] > 1e-9:
             _dispatch_entry(order_id, order)
+        else:
+            conn.execute(
+                "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
+                (order_id,),
+            )
+    conn.commit()
+    conn.close()
 
     # ── Market resolution ──────────────────────────────────────────────────────
     try:
