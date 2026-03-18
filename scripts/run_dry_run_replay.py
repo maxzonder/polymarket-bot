@@ -11,13 +11,17 @@ Fill model    : conservative — BUY fills at limit price on first trade <= bid_
 State machine : OrderManager.on_entry_filled / on_tp_filled / on_market_resolved
 Paper DB      : isolated per-run directory under data/replay_runs/<timestamp>/
 
-Correctness properties (v3):
+Correctness properties (v4):
   1. Temporal gate    — orders only become active at/after entry_ts_first
   2. Liquidity drain  — each trade's size budget is shared across all fills from that print
   3. Partial fills    — orders stay pending until fully filled; qty reduces each fill
   4. Stable dedup     — ROW_NUMBER() picks the exact row with max possible_x per (token_id, date)
   5. Single dispatch  — on_entry_filled called exactly once per order; filled_entries ==
                         Positions opened always holds (no duplicate positions per order)
+  6. Trade direction  — SELL-side trades fill BUY bids; BUY-side trades fill SELL TPs.
+                        Uses the 'side' field present in all trade records.
+  7. BUY price priority — pending orders iterated highest-price-first so higher bids
+                        have first claim on available liquidity (correct CLOB semantics).
 
 Known limitation: wall-clock time.time() is used for DB record timestamps, not replay-time.
 This does not affect fill logic or PnL — only order created_at / expires_at fields.
@@ -297,13 +301,22 @@ def replay_candidate(
         trade_ts = int(trade["timestamp"])
         trade_price = float(trade["price"])
         trade_budget = float(trade["size"])  # tokens available from this print
+        # Trade direction: 'SELL' taker = someone selling into resting BUY bids;
+        # 'BUY' taker = someone buying against resting SELL asks (our TP orders).
+        # '' fallback preserves behaviour for any legacy files without a side field.
+        trade_side = trade.get("side", "")
 
         # ── Check resting BUY fills (only at/after signal time) ───────────────
         # Temporal gate: orders inactive before the floor event.
         # Liquidity drain: trade_budget is shared sequentially across all fills.
         # Partial fills: on_entry_filled deferred until order fully consumed.
-        if trade_ts >= entry_ts_first and pending_buys:
-            for order_id, order in list(pending_buys.items()):
+        # Side filter: only SELL-side trades (taker selling) can fill our BUY bids.
+        #   Iterating in descending price order restores correct BUY price priority:
+        #   higher-priced bids have first claim on available liquidity.
+        if trade_side in ("SELL", "") and trade_ts >= entry_ts_first and pending_buys:
+            for order_id, order in sorted(
+                pending_buys.items(), key=lambda kv: kv[1]["price"], reverse=True
+            ):
                 if trade_budget <= 0:
                     break
                 bid_price = order["price"]
@@ -321,24 +334,26 @@ def replay_candidate(
         # ── Check TP SELL fills ────────────────────────────────────────────────
         # TP orders are placed by on_entry_filled; they appear in paper_orders
         # as live SELL orders. Fill when trade price crosses the limit.
-        open_sells = [
-            o for o in clob.get_open_orders(token_id)
-            if o.get("side") == "SELL"
-        ]
-        if open_sells and trade_budget > 0:
-            for tp_order in open_sells:
-                if trade_budget <= 0:
-                    break
-                tp_price = float(tp_order["price"])
-                if trade_price >= tp_price:
-                    fill_qty = min(float(tp_order["size"]), trade_budget)
-                    trade_budget -= fill_qty
-                    clob.paper_simulate_fill(tp_order["order_id"], tp_price, fill_qty)
-                    try:
-                        om.on_tp_filled(tp_order["order_id"], tp_price, fill_qty)
-                    except Exception as e:
-                        logger.warning(f"on_tp_filled error {token_id[:16]}: {e}")
-                    filled_tps += 1
+        # Side filter: only BUY-side trades (taker buying) can fill our SELL TPs.
+        if trade_side not in ("SELL",):
+            open_sells = [
+                o for o in clob.get_open_orders(token_id)
+                if o.get("side") == "SELL"
+            ]
+            if open_sells and trade_budget > 0:
+                for tp_order in open_sells:
+                    if trade_budget <= 0:
+                        break
+                    tp_price = float(tp_order["price"])
+                    if trade_price >= tp_price:
+                        fill_qty = min(float(tp_order["size"]), trade_budget)
+                        trade_budget -= fill_qty
+                        clob.paper_simulate_fill(tp_order["order_id"], tp_price, fill_qty)
+                        try:
+                            om.on_tp_filled(tp_order["order_id"], tp_price, fill_qty)
+                        except Exception as e:
+                            logger.warning(f"on_tp_filled error {token_id[:16]}: {e}")
+                        filled_tps += 1
 
     # Flush any orders that were partially filled but not fully consumed by end of trades.
     # This ensures every touched order produces exactly one position.
