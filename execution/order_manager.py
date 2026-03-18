@@ -81,14 +81,15 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status);
 
         CREATE TABLE IF NOT EXISTS tp_orders (
-            order_id      TEXT PRIMARY KEY,
-            position_id   TEXT NOT NULL,
-            token_id      TEXT NOT NULL,
-            sell_price    REAL NOT NULL,
-            sell_quantity REAL NOT NULL,
-            label         TEXT,
-            status        TEXT NOT NULL DEFAULT 'live',
-            created_at    INTEGER NOT NULL,
+            order_id         TEXT PRIMARY KEY,
+            position_id      TEXT NOT NULL,
+            token_id         TEXT NOT NULL,
+            sell_price       REAL NOT NULL,
+            sell_quantity    REAL NOT NULL,
+            filled_quantity  REAL NOT NULL DEFAULT 0,
+            label            TEXT,
+            status           TEXT NOT NULL DEFAULT 'live',
+            created_at       INTEGER NOT NULL,
             FOREIGN KEY (position_id) REFERENCES positions(position_id)
         );
         CREATE INDEX IF NOT EXISTS idx_tp_position ON tp_orders(position_id);
@@ -138,6 +139,12 @@ class OrderManager:
         conn = sqlite3.connect(self._db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         _init_positions_db(conn)
+        # Migration: add filled_quantity if this DB predates the column.
+        try:
+            conn.execute("ALTER TABLE tp_orders ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass  # column already exists
         conn.close()
 
     def _log_scan(
@@ -514,8 +521,8 @@ class OrderManager:
         now = int(time.time())
         conn = self._conn()
         conn.execute(
-            "UPDATE tp_orders SET status='matched' WHERE order_id=?",
-            (order_id,),
+            "UPDATE tp_orders SET status='matched', filled_quantity = filled_quantity + ? WHERE order_id=?",
+            (fill_quantity, order_id),
         )
         # Find position and persist partial PnL
         row = conn.execute(
@@ -557,24 +564,42 @@ class OrderManager:
             # Moonbag delta: add on top of TP PnL already accumulated in realized_pnl
             moonbag_pnl = (resolution_price - entry_price) * moonbag_qty
 
+            # Live TP tokens (unfilled at resolution) must be valued at resolution_price,
+            # not silently discarded. For losers this is a small negative correction
+            # (entry_price * remaining_qty). For winners it captures tokens that
+            # skipped the TP price and resolved directly at $1.00.
+            live_tps = conn.execute(
+                "SELECT sell_quantity, filled_quantity FROM tp_orders "
+                "WHERE position_id=? AND status='live'",
+                (pos["position_id"],),
+            ).fetchall()
+            tp_residual_pnl = sum(
+                (resolution_price - entry_price) * (float(r["sell_quantity"]) - float(r["filled_quantity"]))
+                for r in live_tps
+            )
+
+            total_resolution_pnl = moonbag_pnl + tp_residual_pnl
+
             conn.execute(
                 "UPDATE positions SET status='resolved', closed_at=?, "
                 "realized_pnl = COALESCE(realized_pnl, 0) + ? "
                 "WHERE position_id=?",
-                (now, moonbag_pnl, pos["position_id"]),
+                (now, total_resolution_pnl, pos["position_id"]),
             )
-            # Cancel any remaining TP orders (live and moonbag)
+            # Mark live TP orders as 'resolved' (distinct from 'cancelled' by stale cleanup)
             conn.execute(
-                "UPDATE tp_orders SET status='cancelled' WHERE position_id=? AND status='live'",
+                "UPDATE tp_orders SET status='resolved' WHERE position_id=? AND status='live'",
                 (pos["position_id"],),
             )
+            # Moonbag records also resolved
             conn.execute(
-                "UPDATE tp_orders SET status='cancelled' WHERE position_id=? AND status='moonbag'",
+                "UPDATE tp_orders SET status='resolved' WHERE position_id=? AND status='moonbag'",
                 (pos["position_id"],),
             )
             logger.info(
                 f"Position resolved: {pos['position_id'][:8]} token={token_id[:16]} "
-                f"winner={is_winner} moonbag_pnl=${moonbag_pnl:.4f}"
+                f"winner={is_winner} moonbag_pnl=${moonbag_pnl:.4f} "
+                f"tp_residual_pnl=${tp_residual_pnl:.4f}"
             )
 
         conn.commit()
