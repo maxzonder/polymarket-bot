@@ -58,10 +58,12 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             created_at     INTEGER NOT NULL,
             expires_at     INTEGER NOT NULL,
             label          TEXT,
-            mode           TEXT
+            mode           TEXT,
+            candidate_id   TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_resting_token ON resting_orders(token_id);
         CREATE INDEX IF NOT EXISTS idx_resting_status ON resting_orders(status);
+        CREATE INDEX IF NOT EXISTS idx_resting_candidate ON resting_orders(candidate_id);
 
         CREATE TABLE IF NOT EXISTS positions (
             position_id      TEXT PRIMARY KEY,
@@ -77,7 +79,8 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             opened_at        INTEGER NOT NULL,
             closed_at        INTEGER,
             realized_pnl     REAL,
-            mode             TEXT
+            mode             TEXT,
+            is_winner        INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_pos_token ON positions(token_id);
         CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status);
@@ -108,10 +111,12 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             res_score      REAL,
             entry_level    REAL NOT NULL,
             outcome        TEXT NOT NULL,
-            order_id       TEXT
+            order_id       TEXT,
+            candidate_id   TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_scan_token ON scan_log(token_id);
         CREATE INDEX IF NOT EXISTS idx_scan_at ON scan_log(scanned_at);
+        CREATE INDEX IF NOT EXISTS idx_scan_candidate ON scan_log(candidate_id);
 
         CREATE TABLE IF NOT EXISTS screener_log (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,10 +130,43 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             volume_usdc    REAL,
             ef_score       REAL,
             res_score      REAL,
-            outcome        TEXT    NOT NULL
+            outcome        TEXT    NOT NULL,
+            candidate_id   TEXT
         );
-        CREATE INDEX IF NOT EXISTS idx_screener_at      ON screener_log(scanned_at);
-        CREATE INDEX IF NOT EXISTS idx_screener_outcome ON screener_log(outcome);
+        CREATE INDEX IF NOT EXISTS idx_screener_at        ON screener_log(scanned_at);
+        CREATE INDEX IF NOT EXISTS idx_screener_outcome   ON screener_log(outcome);
+        CREATE INDEX IF NOT EXISTS idx_screener_candidate ON screener_log(candidate_id);
+
+        CREATE TABLE IF NOT EXISTS ml_outcomes (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            materialized_at     INTEGER NOT NULL,
+            candidate_id        TEXT    NOT NULL,
+            market_id           TEXT    NOT NULL,
+            token_id            TEXT    NOT NULL,
+            question            TEXT,
+            category            TEXT,
+            current_price       REAL,
+            hours_to_close      REAL,
+            volume_usdc         REAL,
+            ef_score            REAL,
+            res_score           REAL,
+            entry_level         REAL,
+            order_id            TEXT,
+            got_fill            INTEGER NOT NULL DEFAULT 0,
+            is_winner           INTEGER,
+            realized_pnl        REAL,
+            realized_roi        REAL,
+            time_to_fill_hours  REAL,
+            tp_5x_hit           INTEGER,
+            entry_price         REAL,
+            entry_size_usdc     REAL,
+            position_status     TEXT,
+            opened_at           INTEGER,
+            closed_at           INTEGER,
+            UNIQUE(candidate_id, entry_level)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ml_candidate ON ml_outcomes(candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_ml_got_fill  ON ml_outcomes(got_fill);
     """)
     pb.init_tables(conn)
     conn.commit()
@@ -160,12 +198,20 @@ class OrderManager:
         conn = sqlite3.connect(self._db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         _init_positions_db(conn)
-        # Migration: add filled_quantity if this DB predates the column.
-        try:
-            conn.execute("ALTER TABLE tp_orders ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0")
-            conn.commit()
-        except Exception:
-            pass  # column already exists
+        # Migrations: add columns that may not exist in older DBs.
+        migrations = [
+            "ALTER TABLE tp_orders      ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE resting_orders ADD COLUMN candidate_id TEXT",
+            "ALTER TABLE scan_log       ADD COLUMN candidate_id TEXT",
+            "ALTER TABLE screener_log   ADD COLUMN candidate_id TEXT",
+            "ALTER TABLE positions      ADD COLUMN is_winner INTEGER",
+        ]
+        for sql in migrations:
+            try:
+                conn.execute(sql)
+                conn.commit()
+            except Exception:
+                pass  # column already exists
         pb.ensure_seeded(conn)
         conn.commit()
         conn.close()
@@ -190,8 +236,9 @@ class OrderManager:
             """
             INSERT INTO scan_log
                 (scanned_at, token_id, market_id, question, current_price,
-                 total_score, ef_score, res_score, entry_level, outcome, order_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 total_score, ef_score, res_score, entry_level, outcome, order_id,
+                 candidate_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(time.time()),
@@ -205,6 +252,7 @@ class OrderManager:
                 entry_level,
                 outcome,
                 order_id,
+                candidate.candidate_id or None,
             ),
         )
         # Do NOT close conn here — caller owns the connection lifecycle.
@@ -326,6 +374,7 @@ class OrderManager:
                     size=sized.token_quantity,
                     expires_at=expires_at,
                     mode=self.mc.name,
+                    candidate_id=candidate.candidate_id or None,
                 )
                 self._log_scan(conn, candidate, price_level, "placed", order_id=result.order_id)
                 logger.info(
@@ -431,6 +480,7 @@ class OrderManager:
                 size=sized.token_quantity,
                 expires_at=now + self.config.resting_order_ttl,
                 mode=self.mc.name,
+                candidate_id=candidate.candidate_id or None,
             )
             logger.info(
                 f"Scanner BUY: {candidate.market_info.question[:50]!r} "
@@ -484,13 +534,14 @@ class OrderManager:
         size: float,
         expires_at: int,
         mode: str,
+        candidate_id: Optional[str] = None,
     ) -> None:
         now = int(time.time())
         conn.execute(
             "INSERT OR REPLACE INTO resting_orders "
-            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode) "
-            "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?)",
-            (order_id, token_id, market_id, price, size, now, expires_at, mode),
+            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode, candidate_id) "
+            "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?, ?)",
+            (order_id, token_id, market_id, price, size, now, expires_at, mode, candidate_id),
         )
 
     # ── On fill ───────────────────────────────────────────────────────────────
@@ -673,10 +724,10 @@ class OrderManager:
                 pb.credit(conn, resolution_proceeds, f"resolution {token_id[:16]} winner={is_winner}")
 
             conn.execute(
-                "UPDATE positions SET status='resolved', closed_at=?, "
+                "UPDATE positions SET status='resolved', closed_at=?, is_winner=?, "
                 "realized_pnl = COALESCE(realized_pnl, 0) + ? "
                 "WHERE position_id=?",
-                (now, total_resolution_pnl, pos["position_id"]),
+                (now, 1 if is_winner else 0, total_resolution_pnl, pos["position_id"]),
             )
             # Mark live TP orders as 'resolved' (distinct from 'cancelled' by stale cleanup)
             conn.execute(

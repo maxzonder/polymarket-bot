@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -30,8 +31,8 @@ logger = setup_logger("screener")
 _SCREENER_LOG_INSERT = """
     INSERT INTO screener_log
         (scanned_at, market_id, token_id, question, category,
-         current_price, hours_to_close, volume_usdc, ef_score, res_score, outcome)
-    VALUES (?,?,?,?,?, ?,?,?,?,?,?)
+         current_price, hours_to_close, volume_usdc, ef_score, res_score, outcome, candidate_id)
+    VALUES (?,?,?,?,?, ?,?,?,?,?,?,?)
 """
 
 
@@ -46,6 +47,7 @@ class EntryCandidate:
     resolution_score: float     # tail EV score
     total_score: float          # weighted composite for ranking
     suggested_entry_levels: list[float]  # price levels for resting bids
+    candidate_id: str = ""      # UUID linking screener_log → scan_log → resting_orders
     rationale: str = ""         # human-readable explanation
 
 
@@ -132,7 +134,8 @@ class Screener:
         now = int(time.time())
         q = (m.question or "")[:120]
 
-        def _log(outcome: str, token_id=None, price=None, ef=None, res=None) -> None:
+        def _log(outcome: str, token_id=None, price=None, ef=None, res=None,
+                 candidate_id=None) -> None:
             log_entries.append((
                 now,
                 m.market_id,
@@ -145,6 +148,7 @@ class Screener:
                 ef,
                 res,
                 outcome,
+                candidate_id,
             ))
 
         # Hard filter: hours to close
@@ -213,8 +217,9 @@ class Screener:
                      ef=ef_s, res=res_s)
                 continue
 
+            candidate_id = str(uuid.uuid4())
             _log("passed_to_order_manager", token_id=token_id, price=price,
-                 ef=ef_s, res=res_s)
+                 ef=ef_s, res=res_s, candidate_id=candidate_id)
 
             rationale = (
                 f"category={m.category} fill_score={ef_s:.3f} res_score={res_s:.3f} "
@@ -232,6 +237,7 @@ class Screener:
                 resolution_score=res_s,
                 total_score=total_score,
                 suggested_entry_levels=entry_levels,
+                candidate_id=candidate_id,
                 rationale=rationale,
             ))
 
