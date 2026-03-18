@@ -83,13 +83,15 @@ def get_balance(conn: sqlite3.Connection) -> dict:
         "SELECT COALESCE(SUM(entry_size_usdc), 0) FROM positions WHERE status='open'"
     ).fetchone()[0]
 
-    reserved = float(r_resting) + float(r_positions)
+    # free_balance only subtracts resting-order capital.
+    # Open-position capital is already gone from cash_balance (debited at fill),
+    # so subtracting it again would double-count.
+    # reserved_positions is shown for informational purposes only.
     return {
         "cash_balance":       round(cash, 6),
         "reserved_resting":   round(float(r_resting), 6),
-        "reserved_positions": round(float(r_positions), 6),
-        "reserved":           round(reserved, 6),
-        "free_balance":       round(cash - reserved, 6),
+        "reserved_positions": round(float(r_positions), 6),  # informational only
+        "free_balance":       round(cash - float(r_resting), 6),
     }
 
 

@@ -43,13 +43,12 @@ def cmd_status() -> None:
     b = get_balance(conn)
     conn.close()
     print(f"\n  Paper Balance")
-    print(f"  {'cash_balance':<24}: ${b['cash_balance']:.4f}")
-    print(f"  {'reserved (resting orders)':<24}: ${b['reserved_resting']:.4f}")
-    print(f"  {'reserved (open positions)':<24}: ${b['reserved_positions']:.4f}")
-    print(f"  {'reserved (total)':<24}: ${b['reserved']:.4f}")
-    print(f"  {'free_balance':<24}: ${b['free_balance']:.4f}")
+    print(f"  {'cash_balance':<30}: ${b['cash_balance']:.4f}")
+    print(f"  {'reserved (live resting orders)':<30}: ${b['reserved_resting']:.4f}")
+    print(f"  {'free_balance':<30}: ${b['free_balance']:.4f}")
+    print(f"  {'deployed in open positions (info)':<30}: ${b['reserved_positions']:.4f}")
     blocked = b["free_balance"] <= 0
-    print(f"  {'trading':<24}: {'BLOCKED (exhausted)' if blocked else 'ACTIVE'}")
+    print(f"  {'trading':<30}: {'BLOCKED (exhausted)' if blocked else 'ACTIVE'}")
     print()
 
 

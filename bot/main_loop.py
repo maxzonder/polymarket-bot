@@ -246,17 +246,15 @@ class BotRunner:
             bal = self.order_manager._get_balance_snapshot()
             blocked = bal["free_balance"] <= 0
 
-            total_stake = bal["reserved_positions"]
+            deployed = bal["reserved_positions"]
             pnl = stats["total_realized_pnl"]
-            roi = 100.0 * pnl / total_stake if total_stake > 0 else 0.0
+            roi = 100.0 * pnl / deployed if deployed > 0 else 0.0
 
             lines = [
                 "📊 <b>Hourly status</b>",
-                f"Cash:     ${bal['cash_balance']:.4f}",
-                f"Free:     ${bal['free_balance']:.4f}",
-                f"Reserved: ${bal['reserved']:.4f}"
-                f"  (resting ${bal['reserved_resting']:.4f}"
-                f" + positions ${bal['reserved_positions']:.4f})",
+                f"Cash (free):   ${bal['free_balance']:.4f}",
+                f"Reserved (resting orders): ${bal['reserved_resting']:.4f}",
+                f"Deployed (open positions): ${bal['reserved_positions']:.4f}  [info]",
                 f"Resting orders: {stats['live_resting_bids']}",
                 f"Open positions: {stats['open_positions']}",
                 f"Realized PnL:   ${pnl:+.4f}  ROI: {roi:+.1f}%",

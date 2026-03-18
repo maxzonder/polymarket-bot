@@ -437,7 +437,7 @@ class OrderManager:
             f"⚠️ <b>Paper balance exhausted</b>\n"
             f"Cash: ${bal['cash_balance']:.4f}\n"
             f"Free: ${bal['free_balance']:.4f}\n"
-            f"Reserved: ${bal['reserved']:.4f}\n"
+            f"Reserved (resting): ${bal['reserved_resting']:.4f}\n"
             f"New entries are blocked. Use:\n"
             f"  python scripts/paper_balance.py topup --amount 10"
         )
