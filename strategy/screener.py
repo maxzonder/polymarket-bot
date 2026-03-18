@@ -209,6 +209,8 @@ class Screener:
             if not entry_levels and self.mc.scanner_entry:
                 entry_levels = [price]
             if not entry_levels:
+                _log("rejected_no_entry_levels", token_id=token_id, price=price,
+                     ef=ef_s, res=res_s)
                 continue
 
             _log("passed_to_order_manager", token_id=token_id, price=price,

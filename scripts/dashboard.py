@@ -312,10 +312,11 @@ SCREENER_FUNNEL_ORDER = [
     "rejected_price_le_zero",
     "rejected_price_above_entry_max",
     "rejected_price_ge_0_99",
+    "rejected_no_entry_levels",
 ]
 
 SCREENER_SHORT = {
-    "passed_to_order_manager":       "→ order_mgr",
+    "passed_to_order_manager":       "-> order_mgr",
     "rejected_hours_to_close_min":   "htc_min",
     "rejected_hours_to_close_max":   "htc_max",
     "rejected_missing_token_ids":    "no_tokens",
@@ -325,6 +326,7 @@ SCREENER_SHORT = {
     "rejected_price_le_zero":        "price_zero",
     "rejected_price_above_entry_max":"price_high",
     "rejected_price_ge_0_99":        "price_99",
+    "rejected_no_entry_levels":      "no_levels",
 }
 
 SCREENER_COLOR = {
@@ -338,6 +340,7 @@ SCREENER_COLOR = {
     "rejected_price_le_zero":        C_WARN,
     "rejected_price_above_entry_max":C_DIM,
     "rejected_price_ge_0_99":        C_DIM,
+    "rejected_no_entry_levels":      C_WARN,
 }
 
 
@@ -346,7 +349,7 @@ def draw_screener_funnel(win, d: dict, row: int) -> int:
     _w(win, row, 2, "SCREENER FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
     _w(win, row, 18, " — last 60 min  ", curses.color_pair(C_DIM))
     try:
-        win.hline(row, 34, "─", max(0, w - 36), curses.color_pair(C_DIM))
+        win.hline(row, 34, "-", max(0, w - 36), curses.color_pair(C_DIM))
     except curses.error:
         pass
     row += 1
