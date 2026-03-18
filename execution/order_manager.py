@@ -92,6 +92,23 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (position_id) REFERENCES positions(position_id)
         );
         CREATE INDEX IF NOT EXISTS idx_tp_position ON tp_orders(position_id);
+
+        CREATE TABLE IF NOT EXISTS scan_log (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            scanned_at     INTEGER NOT NULL,
+            token_id       TEXT NOT NULL,
+            market_id      TEXT NOT NULL,
+            question       TEXT,
+            current_price  REAL,
+            total_score    REAL,
+            ef_score       REAL,
+            res_score      REAL,
+            entry_level    REAL NOT NULL,
+            outcome        TEXT NOT NULL,
+            order_id       TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_token ON scan_log(token_id);
+        CREATE INDEX IF NOT EXISTS idx_scan_at ON scan_log(scanned_at);
     """)
     conn.commit()
 
@@ -121,6 +138,37 @@ class OrderManager:
         conn = sqlite3.connect(self._db_path)
         conn.execute("PRAGMA journal_mode=WAL")
         _init_positions_db(conn)
+
+    def _log_scan(
+        self,
+        conn: sqlite3.Connection,
+        candidate: "EntryCandidate",
+        entry_level: float,
+        outcome: str,
+        order_id: Optional[str] = None,
+    ) -> None:
+        """Write one row to scan_log for observability / paper-trading report."""
+        conn.execute(
+            """
+            INSERT INTO scan_log
+                (scanned_at, token_id, market_id, question, current_price,
+                 total_score, ef_score, res_score, entry_level, outcome, order_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(time.time()),
+                candidate.token_id,
+                candidate.market_info.market_id,
+                (candidate.market_info.question or "")[:120],
+                candidate.current_price,
+                candidate.total_score,
+                candidate.entry_fill_score,
+                candidate.resolution_score,
+                entry_level,
+                outcome,
+                order_id,
+            ),
+        )
         conn.close()
 
     def _conn(self) -> sqlite3.Connection:
@@ -147,6 +195,7 @@ class OrderManager:
         for price_level in candidate.suggested_entry_levels:
             if price_level in active_prices:
                 logger.debug(f"Skip duplicate resting bid: {candidate.token_id} @ ${price_level}")
+                self._log_scan(conn, candidate, price_level, "duplicate")
                 continue
 
             # Gauge position size for this specific price level
@@ -171,10 +220,12 @@ class OrderManager:
             )
             if sized is None:
                 logger.debug(f"Risk rejected position: {candidate.token_id} @ ${price_level}")
+                self._log_scan(conn, candidate, price_level, "risk_rejected")
                 continue
 
             if self._count_open_positions(conn) >= self.mc.max_open_positions:
                 logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping")
+                self._log_scan(conn, candidate, price_level, "max_positions")
                 break
 
             # ── Depth / liquidity gate ─────────────────────────────────────
@@ -189,6 +240,7 @@ class OrderManager:
                         f"Depth gate: dead book (no asks or bids) for "
                         f"{candidate.token_id[:16]} @ ${price_level:.5f}"
                     )
+                    self._log_scan(conn, candidate, price_level, "depth_gate_dead_book")
                     continue
                 top_bid_depth = book.bid_depth_at(book.best_bid)
                 if top_bid_depth < MIN_TOP_BOOK_TOKENS:
@@ -196,9 +248,11 @@ class OrderManager:
                         f"Depth gate: thin top-of-book for {candidate.token_id[:16]} "
                         f"top_bid_depth={top_bid_depth:.2f} < {MIN_TOP_BOOK_TOKENS}"
                     )
+                    self._log_scan(conn, candidate, price_level, "depth_gate_thin")
                     continue
             except Exception as e:
                 logger.debug(f"Orderbook check failed for {candidate.token_id[:16]}: {e}")
+                self._log_scan(conn, candidate, price_level, "depth_gate_error")
                 continue
 
             label = f"resting_{candidate.market_info.market_id}_{price_level}"
@@ -221,6 +275,7 @@ class OrderManager:
                     expires_at=expires_at,
                     mode=self.mc.name,
                 )
+                self._log_scan(conn, candidate, price_level, "placed", order_id=result.order_id)
                 logger.info(
                     f"Placed resting BUY: {candidate.market_info.question[:50]!r} "
                     f"token={candidate.token_id[:16]} @ ${price_level:.5f} "
@@ -228,6 +283,7 @@ class OrderManager:
                 )
                 results.append(result)
             else:
+                self._log_scan(conn, candidate, price_level, "order_failed")
                 logger.warning(f"Order failed: {result.error} | {candidate.token_id} @ ${price_level}")
 
         conn.commit()
