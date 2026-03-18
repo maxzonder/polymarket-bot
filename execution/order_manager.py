@@ -26,10 +26,12 @@ from typing import Optional
 from api.clob_client import ClobClient, OrderResult, get_orderbook
 from api.gamma_client import fetch_market
 from config import BotConfig
+from execution import paper_balance as pb
 from strategy.screener import EntryCandidate
 from strategy.risk_manager import RiskManager, SizedPosition, TPOrder
 from utils.logger import setup_logger
 from utils.paths import DATA_DIR, ensure_runtime_dirs
+from utils.telegram import send_message
 
 ensure_runtime_dirs()
 logger = setup_logger("order_manager")
@@ -111,6 +113,7 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_scan_token ON scan_log(token_id);
         CREATE INDEX IF NOT EXISTS idx_scan_at ON scan_log(scanned_at);
     """)
+    pb.init_tables(conn)
     conn.commit()
 
 
@@ -133,6 +136,7 @@ class OrderManager:
         self.clob = clob
         self.risk = risk_manager
         self._db_path = str(POSITIONS_DB)
+        self._last_balance_alert_ts: int = 0
         self._init_db()
 
     def _init_db(self) -> None:
@@ -145,7 +149,16 @@ class OrderManager:
             conn.commit()
         except Exception:
             pass  # column already exists
+        pb.ensure_seeded(conn)
+        conn.commit()
         conn.close()
+
+    def get_cash_balance(self) -> float:
+        """Return current paper cash_balance for RiskManager / startup use."""
+        conn = self._conn()
+        row = conn.execute("SELECT cash_balance FROM paper_balance WHERE id=1").fetchone()
+        conn.close()
+        return float(row["cash_balance"]) if row else pb.INITIAL_BALANCE_USDC
 
     def _log_scan(
         self,
@@ -235,6 +248,20 @@ class OrderManager:
                 logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping")
                 self._log_scan(conn, candidate, price_level, "max_positions")
                 break
+
+            # ── Paper balance gate (dry_run only) ─────────────────────────
+            if self.config.dry_run:
+                bal = pb.get_balance(conn)
+                if bal["free_balance"] < sized.stake_usdc:
+                    logger.info(
+                        f"Balance gate: free=${bal['free_balance']:.4f} < "
+                        f"stake=${sized.stake_usdc:.4f} — skipping"
+                    )
+                    self._log_scan(conn, candidate, price_level, "balance_exhausted")
+                    self._maybe_send_balance_alert(bal)
+                    conn.commit()
+                    conn.close()
+                    return results
 
             # ── Depth / liquidity gate ─────────────────────────────────────
             # Fetch real per-token orderbook. Reject dead / garbage books.
@@ -356,6 +383,18 @@ class OrderManager:
             conn.close()
             return []
 
+        # Paper balance gate (dry_run only)
+        if self.config.dry_run:
+            bal = pb.get_balance(conn)
+            if bal["free_balance"] < sized.stake_usdc:
+                logger.info(
+                    f"Balance gate (scanner): free=${bal['free_balance']:.4f} < "
+                    f"stake=${sized.stake_usdc:.4f} — skipping"
+                )
+                self._maybe_send_balance_alert(bal)
+                conn.close()
+                return []
+
         label = f"scanner_{candidate.market_info.market_id}"
         result = self.clob.place_limit_order(
             token_id=candidate.token_id,
@@ -387,6 +426,25 @@ class OrderManager:
         conn.commit()
         conn.close()
         return [result] if result.status in ("live", "matched") else []
+
+    def _maybe_send_balance_alert(self, bal: dict) -> None:
+        """Send a Telegram alert when paper balance is exhausted. Rate-limited to once per hour."""
+        now = int(time.time())
+        if now - self._last_balance_alert_ts < 3600:
+            return
+        self._last_balance_alert_ts = now
+        send_message(
+            f"⚠️ <b>Paper balance exhausted</b>\n"
+            f"Cash: ${bal['cash_balance']:.4f}\n"
+            f"Free: ${bal['free_balance']:.4f}\n"
+            f"Reserved: ${bal['reserved']:.4f}\n"
+            f"New entries are blocked. Use:\n"
+            f"  python scripts/paper_balance.py topup --amount 10"
+        )
+        logger.warning(
+            f"Balance exhausted: free=${bal['free_balance']:.4f} "
+            f"cash=${bal['cash_balance']:.4f} reserved=${bal['reserved']:.4f}"
+        )
 
     def _get_active_resting_prices(self, conn: sqlite3.Connection, token_id: str) -> set[float]:
         rows = conn.execute(
@@ -462,6 +520,10 @@ class OrderManager:
             "UPDATE resting_orders SET status='matched' WHERE order_id=?",
             (order_id,),
         )
+
+        # Debit paper balance (entry fill = USDC spent)
+        if self.config.dry_run:
+            pb.debit(conn, stake_usdc, f"entry fill {order_id[:12]}")
 
         # Create position
         conn.execute(
@@ -540,6 +602,10 @@ class OrderManager:
                 "WHERE position_id=?",
                 (pnl, position_id),
             )
+            # Credit paper balance (TP fill = USDC received from selling tokens)
+            if self.config.dry_run:
+                proceeds = fill_price * fill_quantity
+                pb.credit(conn, proceeds, f"TP fill {order_id[:12]}")
             logger.info(
                 f"TP filled: order={order_id[:8]} @ ${fill_price:.5f} "
                 f"qty={fill_quantity:.2f} pnl=${pnl:.4f}"
@@ -579,6 +645,15 @@ class OrderManager:
             )
 
             total_resolution_pnl = moonbag_pnl + tp_residual_pnl
+
+            # Credit paper balance: proceeds from moonbag + unfilled TP tokens at resolution
+            if self.config.dry_run:
+                live_tp_remaining = sum(
+                    float(r["sell_quantity"]) - float(r["filled_quantity"])
+                    for r in live_tps
+                )
+                resolution_proceeds = resolution_price * (moonbag_qty + live_tp_remaining)
+                pb.credit(conn, resolution_proceeds, f"resolution {token_id[:16]} winner={is_winner}")
 
             conn.execute(
                 "UPDATE positions SET status='resolved', closed_at=?, "
@@ -668,6 +743,13 @@ class OrderManager:
         if cancelled:
             logger.info(f"Stale order cleanup: cancelled {cancelled} orders")
         return cancelled
+
+    def _get_balance_snapshot(self) -> dict:
+        """Return current paper balance snapshot (for reporting)."""
+        conn = self._conn()
+        bal = pb.get_balance(conn)
+        conn.close()
+        return bal
 
     def get_open_position_count(self) -> int:
         conn = self._conn()

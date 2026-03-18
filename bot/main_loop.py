@@ -34,6 +34,7 @@ from strategy.risk_manager import RiskManager
 from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.screener import Screener
 from utils.logger import setup_logger
+from utils import telegram
 
 logger = setup_logger("main_loop")
 
@@ -52,7 +53,8 @@ class BotRunner:
         self._shutdown = False
 
         logger.info(
-            f"Bot starting | mode={self.config.mode} dry_run={self.config.dry_run}"
+            f"Bot starting | mode={self.config.mode} dry_run={self.config.dry_run} "
+            f"pid={__import__('os').getpid()}"
         )
 
         # ── Components ────────────────────────────────────────────────────────
@@ -72,20 +74,30 @@ class BotRunner:
             private_key=self.config.private_key,
             dry_run=self.config.dry_run,
         )
-        self.risk = RiskManager(
-            mode_config=self.config.mode_config,
-            balance_usdc=10.0,  # TODO: fetch real balance from CLOB API
-        )
+        # Build OrderManager first so DB / paper_balance tables are initialised.
+        # Then load persisted cash_balance for RiskManager sizing.
         self.order_manager = OrderManager(
             config=self.config,
             clob=self.clob,
-            risk_manager=self.risk,
+            risk_manager=None,  # set below after balance loaded
         )
+        cash_balance = (
+            self.order_manager.get_cash_balance()
+            if self.config.dry_run
+            else 10.0  # TODO: fetch real balance from CLOB API
+        )
+        self.risk = RiskManager(
+            mode_config=self.config.mode_config,
+            balance_usdc=cash_balance,
+        )
+        self.order_manager.risk = self.risk
+        logger.info(f"Paper balance loaded: cash=${cash_balance:.4f}")
         self.monitor = PositionMonitor(
             config=self.config,
             clob=self.clob,
             order_manager=self.order_manager,
         )
+        self._last_report_ts: float = 0.0
 
     async def run(self) -> None:
         """Start all loops concurrently. Runs until shutdown."""
@@ -210,6 +222,15 @@ class BotRunner:
                 await asyncio.to_thread(self.ef_scorer.refresh)
                 await asyncio.to_thread(self.res_scorer.refresh)
 
+                # Sync persisted cash_balance into RiskManager
+                if self.config.dry_run:
+                    self.risk.balance_usdc = self.order_manager.get_cash_balance()
+
+                # Hourly Telegram report
+                if self.config.dry_run and time.time() - self._last_report_ts >= 3600:
+                    await asyncio.to_thread(self._send_hourly_report)
+                    self._last_report_ts = time.time()
+
             except Exception as e:
                 logger.error(f"Cleanup cycle error: {e}", exc_info=True)
 
@@ -217,3 +238,30 @@ class BotRunner:
                 if self._shutdown:
                     break
                 await asyncio.sleep(1)
+
+    def _send_hourly_report(self) -> None:
+        """Build and send a compact Telegram status snapshot."""
+        try:
+            stats = self.monitor.get_stats()
+            bal = self.order_manager._get_balance_snapshot()
+            blocked = bal["free_balance"] <= 0
+
+            total_stake = bal["reserved_positions"]
+            pnl = stats["total_realized_pnl"]
+            roi = 100.0 * pnl / total_stake if total_stake > 0 else 0.0
+
+            lines = [
+                "📊 <b>Hourly status</b>",
+                f"Cash:     ${bal['cash_balance']:.4f}",
+                f"Free:     ${bal['free_balance']:.4f}",
+                f"Reserved: ${bal['reserved']:.4f}"
+                f"  (resting ${bal['reserved_resting']:.4f}"
+                f" + positions ${bal['reserved_positions']:.4f})",
+                f"Resting orders: {stats['live_resting_bids']}",
+                f"Open positions: {stats['open_positions']}",
+                f"Realized PnL:   ${pnl:+.4f}  ROI: {roi:+.1f}%",
+                f"Trading: {'🔴 BLOCKED' if blocked else '🟢 ACTIVE'}",
+            ]
+            telegram.send_message("\n".join(lines))
+        except Exception as e:
+            logger.warning(f"Hourly report failed: {e}")
