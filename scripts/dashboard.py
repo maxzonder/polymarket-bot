@@ -149,8 +149,19 @@ def load_data(db_path: Path) -> dict:
         d["resolved"] = d["winners"] = 0
         d["total_pnl"] = d["total_stake"] = 0.0
 
-    # -- Scan funnel — last hour -----------------------------------------------
+    # -- Screener funnel — last hour (early rejections) -----------------------
     since_1h = int(time.time()) - 3600
+    if "screener_log" in tables:
+        rows = conn.execute(
+            "SELECT outcome, COUNT(*) n FROM screener_log "
+            "WHERE scanned_at >= ? GROUP BY outcome",
+            (since_1h,),
+        ).fetchall()
+        d["screener"] = {r["outcome"]: r["n"] for r in rows}
+    else:
+        d["screener"] = {}
+
+    # ── Order-manager scan funnel — last hour (late rejections) ──────────────
     if "scan_log" in tables:
         rows = conn.execute(
             "SELECT outcome, COUNT(*) n FROM scan_log "
@@ -290,10 +301,94 @@ def draw_performance(win, d: dict, row: int) -> int:
     return row + 2
 
 
+SCREENER_FUNNEL_ORDER = [
+    "passed_to_order_manager",
+    "rejected_hours_to_close_min",
+    "rejected_hours_to_close_max",
+    "rejected_missing_token_ids",
+    "rejected_entry_fill_score",
+    "rejected_resolution_score",
+    "rejected_price_none",
+    "rejected_price_le_zero",
+    "rejected_price_above_entry_max",
+    "rejected_price_ge_0_99",
+]
+
+SCREENER_SHORT = {
+    "passed_to_order_manager":       "→ order_mgr",
+    "rejected_hours_to_close_min":   "htc_min",
+    "rejected_hours_to_close_max":   "htc_max",
+    "rejected_missing_token_ids":    "no_tokens",
+    "rejected_entry_fill_score":     "ef_score",
+    "rejected_resolution_score":     "res_score",
+    "rejected_price_none":           "price_none",
+    "rejected_price_le_zero":        "price_zero",
+    "rejected_price_above_entry_max":"price_high",
+    "rejected_price_ge_0_99":        "price_99",
+}
+
+SCREENER_COLOR = {
+    "passed_to_order_manager":       C_GOOD,
+    "rejected_hours_to_close_min":   C_DIM,
+    "rejected_hours_to_close_max":   C_DIM,
+    "rejected_missing_token_ids":    C_WARN,
+    "rejected_entry_fill_score":     C_DIM,
+    "rejected_resolution_score":     C_DIM,
+    "rejected_price_none":           C_WARN,
+    "rejected_price_le_zero":        C_WARN,
+    "rejected_price_above_entry_max":C_DIM,
+    "rejected_price_ge_0_99":        C_DIM,
+}
+
+
+def draw_screener_funnel(win, d: dict, row: int) -> int:
+    h, w = win.getmaxyx()
+    _w(win, row, 2, "SCREENER FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    _w(win, row, 18, " — last 60 min  ", curses.color_pair(C_DIM))
+    try:
+        win.hline(row, 34, "─", max(0, w - 36), curses.color_pair(C_DIM))
+    except curses.error:
+        pass
+    row += 1
+
+    screener = d.get("screener", {})
+    total = sum(screener.values())
+    if total == 0:
+        _w(win, row, 4, "no screener activity yet", curses.color_pair(C_DIM))
+        return row + 2
+
+    COL_W = 22
+    cols_per_row = max(1, (w - 4) // COL_W)
+    col = 0
+
+    for key in SCREENER_FUNNEL_ORDER:
+        n = screener.get(key, 0)
+        if n == 0:
+            continue
+        pct   = 100.0 * n / total
+        label = SCREENER_SHORT.get(key, key[:12])
+        color = curses.color_pair(SCREENER_COLOR.get(key, C_DIM))
+        x = 2 + col * COL_W
+
+        _w(win, row, x,      f"{label:<12}", color)
+        _w(win, row, x + 12, f"{n:>4} ", curses.color_pair(C_DIM))
+        _w(win, row, x + 17, f"({pct:>4.0f}%)")
+
+        col += 1
+        if col >= cols_per_row:
+            col = 0
+            row += 1
+
+    if col > 0:
+        row += 1
+
+    return row + 1
+
+
 def draw_scan_funnel(win, d: dict, row: int) -> int:
     h, w = win.getmaxyx()
-    _w(win, row, 2, "SCAN FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    _w(win, row, 14, " — last 60 min  ", curses.color_pair(C_DIM))
+    _w(win, row, 2, "ORDER MGR FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    _w(win, row, 19, " — last 60 min  ", curses.color_pair(C_DIM))
     try:
         win.hline(row, 30, "-", max(0, w - 32), curses.color_pair(C_DIM))
     except curses.error:
@@ -442,6 +537,7 @@ def run(stdscr, db_path: Path, interval: int) -> None:
             row = draw_header(stdscr, bot_alive)
             row = draw_balance_positions(stdscr, d, row)
             row = draw_performance(stdscr, d, row)
+            row = draw_screener_funnel(stdscr, d, row)
             row = draw_scan_funnel(stdscr, d, row)
             draw_recent(stdscr, d, row)
             draw_footer(stdscr, interval)

@@ -112,6 +112,23 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_scan_token ON scan_log(token_id);
         CREATE INDEX IF NOT EXISTS idx_scan_at ON scan_log(scanned_at);
+
+        CREATE TABLE IF NOT EXISTS screener_log (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            scanned_at     INTEGER NOT NULL,
+            market_id      TEXT    NOT NULL,
+            token_id       TEXT,
+            question       TEXT,
+            category       TEXT,
+            current_price  REAL,
+            hours_to_close REAL,
+            volume_usdc    REAL,
+            ef_score       REAL,
+            res_score      REAL,
+            outcome        TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_screener_at      ON screener_log(scanned_at);
+        CREATE INDEX IF NOT EXISTS idx_screener_outcome ON screener_log(outcome);
     """)
     pb.init_tables(conn)
     conn.commit()

@@ -28,7 +28,7 @@ from typing import Optional
 
 from api.clob_client import ClobClient
 from config import BotConfig, load_config
-from execution.order_manager import OrderManager
+from execution.order_manager import OrderManager, POSITIONS_DB
 from execution.position_monitor import PositionMonitor
 from strategy.risk_manager import RiskManager
 from strategy.scorer import EntryFillScorer, ResolutionScorer
@@ -69,6 +69,7 @@ class BotRunner:
             config=self.config,
             entry_fill_scorer=self.ef_scorer,
             resolution_scorer=self.res_scorer,
+            db_path=POSITIONS_DB,
         )
         self.clob = ClobClient(
             private_key=self.config.private_key,

@@ -13,13 +13,26 @@ Output: list[EntryCandidate] for OrderManager to act on.
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from api.gamma_client import MarketInfo, fetch_open_markets
 from config import BotConfig
 from strategy.scorer import EntryFillScorer, ResolutionScorer
+from utils.logger import setup_logger
+from utils.paths import DATA_DIR
+
+logger = setup_logger("screener")
+
+_SCREENER_LOG_INSERT = """
+    INSERT INTO screener_log
+        (scanned_at, market_id, token_id, question, category,
+         current_price, hours_to_close, volume_usdc, ef_score, res_score, outcome)
+    VALUES (?,?,?,?,?, ?,?,?,?,?,?)
+"""
 
 
 @dataclass
@@ -60,15 +73,18 @@ class Screener:
         config: BotConfig,
         entry_fill_scorer: EntryFillScorer,
         resolution_scorer: ResolutionScorer,
+        db_path: Optional[Path] = None,
     ):
         self.config = config
         self.mc = config.mode_config
         self.ef_scorer = entry_fill_scorer
         self.res_scorer = resolution_scorer
+        self._db_path = str(db_path or DATA_DIR / "positions.db")
 
     def scan(self) -> list[EntryCandidate]:
         """
         Fetch open markets, apply filters, score, return candidates sorted by total_score desc.
+        All rejection reasons are recorded in screener_log for funnel analysis.
         """
         try:
             markets = fetch_open_markets(
@@ -80,47 +96,91 @@ class Screener:
             return []  # network error — skip this cycle
 
         candidates: list[EntryCandidate] = []
+        log_entries: list[tuple] = []
 
         for market in markets:
-            cands = self._evaluate_market(market)
+            cands = self._evaluate_market(market, log_entries)
             candidates.extend(cands)
 
         candidates.sort(key=lambda c: c.total_score, reverse=True)
+
+        if log_entries:
+            self._flush_screener_log(log_entries)
+
         return candidates
 
-    def _evaluate_market(self, m: MarketInfo) -> list[EntryCandidate]:
+    def _flush_screener_log(self, entries: list[tuple]) -> None:
+        """Batch-write screener_log rows. One connection per scan cycle."""
+        try:
+            conn = sqlite3.connect(self._db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executemany(_SCREENER_LOG_INSERT, entries)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"screener_log flush failed: {e}")
+
+    def _evaluate_market(
+        self,
+        m: MarketInfo,
+        log_entries: list[tuple],
+    ) -> list[EntryCandidate]:
         """
         Evaluate a single market. Returns 0, 1, or 2 candidates (one per token side).
+        Appends one row to log_entries per rejection/pass for screener_log.
         """
+        now = int(time.time())
+        q = (m.question or "")[:120]
+
+        def _log(outcome: str, token_id=None, price=None, ef=None, res=None) -> None:
+            log_entries.append((
+                now,
+                m.market_id,
+                token_id,
+                q,
+                m.category,
+                price,
+                m.hours_to_close,
+                m.volume_usdc,
+                ef,
+                res,
+                outcome,
+            ))
+
         # Hard filter: hours to close
         if m.hours_to_close is not None:
             if m.hours_to_close < self.config.min_hours_to_close:
+                _log("rejected_hours_to_close_min")
                 return []
             if m.hours_to_close > self.config.max_hours_to_close:
+                _log("rejected_hours_to_close_max")
                 return []
 
         # Hard filter: must have token IDs
         if not m.token_ids:
+            _log("rejected_missing_token_ids")
             return []
 
-        ef = self.ef_scorer.get(m.category)
-        res = self.res_scorer.get(m.category)
+        ef_score_obj  = self.ef_scorer.get(m.category)
+        res_score_obj = self.res_scorer.get(m.category)
+        ef_s  = ef_score_obj.score
+        res_s = res_score_obj.score
 
         # Hard filter: scoring gates from mode config
-        if ef.score < self.mc.min_entry_fill_score:
+        if ef_s < self.mc.min_entry_fill_score:
+            _log("rejected_entry_fill_score", ef=ef_s, res=res_s)
             return []
-        if res.score < self.mc.min_resolution_score:
+        if res_s < self.mc.min_resolution_score:
+            _log("rejected_resolution_score", ef=ef_s, res=res_s)
             return []
 
         candidates: list[EntryCandidate] = []
 
         # Each token (YES, NO) is evaluated separately
         for i, token_id in enumerate(m.token_ids):
-            outcome = m.outcome_names[i] if i < len(m.outcome_names) else f"outcome_{i}"
+            outcome_name = m.outcome_names[i] if i < len(m.outcome_names) else f"outcome_{i}"
 
-            # Current price for this specific token from Gamma (rough; OrderManager will check book)
-            # best_ask is market-level in Gamma — we use it as proxy for YES token
-            # For a real system: fetch per-token book. Here we use market-level price.
+            # Current price for this specific token from Gamma (rough; OrderManager checks book)
             if i == 0:
                 price = m.best_ask if m.best_ask is not None else m.last_trade_price
             else:
@@ -129,35 +189,45 @@ class Screener:
                 price = (1.0 - yes_price) if yes_price is not None else None
 
             if price is None:
+                _log("rejected_price_none", token_id=token_id)
                 continue
-            if price <= 0 or price > self.mc.entry_price_max:
+            if price <= 0:
+                _log("rejected_price_le_zero", token_id=token_id, price=price)
+                continue
+            if price > self.mc.entry_price_max:
+                _log("rejected_price_above_entry_max", token_id=token_id, price=price,
+                     ef=ef_s, res=res_s)
                 continue
             if price >= 0.99:
-                continue  # already resolved
+                _log("rejected_price_ge_0_99", token_id=token_id, price=price)
+                continue
 
-            total_score = self._compute_total_score(m, ef.score, res.score)
+            total_score = self._compute_total_score(m, ef_s, res_s)
 
             # Determine resting bid levels for this token
             entry_levels = [lvl for lvl in self.mc.entry_price_levels if lvl < price]
             if not entry_levels and self.mc.scanner_entry:
-                # Price already in zone — scanner entry at current price
                 entry_levels = [price]
             if not entry_levels:
                 continue
 
+            _log("passed_to_order_manager", token_id=token_id, price=price,
+                 ef=ef_s, res=res_s)
+
             rationale = (
-                f"category={m.category} fill_score={ef.score:.3f} res_score={res.score:.3f} "
-                f"p_winner={res.p_winner:.2f} p_20x={res.p_20x:.3f} tail_ev={res.tail_ev:.1f} "
+                f"category={m.category} fill_score={ef_s:.3f} res_score={res_s:.3f} "
+                f"p_winner={res_score_obj.p_winner:.2f} p_20x={res_score_obj.p_20x:.3f} "
+                f"tail_ev={res_score_obj.tail_ev:.1f} "
                 f"vol=${m.volume_usdc:.0f} hrs_to_close={m.hours_to_close:.1f}"
             )
 
             candidates.append(EntryCandidate(
                 market_info=m,
                 token_id=token_id,
-                outcome_name=outcome,
+                outcome_name=outcome_name,
                 current_price=price,
-                entry_fill_score=ef.score,
-                resolution_score=res.score,
+                entry_fill_score=ef_s,
+                resolution_score=res_s,
                 total_score=total_score,
                 suggested_entry_levels=entry_levels,
                 rationale=rationale,
