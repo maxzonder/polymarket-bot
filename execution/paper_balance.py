@@ -1,17 +1,24 @@
 """
 Persistent paper-balance ledger for dry-run mode — issue #21.
 
-One singleton row in paper_balance tracks cash_balance (USDC we have available).
-Reserved capital is computed live from resting_orders + positions tables:
-  reserved = SUM(price*size) for live resting orders
-           + SUM(entry_size_usdc) for open positions
-  free_balance = cash_balance - reserved
+One singleton row in paper_balance tracks cash_balance (free USDC in hand).
+
+  free_balance = cash_balance - reserved_resting
+
+where reserved_resting = SUM(price * size) for live resting BUY orders only.
+
+Open positions are NOT deducted from free_balance: their capital was already
+removed from cash_balance at fill time (debit on entry fill), so subtracting
+again would double-count. reserved_positions is returned for display only.
 
 Balance lifecycle:
-  - Debited at entry fill (we spent USDC to buy tokens)
-  - Credited at TP fill (we received USDC from selling tokens)
-  - Credited at resolution (moonbag + unfilled TP tokens at resolution price)
-  - Top-up: operator adds paper USDC via CLI
+  place resting order  → free_balance drops (reserved_resting rises)
+  order filled         → cash_balance debited; reserved_resting drops (order
+                         status → matched); net free_balance unchanged vs pre-fill
+  order cancelled      → reserved_resting drops; cash_balance unchanged; free rises
+  TP fill              → cash_balance credited (USDC received from token sale)
+  market resolution    → cash_balance credited (moonbag + unfilled TP at resolution_price)
+  top-up               → cash_balance credited; free_balance rises
 
 All functions take an open sqlite3.Connection with row_factory=sqlite3.Row.
 The caller owns commit/close.
