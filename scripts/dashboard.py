@@ -29,7 +29,7 @@ from utils.paths import DATA_DIR
 
 DB_PATH = DATA_DIR / "positions.db"
 
-# ── Color pair IDs ────────────────────────────────────────────────────────────
+# -- Color pair IDs ------------------------------------------------------------
 C_HEADER = 1   # cyan bold  — section titles
 C_GOOD   = 2   # green      — positive values / active
 C_BAD    = 3   # red        — negative / blocked / errors
@@ -37,7 +37,7 @@ C_WARN   = 4   # yellow     — warnings / gates
 C_DIM    = 5   # dark       — timestamps, borders, secondary info
 C_TITLE  = 6   # magenta    — main title
 
-# ── Scan outcome display config ───────────────────────────────────────────────
+# -- Scan outcome display config -----------------------------------------------
 OUTCOME_SHORT = {
     "placed":               "placed",
     "duplicate":            "dup",
@@ -88,7 +88,7 @@ FUNNEL_ORDER = [
 ]
 
 
-# ── Data loading ──────────────────────────────────────────────────────────────
+# -- Data loading --------------------------------------------------------------
 
 def load_data(db_path: Path) -> dict:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -100,7 +100,7 @@ def load_data(db_path: Path) -> dict:
 
     d: dict = {}
 
-    # ── Balance ──────────────────────────────────────────────────────────────
+    # -- Balance --------------------------------------------------------------
     if "paper_balance" in tables:
         row = conn.execute(
             "SELECT cash_balance FROM paper_balance WHERE id=1"
@@ -119,7 +119,7 @@ def load_data(db_path: Path) -> dict:
         "SELECT COALESCE(SUM(entry_size_usdc),0) FROM positions WHERE status='open'"
     ).fetchone()[0]) if "positions" in tables else 0.0
 
-    # ── Counts ───────────────────────────────────────────────────────────────
+    # -- Counts ---------------------------------------------------------------
     d["open_pos"] = conn.execute(
         "SELECT COUNT(*) FROM positions WHERE status='open'"
     ).fetchone()[0] if "positions" in tables else 0
@@ -132,7 +132,7 @@ def load_data(db_path: Path) -> dict:
         "SELECT COUNT(*) FROM tp_orders WHERE status='live'"
     ).fetchone()[0] if "tp_orders" in tables else 0
 
-    # ── Performance ──────────────────────────────────────────────────────────
+    # -- Performance ----------------------------------------------------------
     if "positions" in tables:
         row = conn.execute(
             "SELECT COUNT(*), "
@@ -149,7 +149,7 @@ def load_data(db_path: Path) -> dict:
         d["resolved"] = d["winners"] = 0
         d["total_pnl"] = d["total_stake"] = 0.0
 
-    # ── Scan funnel — last hour ───────────────────────────────────────────────
+    # -- Scan funnel — last hour -----------------------------------------------
     since_1h = int(time.time()) - 3600
     if "scan_log" in tables:
         rows = conn.execute(
@@ -184,7 +184,7 @@ def check_bot_alive() -> bool:
         return False
 
 
-# ── Drawing helpers ───────────────────────────────────────────────────────────
+# -- Drawing helpers -----------------------------------------------------------
 
 def _w(win, y: int, x: int, text: str, attr: int = 0) -> None:
     """Safe addstr — silently ignores out-of-bounds writes."""
@@ -204,12 +204,12 @@ def _hline(win, y: int, color_pair: int = 0) -> None:
     h, w = win.getmaxyx()
     if 0 <= y < h - 1:
         try:
-            win.hline(y, 0, "─", w, curses.color_pair(color_pair))
+            win.hline(y, 0, "-", w, curses.color_pair(color_pair))
         except curses.error:
             pass
 
 
-# ── Section renderers ─────────────────────────────────────────────────────────
+# -- Section renderers ---------------------------------------------------------
 
 def draw_header(win, bot_alive: bool) -> int:
     h, w = win.getmaxyx()
@@ -259,7 +259,7 @@ def draw_performance(win, d: dict, row: int) -> int:
     h, w = win.getmaxyx()
     _w(win, row, 2, "PERFORMANCE", curses.color_pair(C_HEADER) | curses.A_BOLD)
     try:
-        win.hline(row, 14, "─", max(0, w - 16), curses.color_pair(C_DIM))
+        win.hline(row, 14, "-", max(0, w - 16), curses.color_pair(C_DIM))
     except curses.error:
         pass
     row += 1
@@ -295,7 +295,7 @@ def draw_scan_funnel(win, d: dict, row: int) -> int:
     _w(win, row, 2, "SCAN FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
     _w(win, row, 14, " — last 60 min  ", curses.color_pair(C_DIM))
     try:
-        win.hline(row, 30, "─", max(0, w - 32), curses.color_pair(C_DIM))
+        win.hline(row, 30, "-", max(0, w - 32), curses.color_pair(C_DIM))
     except curses.error:
         pass
     row += 1
@@ -342,7 +342,7 @@ def draw_recent(win, d: dict, row: int) -> int:
 
     _w(win, row, 2, "RECENT ACTIVITY", curses.color_pair(C_HEADER) | curses.A_BOLD)
     try:
-        win.hline(row, 18, "─", max(0, w - 20), curses.color_pair(C_DIM))
+        win.hline(row, 18, "-", max(0, w - 20), curses.color_pair(C_DIM))
     except curses.error:
         pass
     row += 1
@@ -389,7 +389,7 @@ def draw_no_db(win, db_path: Path) -> None:
     _w(win, h // 2,     2, "Start the bot with:  DRY_RUN=true python3 main.py", curses.color_pair(C_DIM))
 
 
-# ── Main curses loop ──────────────────────────────────────────────────────────
+# -- Main curses loop ----------------------------------------------------------
 
 def run(stdscr, db_path: Path, interval: int) -> None:
     curses.curs_set(0)
