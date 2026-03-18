@@ -163,7 +163,7 @@ class BotConfig:
     min_volume_usdc: float = 50.0
     max_volume_usdc: float = 50_000.0  # prefer illiquid markets
     min_hours_to_close: float = 1.0    # at least 1 hour remaining
-    max_hours_to_close: float = 720.0  # 30 days max ahead
+    max_hours_to_close: float = 120.0  # 5 days — dry-run window (was 720)
 
     # ── Scorer DB window ─────────────────────────────────────────────────────
     # Only use swans_v2 rows with entry_min_price in this range for scoring
