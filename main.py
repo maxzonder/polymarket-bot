@@ -14,6 +14,7 @@ Environment variables:
 """
 
 import asyncio
+import subprocess
 import sys
 
 from config import load_config
@@ -23,13 +24,25 @@ from utils.logger import setup_logger
 logger = setup_logger("main")
 
 
+def _git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
 def main() -> None:
     config = load_config()
+    commit = _git_commit()
 
     logger.info("=" * 60)
     logger.info("Polymarket Big Swan Bot")
     logger.info(f"  mode:    {config.mode}")
     logger.info(f"  dry_run: {config.dry_run}")
+    logger.info(f"  commit:  {commit}")
     if config.dry_run:
         logger.info("  [DRY RUN] No real orders will be placed")
     else:
@@ -41,6 +54,7 @@ def main() -> None:
 
     runner = BotRunner(config)
     asyncio.run(runner.run())
+    logger.info(f"Bot stopped | commit={commit} mode={config.mode}")
 
 
 if __name__ == "__main__":
