@@ -57,12 +57,13 @@ from utils.paths import DATABASE_DIR, DB_PATH, DATA_DIR
 
 logger = setup_logger("replay")
 
-# ── Baseline universe gates (same as feature_mart) ────────────────────────────
-ENTRY_PRICE_MAX = 0.05
-ENTRY_VOLUME_MIN = 50.0
-ENTRY_TRADE_COUNT_MIN = 3
-DURATION_HOURS_MIN = 24.0
-VOLUME_1WK_MIN = 1000.0
+# ── Research-baseline universe gates ─────────────────────────────────────────
+# These are data-quality filters for the historical cohort, NOT live-bot params.
+# ORACLE_CATCHABLE_MAX is derived from config at runtime (see load_candidates).
+_RESEARCH_ENTRY_VOLUME_MIN    = 50.0
+_RESEARCH_ENTRY_TRADE_COUNT   = 3
+_RESEARCH_DURATION_HOURS_MIN  = 24.0
+_RESEARCH_VOLUME_1WK_MIN      = 1000.0
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
@@ -72,9 +73,14 @@ def load_candidates(
     start: date,
     end: date,
     limit: Optional[int],
+    oracle_catchable_max: float = 0.01,
 ) -> list[dict]:
     """
-    Load deduplicated token_swans candidates within the baseline universe.
+    Load deduplicated token_swans candidates within the oracle universe.
+
+    oracle_catchable_max = max(entry_price_levels) from live config.
+    Only swans where entry_min_price <= oracle_catchable_max are loaded —
+    these are events where at least the highest resting bid would have filled.
 
     Uses ROW_NUMBER() to pick the single exact row with the highest possible_x
     per (token_id, date) — every field comes from the same consistent row.
@@ -120,11 +126,11 @@ def load_candidates(
         ORDER BY r.entry_ts_first ASC
         """,
         {
-            "emax": ENTRY_PRICE_MAX,
-            "evol": ENTRY_VOLUME_MIN,
-            "etc": ENTRY_TRADE_COUNT_MIN,
-            "dh": DURATION_HOURS_MIN,
-            "vwk": VOLUME_1WK_MIN,
+            "emax": oracle_catchable_max,
+            "evol": _RESEARCH_ENTRY_VOLUME_MIN,
+            "etc":  _RESEARCH_ENTRY_TRADE_COUNT,
+            "dh":   _RESEARCH_DURATION_HOURS_MIN,
+            "vwk":  _RESEARCH_VOLUME_1WK_MIN,
             "start": start.isoformat(),
             "end": end.isoformat(),
         },
@@ -224,8 +230,10 @@ def replay_candidate(
     if not trades:
         return {"status": "no_trades", "token_id": token_id, "market_id": market_id}
 
-    # Entry levels: all mode levels at or below the detected floor price
-    entry_levels = [lvl for lvl in mc.entry_price_levels if lvl <= entry_min_price]
+    # Entry levels: ladder levels that price actually passed through on the way down.
+    # A bid at `lvl` fills when price crosses lvl from above → need lvl >= entry_min_price.
+    # (entry_min_price is the floor; price crossed all ladder levels above that floor.)
+    entry_levels = [lvl for lvl in mc.entry_price_levels if lvl >= entry_min_price]
     if not entry_levels:
         return {"status": "no_levels", "token_id": token_id, "market_id": market_id,
                 "entry_min_price": entry_min_price}
@@ -239,8 +247,17 @@ def replay_candidate(
     expires_at = now_ts + 86400 * 60  # long TTL — replay doesn't expire orders
     pending_buys: dict[str, dict] = {}
 
+    def _tier_stake(level: float) -> float:
+        """Return stake for this entry level from config tier schedule."""
+        if mc.stake_tiers:
+            for tier_price, tier_stake in mc.stake_tiers:
+                if level <= tier_price:
+                    return tier_stake
+        return mc.stake_usdc
+
     for level in entry_levels:
-        token_qty = mc.stake_usdc / level
+        stake = _tier_stake(level)
+        token_qty = stake / level
         # Label format: 'replay_{collection_date}_{level}'
         # The collection_date prefix is used by cohort_report for event-level PnL attribution
         # (same token_id can appear on multiple dates; label disambiguates them).
@@ -465,10 +482,18 @@ def run_replay(
     risk = RiskManager(mc, balance_usdc=100.0)
     om = OrderManager(config, clob, risk)
 
+    # Oracle catchable threshold: highest resting ladder level.
+    # Swans where entry_min_price > this level have no fillable bids.
+    oracle_catchable_max = max(mc.entry_price_levels)
+    logger.info(
+        f"Oracle universe: entry_min_price <= {oracle_catchable_max:.4f} "
+        f"(= max ladder level from config)"
+    )
+
     # Load signal universe
     db_conn = sqlite3.connect(DB_PATH)
     db_conn.row_factory = sqlite3.Row
-    candidates = load_candidates(db_conn, start, end, limit)
+    candidates = load_candidates(db_conn, start, end, limit, oracle_catchable_max)
     db_conn.close()
 
     logger.info(
