@@ -149,9 +149,31 @@ def load_data(db_path: Path) -> dict:
         d["resolved"] = d["winners"] = 0
         d["total_pnl"] = d["total_stake"] = 0.0
 
-    # -- Screener funnel — last hour (early rejections) -----------------------
-    since_1h = int(time.time()) - 3600
+    # -- Last scan cycle stats ------------------------------------------------
+    now_ts = int(time.time())
+    since_1h = now_ts - 3600
+    today_start = now_ts - (now_ts % 86400)  # midnight UTC
+
     if "screener_log" in tables:
+        # Last cycle: all screener_log rows within 30s of the latest scanned_at
+        last_scan_ts = conn.execute(
+            "SELECT MAX(scanned_at) FROM screener_log"
+        ).fetchone()[0]
+        d["last_scan_ts"] = last_scan_ts
+        if last_scan_ts:
+            cycle_rows = conn.execute(
+                "SELECT outcome, COUNT(*) n FROM screener_log "
+                "WHERE scanned_at >= ? GROUP BY outcome",
+                (last_scan_ts - 30,),
+            ).fetchall()
+            cycle = {r["outcome"]: r["n"] for r in cycle_rows}
+            d["cycle_fetched"]  = sum(cycle.values())
+            d["cycle_passed"]   = cycle.get("passed_to_order_manager", 0)
+            d["cycle_rejected"] = d["cycle_fetched"] - d["cycle_passed"]
+        else:
+            d["cycle_fetched"] = d["cycle_passed"] = d["cycle_rejected"] = 0
+
+        # Screener funnel — last hour
         rows = conn.execute(
             "SELECT outcome, COUNT(*) n FROM screener_log "
             "WHERE scanned_at >= ? GROUP BY outcome",
@@ -159,7 +181,30 @@ def load_data(db_path: Path) -> dict:
         ).fetchall()
         d["screener"] = {r["outcome"]: r["n"] for r in rows}
     else:
+        d["last_scan_ts"] = None
+        d["cycle_fetched"] = d["cycle_passed"] = d["cycle_rejected"] = 0
         d["screener"] = {}
+
+    # -- Today's order activity -----------------------------------------------
+    if "resting_orders" in tables:
+        d["placed_today"] = conn.execute(
+            "SELECT COUNT(*) FROM resting_orders WHERE created_at >= ?",
+            (today_start,),
+        ).fetchone()[0]
+        d["cancelled_today"] = conn.execute(
+            "SELECT COUNT(*) FROM resting_orders WHERE status='cancelled' AND created_at >= ?",
+            (today_start,),
+        ).fetchone()[0]
+    else:
+        d["placed_today"] = d["cancelled_today"] = 0
+
+    if "positions" in tables:
+        d["filled_today"] = conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE opened_at >= ?",
+            (today_start,),
+        ).fetchone()[0]
+    else:
+        d["filled_today"] = 0
 
     # ── Order-manager scan funnel — last hour (late rejections) ──────────────
     if "scan_log" in tables:
@@ -222,6 +267,22 @@ def _hline(win, y: int, color_pair: int = 0) -> None:
 
 # -- Section renderers ---------------------------------------------------------
 
+def _fmt_ago(ts: int) -> str:
+    """Return 'Xm Ys ago' or 'Xs ago' string from a unix timestamp."""
+    if not ts:
+        return "never"
+    secs = int(time.time()) - ts
+    if secs < 0:
+        return "just now"
+    if secs < 60:
+        return f"{secs}s ago"
+    m, s = divmod(secs, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s ago"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m ago"
+
+
 def draw_header(win, bot_alive: bool) -> int:
     h, w = win.getmaxyx()
     now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d  %H:%M:%S  UTC")
@@ -235,6 +296,70 @@ def draw_header(win, bot_alive: bool) -> int:
     _w(win, 0, max(0, w - len(right) - 1), now_str, curses.color_pair(C_DIM))
     _w(win, 0, max(0, w - len(status_str) - 1), status_str, status_attr)
     return 2
+
+
+def draw_activity(win, d: dict, row: int) -> int:
+    h, w = win.getmaxyx()
+
+    _w(win, row, 2, "SCAN ACTIVITY", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    try:
+        win.hline(row, 16, "-", max(0, w - 18), curses.color_pair(C_DIM))
+    except curses.error:
+        pass
+    row += 1
+
+    # Last scan summary
+    last_ts  = d.get("last_scan_ts")
+    fetched  = d.get("cycle_fetched", 0)
+    passed   = d.get("cycle_passed", 0)
+    rejected = d.get("cycle_rejected", 0)
+
+    ago_str = _fmt_ago(last_ts) if last_ts else "no data"
+    if last_ts:
+        scan_time = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%H:%M:%S")
+        scan_label = f"  Last scan  {scan_time} UTC  ({ago_str})"
+    else:
+        scan_label = "  Last scan  —"
+
+    _w(win, row, 0, scan_label, curses.color_pair(C_DIM))
+
+    if fetched > 0:
+        x = 2
+        parts = [
+            (f"  fetched=",   0),
+            (f"{fetched}",    C_DIM),
+            (f"   passed=",   0),
+            (f"{passed}",     C_GOOD if passed > 0 else C_DIM),
+            (f"   rejected=", 0),
+            (f"{rejected}",   C_DIM),
+        ]
+        x = len(scan_label) + 4
+        for text, color in parts:
+            attr = curses.color_pair(color) if color else 0
+            _w(win, row, x, text, attr)
+            x += len(text)
+    row += 1
+
+    # Today's activity
+    placed    = d.get("placed_today", 0)
+    filled    = d.get("filled_today", 0)
+    cancelled = d.get("cancelled_today", 0)
+
+    x = 2
+    _w(win, row, x, "  Today      ", curses.color_pair(C_DIM))
+    x += 13
+    for label, val, color in [
+        ("placed=",    placed,    C_GOOD if placed > 0 else C_DIM),
+        ("   filled=", filled,    C_GOOD if filled > 0 else C_DIM),
+        ("   cancelled=", cancelled, C_WARN if cancelled > 0 else C_DIM),
+    ]:
+        _w(win, row, x, label, curses.color_pair(C_DIM))
+        x += len(label)
+        _w(win, row, x, str(val), curses.color_pair(color))
+        x += len(str(val))
+    row += 1
+
+    return row + 1
 
 
 def draw_balance_positions(win, d: dict, row: int) -> int:
@@ -538,6 +663,7 @@ def run(stdscr, db_path: Path, interval: int) -> None:
             d = last_data
             bot_alive = d.get("_alive", False)
             row = draw_header(stdscr, bot_alive)
+            row = draw_activity(stdscr, d, row)
             row = draw_balance_positions(stdscr, d, row)
             row = draw_performance(stdscr, d, row)
             row = draw_screener_funnel(stdscr, d, row)
