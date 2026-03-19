@@ -67,6 +67,13 @@ class ModeConfig:
     # "tail_ev" | "ev_total" | "roi_pct"
     optimize_metric: str
 
+    # ── Price-tier stake schedule ──────────────────────────────────────────────
+    # Tuple of (max_entry_price, stake_usdc) sorted ascending by price.
+    # For a given fill price, the first tier where fill_price <= max_entry_price
+    # determines the stake. Falls back to stake_usdc if no tier matches.
+    # Empty tuple = disabled (use stake_usdc for all levels).
+    stake_tiers: tuple[tuple[float, float], ...] = ()
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -124,10 +131,17 @@ BIG_SWAN_MODE = ModeConfig(
     min_entry_fill_score=0.02,  # low bar — wide coverage
     min_resolution_score=0.15,
     min_real_x_historical=10.0,
-    stake_usdc=0.01,            # micro-stakes: many small bets
+    stake_usdc=0.05,            # fallback if no tier matches
     max_open_positions=100,
     max_capital_deployed_pct=0.50,
     optimize_metric="tail_ev",
+    # Price-tier stakes: deeper floor = bigger bet (higher upside)
+    # 0.001 → $0.50 (1000x potential), 0.005 → $0.25, 0.010 → $0.10
+    stake_tiers=(
+        (0.001, 0.50),
+        (0.005, 0.25),
+        (0.010, 0.10),
+    ),
 )
 
 MODES: dict[str, ModeConfig] = {
