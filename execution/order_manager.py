@@ -203,6 +203,7 @@ class OrderManager:
             "ALTER TABLE tp_orders      ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0",
             "ALTER TABLE resting_orders ADD COLUMN candidate_id TEXT",
             "ALTER TABLE resting_orders ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE resting_orders ADD COLUMN outcome_name TEXT",
             "ALTER TABLE scan_log       ADD COLUMN candidate_id TEXT",
             "ALTER TABLE screener_log   ADD COLUMN candidate_id TEXT",
             "ALTER TABLE positions      ADD COLUMN is_winner INTEGER",
@@ -376,6 +377,7 @@ class OrderManager:
                     expires_at=expires_at,
                     mode=self.mc.name,
                     candidate_id=candidate.candidate_id or None,
+                    outcome_name=candidate.outcome_name or "",
                 )
                 self._log_scan(conn, candidate, price_level, "placed", order_id=result.order_id)
                 logger.info(
@@ -482,6 +484,7 @@ class OrderManager:
                 expires_at=now + self.config.resting_order_ttl,
                 mode=self.mc.name,
                 candidate_id=candidate.candidate_id or None,
+                outcome_name=candidate.outcome_name or "",
             )
             logger.info(
                 f"Scanner BUY: {candidate.market_info.question[:50]!r} "
@@ -541,13 +544,14 @@ class OrderManager:
         expires_at: int,
         mode: str,
         candidate_id: Optional[str] = None,
+        outcome_name: str = "",
     ) -> None:
         now = int(time.time())
         conn.execute(
             "INSERT OR REPLACE INTO resting_orders "
-            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode, candidate_id) "
-            "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?, ?)",
-            (order_id, token_id, market_id, price, size, now, expires_at, mode, candidate_id),
+            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode, candidate_id, outcome_name) "
+            "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?, ?, ?)",
+            (order_id, token_id, market_id, price, size, now, expires_at, mode, candidate_id, outcome_name),
         )
 
     # ── On fill ───────────────────────────────────────────────────────────────

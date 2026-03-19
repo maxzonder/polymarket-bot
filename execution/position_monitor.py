@@ -92,6 +92,7 @@ class PositionMonitor:
                     market_id=resting["market_id"],
                     fill_price=fill_price,
                     fill_quantity=fill_qty,
+                    outcome_name=resting["outcome_name"] or "",
                 )
                 conn = self._conn()
                 continue
@@ -159,6 +160,7 @@ class PositionMonitor:
                     market_id=order["market_id"],
                     fill_price=bid_price,
                     fill_quantity=order_size,  # always use full intended size
+                    outcome_name=order["outcome_name"] or "",
                 )
                 logger.info(
                     f"[DRY] BUY fully filled: {order['order_id'][:8]} "
