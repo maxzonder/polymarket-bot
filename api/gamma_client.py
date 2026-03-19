@@ -63,6 +63,70 @@ def _load_json_list(val) -> list:
         return []
 
 
+# Slug/label → internal category string.
+# Checked against live tag slugs from the Gamma API (March 2026).
+_TAG_CATEGORY_MAP: dict[str, str] = {
+    # crypto
+    "crypto": "crypto", "bitcoin": "crypto", "ethereum": "crypto",
+    "defi": "crypto", "nft": "crypto", "web3": "crypto",
+    "stablecoins": "crypto", "altcoins": "crypto", "solana": "crypto",
+    # sports (broad)
+    "sports": "sports", "soccer": "sports", "football": "sports",
+    "basketball": "sports", "nba": "sports", "nfl": "sports",
+    "baseball": "sports", "mlb": "sports", "tennis": "sports",
+    "golf": "sports", "mma": "sports", "boxing": "sports",
+    "hockey": "sports", "nhl": "sports", "cricket": "sports",
+    "olympics": "sports", "f1": "sports", "formula-1": "sports",
+    "ufc": "sports", "wrestling": "sports", "rugby": "sports",
+    # esports
+    "esports": "esports", "cs2": "esports", "csgo": "esports",
+    "league-of-legends": "esports", "valorant": "esports",
+    "dota": "esports", "overwatch": "esports", "gaming": "esports",
+    # politics
+    "politics": "politics", "elections": "politics",
+    "us-politics": "politics", "congress": "politics",
+    "senate": "politics", "trump": "politics", "president": "politics",
+    "supreme-court": "politics",
+    # geopolitics
+    "geopolitics": "geopolitics", "world": "geopolitics",
+    "international": "geopolitics", "nato": "geopolitics",
+    "war": "geopolitics", "middle-east": "geopolitics",
+    "russia": "geopolitics", "china": "geopolitics", "ukraine": "geopolitics",
+    # weather
+    "weather": "weather", "climate": "weather", "hurricane": "weather",
+    # entertainment
+    "entertainment": "entertainment", "pop-culture": "entertainment",
+    "celebrity": "entertainment", "music": "entertainment",
+    "movies": "entertainment", "tv": "entertainment",
+    "awards": "entertainment", "oscars": "entertainment",
+    "culture": "entertainment",
+    # tech
+    "tech": "tech", "technology": "tech", "ai": "tech",
+    "science": "tech", "space": "tech",
+    # finance/economy → crypto proxy (closest to bot's categories)
+    "finance": "crypto", "economy": "crypto", "business": "crypto",
+    "stocks": "crypto", "fed": "crypto",
+}
+
+
+def _category_from_tags(tags: list) -> Optional[str]:
+    """
+    Infer internal category string from the Gamma API tags array.
+    Returns the first high-confidence match, or None.
+    """
+    if not tags:
+        return None
+    for tag in tags:
+        if not isinstance(tag, dict):
+            continue
+        slug = (tag.get("slug") or "").lower().strip()
+        label = (tag.get("label") or "").lower().strip()
+        cat = _TAG_CATEGORY_MAP.get(slug) or _TAG_CATEGORY_MAP.get(label)
+        if cat:
+            return cat
+    return None
+
+
 def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
     market_id = raw.get("id")
     if not market_id:
@@ -94,12 +158,16 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
     if events and isinstance(events[0], dict):
         comment_count = _parse_int(events[0].get("commentCount")) or 0
 
-    # Category
+    # Category — Gamma API no longer exposes a "category" field directly.
+    # Category is now inferred from the "tags" array (populated when include_tag=true).
     category = raw.get("category")
     if not category and events and isinstance(events[0], dict):
         category = events[0].get("category")
     if category:
         category = str(category).strip().lower()
+    if not category:
+        tags = raw.get("tags") or []
+        category = _category_from_tags(tags)
 
     # End date
     from datetime import datetime, timezone, timedelta

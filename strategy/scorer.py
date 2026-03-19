@@ -75,27 +75,54 @@ class EntryFillScorer:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
 
-        # swans_v2 sample counts per category
-        swan_rows = conn.execute("""
-            SELECT
-                m.category,
-                COUNT(DISTINCT s.market_id) AS markets_with_swan,
-                COUNT(*) AS swan_count,
-                AVG(s.entry_volume_usdc) AS avg_entry_vol,
-                AVG(CASE WHEN s.entry_ts_last IS NOT NULL AND s.entry_ts_first IS NOT NULL
-                         THEN s.entry_ts_last - s.entry_ts_first ELSE 0 END) AS avg_floor_dur
-            FROM swans_v2 s
-            JOIN markets m ON s.market_id = m.id
-            WHERE s.entry_min_price <= ?
-            GROUP BY m.category
-        """, (self.entry_price_max,)).fetchall()
+        # Prefer token_swans (full Dec+Jan+Feb window, ~11k rows at entry_price_max=0.02)
+        # over swans_v2 (Feb 2026 only, ~1.3k rows) for better coverage.
+        # Fall back to swans_v2 if token_swans is unavailable.
+        try:
+            swan_rows = conn.execute("""
+                SELECT
+                    m.category,
+                    COUNT(DISTINCT s.token_id) AS markets_with_swan,
+                    COUNT(*) AS swan_count,
+                    AVG(s.entry_volume_usdc) AS avg_entry_vol,
+                    AVG(CASE WHEN s.entry_ts_last IS NOT NULL AND s.entry_ts_first IS NOT NULL
+                             THEN s.entry_ts_last - s.entry_ts_first ELSE 0 END) AS avg_floor_dur
+                FROM token_swans s
+                JOIN tokens t ON t.token_id = s.token_id
+                JOIN markets m ON m.id = t.market_id
+                WHERE s.entry_min_price <= ?
+                GROUP BY m.category
+            """, (self.entry_price_max,)).fetchall()
+        except Exception:
+            swan_rows = conn.execute("""
+                SELECT
+                    m.category,
+                    COUNT(DISTINCT s.market_id) AS markets_with_swan,
+                    COUNT(*) AS swan_count,
+                    AVG(s.entry_volume_usdc) AS avg_entry_vol,
+                    AVG(CASE WHEN s.entry_ts_last IS NOT NULL AND s.entry_ts_first IS NOT NULL
+                             THEN s.entry_ts_last - s.entry_ts_first ELSE 0 END) AS avg_floor_dur
+                FROM swans_v2 s
+                JOIN markets m ON s.market_id = m.id
+                WHERE s.entry_min_price <= ?
+                GROUP BY m.category
+            """, (self.entry_price_max,)).fetchall()
 
-        # total market counts per category
-        mkt_rows = conn.execute("""
-            SELECT category, COUNT(*) AS total_markets
-            FROM markets
-            GROUP BY category
-        """).fetchall()
+        # Denominator: use feature_mart (screener-eligible universe, analysis window)
+        # to avoid inflating the denominator with all-time historical markets.
+        # Falls back to raw markets table if feature_mart hasn't been built yet.
+        try:
+            mkt_rows = conn.execute("""
+                SELECT category, COUNT(*) AS total_markets
+                FROM feature_mart
+                GROUP BY category
+            """).fetchall()
+        except Exception:
+            mkt_rows = conn.execute("""
+                SELECT category, COUNT(*) AS total_markets
+                FROM markets
+                GROUP BY category
+            """).fetchall()
         conn.close()
 
         total_by_cat: dict[Optional[str], int] = {r["category"]: r["total_markets"] for r in mkt_rows}
