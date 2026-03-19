@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import signal
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from api.clob_client import ClobClient
@@ -227,8 +228,10 @@ class BotRunner:
                 if self.config.dry_run:
                     self.risk.balance_usdc = self.order_manager.get_cash_balance()
 
-                # Hourly Telegram report
-                if self.config.dry_run and time.time() - self._last_report_ts >= 3600:
+                # Hourly Telegram report — fires at :01 of every hour (wall clock)
+                now_dt = datetime.now(timezone.utc)
+                current_hour_ts = now_dt.replace(minute=0, second=0, microsecond=0).timestamp()
+                if now_dt.minute >= 1 and self._last_report_ts < current_hour_ts:
                     await asyncio.to_thread(self._send_hourly_report)
                     self._last_report_ts = time.time()
 
