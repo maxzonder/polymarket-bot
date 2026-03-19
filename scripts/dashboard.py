@@ -243,14 +243,17 @@ def load_data(db_path: Path) -> dict:
                 (float(r["entry_price"]), float(r["entry_size_usdc"]))
             )
 
-        # Live resting bids per market
+        # Live resting bids per market (with partial fill info)
         rest_detail = conn.execute(
-            "SELECT market_id, price FROM resting_orders "
+            "SELECT market_id, price, size, filled_quantity FROM resting_orders "
             "WHERE status='live' ORDER BY price DESC"
         ).fetchall() if "resting_orders" in tables else []
         rest_by_market: dict = {}
         for r in rest_detail:
-            rest_by_market.setdefault(r["market_id"], []).append(float(r["price"]))
+            size = float(r["size"] or 0)
+            filled = float(r["filled_quantity"] or 0)
+            pct = filled / size if size > 0 else 0.0
+            rest_by_market.setdefault(r["market_id"], []).append((float(r["price"]), pct))
 
         markets_detail = []
         for row in open_mkts:
@@ -678,8 +681,11 @@ def draw_open_markets(win, d: dict, row: int) -> int:
                 tag = f"+{price:.3f}=${stake:.2f} "
                 _w(win, row, x, tag, curses.color_pair(C_GOOD))
                 x += len(tag)
-            for price in rest_tiers:
-                tag = f"~{price:.3f} "
+            for price, pct in rest_tiers:
+                if pct > 0.01:
+                    tag = f"~{price:.3f}({pct:.0%}) "
+                else:
+                    tag = f"~{price:.3f} "
                 _w(win, row, x, tag, curses.color_pair(C_WARN))
                 x += len(tag)
             row += 1

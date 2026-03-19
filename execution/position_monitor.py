@@ -127,36 +127,56 @@ class PositionMonitor:
         for order in resting_live:
             token_id = order["token_id"]
             bid_price = float(order["price"])
+            order_size = float(order["size"])
+            filled_so_far = float(order["filled_quantity"] or 0)
+            remaining = order_size - filled_so_far
+            if remaining < 0.0001:
+                continue  # shouldn't happen but guard anyway
+
             try:
                 book = get_orderbook(token_id)
             except Exception:
                 continue
 
             best_ask = book.best_ask
-            if best_ask is not None and best_ask <= bid_price:
-                # Cap fill quantity at available ask depth to avoid simulating
-                # fills against an empty book.
-                # Intentionally simplified: no queue priority, no partial fill
-                # accumulation across cycles, fill assumed at exact limit price.
-                available_depth = book.ask_depth_at(bid_price)
-                fill_quantity = min(float(order["size"]), available_depth)
-                if fill_quantity < 0.0001:
-                    continue  # no real depth at this level — skip
-                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=fill_quantity)
+            if best_ask is None or best_ask > bid_price:
+                continue
+
+            available_depth = book.ask_depth_at(bid_price)
+            this_fill = min(remaining, available_depth)
+            if this_fill < 0.0001:
+                continue  # no real depth at this level — skip
+
+            new_filled = filled_so_far + this_fill
+
+            if new_filled >= order_size * 0.99:
+                # Fully filled — create position and TP orders
+                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=this_fill)
                 conn.close()
                 self.om.on_entry_filled(
                     order_id=order["order_id"],
                     token_id=token_id,
                     market_id=order["market_id"],
-                    fill_price=bid_price,      # filled at our limit price
-                    fill_quantity=fill_quantity,
+                    fill_price=bid_price,
+                    fill_quantity=order_size,  # always use full intended size
                 )
                 logger.info(
-                    f"[DRY] Simulated BUY fill: {order['order_id'][:8]} "
-                    f"@ ${bid_price:.5f} qty={fill_quantity:.2f} "
-                    f"(market ask=${best_ask:.5f} depth={available_depth:.2f})"
+                    f"[DRY] BUY fully filled: {order['order_id'][:8]} "
+                    f"@ ${bid_price:.5f} qty={order_size:.2f}"
                 )
                 conn = self._conn()
+            else:
+                # Partial fill — accumulate, keep order live
+                conn.execute(
+                    "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
+                    (new_filled, order["order_id"]),
+                )
+                conn.commit()
+                logger.info(
+                    f"[DRY] BUY partial fill: {order['order_id'][:8]} "
+                    f"@ ${bid_price:.5f} filled={new_filled:.2f}/{order_size:.2f} "
+                    f"({100*new_filled/order_size:.0f}%)"
+                )
 
         # Check TP SELL orders
         tp_live = conn.execute(

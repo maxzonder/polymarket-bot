@@ -202,6 +202,7 @@ class OrderManager:
         migrations = [
             "ALTER TABLE tp_orders      ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0",
             "ALTER TABLE resting_orders ADD COLUMN candidate_id TEXT",
+            "ALTER TABLE resting_orders ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0",
             "ALTER TABLE scan_log       ADD COLUMN candidate_id TEXT",
             "ALTER TABLE screener_log   ADD COLUMN candidate_id TEXT",
             "ALTER TABLE positions      ADD COLUMN is_winner INTEGER",
