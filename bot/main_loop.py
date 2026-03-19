@@ -263,4 +263,4 @@ class BotRunner:
             ]
             telegram.send_message("\n".join(lines))
         except Exception as e:
-            logger.warning(f"Hourly report failed: {e}")
+            logger.warning(f"Hourly report failed: {e}", exc_info=True)
