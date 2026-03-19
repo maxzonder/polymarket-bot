@@ -231,7 +231,34 @@ def load_data(db_path: Path) -> dict:
             GROUP BY p.market_id
             ORDER BY total_invested DESC
         """).fetchall()
-        d["open_markets_detail"] = [dict(r) for r in open_mkts]
+
+        # Per-position entry details for tier display
+        pos_detail = conn.execute(
+            "SELECT market_id, entry_price, entry_size_usdc "
+            "FROM positions WHERE status='open' ORDER BY entry_price DESC"
+        ).fetchall()
+        pos_by_market: dict = {}
+        for r in pos_detail:
+            pos_by_market.setdefault(r["market_id"], []).append(
+                (float(r["entry_price"]), float(r["entry_size_usdc"]))
+            )
+
+        # Live resting bids per market
+        rest_detail = conn.execute(
+            "SELECT market_id, price FROM resting_orders "
+            "WHERE status='live' ORDER BY price DESC"
+        ).fetchall() if "resting_orders" in tables else []
+        rest_by_market: dict = {}
+        for r in rest_detail:
+            rest_by_market.setdefault(r["market_id"], []).append(float(r["price"]))
+
+        markets_detail = []
+        for row in open_mkts:
+            m = dict(row)
+            m["pos_tiers"]  = pos_by_market.get(m["market_id"], [])
+            m["rest_tiers"] = rest_by_market.get(m["market_id"], [])
+            markets_detail.append(m)
+        d["open_markets_detail"] = markets_detail
     else:
         d["filled_today"] = 0
         d["open_markets_detail"] = []
@@ -617,7 +644,7 @@ def draw_open_markets(win, d: dict, row: int) -> int:
     row += 1
 
     for m in markets:
-        if row >= h - 2:
+        if row >= h - 3:
             break
         question  = (m.get("question") or m["market_id"])[:48]
         invested  = float(m["total_invested"] or 0)
@@ -641,6 +668,21 @@ def draw_open_markets(win, d: dict, row: int) -> int:
             x += len(pos_str)
         _w(win, row, x + 2, ttc_str, curses.color_pair(C_WARN))
         row += 1
+
+        # Tier row: filled positions (green) + live resting bids (yellow)
+        if row < h - 2:
+            x = 6
+            pos_tiers  = sorted(m.get("pos_tiers",  []), key=lambda t: t[0])
+            rest_tiers = sorted(m.get("rest_tiers", []))
+            for price, stake in pos_tiers:
+                tag = f"+{price:.3f}=${stake:.2f} "
+                _w(win, row, x, tag, curses.color_pair(C_GOOD))
+                x += len(tag)
+            for price in rest_tiers:
+                tag = f"~{price:.3f} "
+                _w(win, row, x, tag, curses.color_pair(C_WARN))
+                x += len(tag)
+            row += 1
 
     return row + 1
 
