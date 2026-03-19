@@ -589,27 +589,6 @@ class OrderManager:
             (order_id,),
         )
 
-        # Model C: cancel all remaining live resting bids for same token —
-        # once filled at any level, higher-price bids are averaging up on the
-        # same thesis and should not fill.
-        other_live = conn.execute(
-            "SELECT order_id FROM resting_orders WHERE token_id=? AND status='live'",
-            (token_id,),
-        ).fetchall()
-        if other_live:
-            other_ids = [r["order_id"] for r in other_live]
-            conn.execute(
-                f"UPDATE resting_orders SET status='cancelled' "
-                f"WHERE token_id=? AND status='live'",
-                (token_id,),
-            )
-            for oid in other_ids:
-                self.clob.cancel_order(oid)
-            logger.info(
-                f"Model C: cancelled {len(other_ids)} remaining resting bid(s) "
-                f"for token={token_id[:16]} after fill @ ${fill_price:.5f}"
-            )
-
         # Debit paper balance (entry fill = USDC spent)
         if self.config.dry_run:
             pb.debit(conn, stake_usdc, f"entry fill {order_id[:12]}")

@@ -75,7 +75,9 @@ class RiskManager:
         if entry_price < 0.0005 and resolution_score.sample_count < 5:
             return None  # paper price artifact risk
 
-        # Determine base stake from price-tier schedule (if configured)
+        # Determine base stake from price-tier schedule (if configured).
+        # Max per-token exposure = sum of all tier stakes (e.g. $0.50+$0.25+$0.10=$0.85).
+        # Balance gate in OrderManager prevents placement when funds are insufficient.
         base_stake = self.mc.stake_usdc  # fallback
         if self.mc.stake_tiers:
             for tier_price, tier_stake in self.mc.stake_tiers:
@@ -83,10 +85,7 @@ class RiskManager:
                     base_stake = tier_stake
                     break
 
-        # Hard cap: never exceed balance * max_capital_deployed_pct / max_positions
-        max_total = self.balance_usdc * self.mc.max_capital_deployed_pct
-        per_position_cap = max_total / max(self.mc.max_open_positions, 1)
-        stake = min(base_stake, per_position_cap)
+        stake = base_stake
 
         # Scale stake by resolution_score for big_swan_mode
         if self.mc.optimize_metric == "tail_ev":
