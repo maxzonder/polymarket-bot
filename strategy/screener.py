@@ -225,7 +225,7 @@ class Screener:
                 f"category={m.category} fill_score={ef_s:.3f} res_score={res_s:.3f} "
                 f"p_winner={res_score_obj.p_winner:.2f} p_20x={res_score_obj.p_20x:.3f} "
                 f"tail_ev={res_score_obj.tail_ev:.1f} "
-                f"vol=${m.volume_usdc:.0f} hrs_to_close={m.hours_to_close:.1f}"
+                f"vol=${m.volume_usdc:.0f} hrs_to_close={f'{m.hours_to_close:.1f}' if m.hours_to_close is not None else 'N/A'}"
             )
 
             candidates.append(EntryCandidate(
