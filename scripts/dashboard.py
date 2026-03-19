@@ -503,93 +503,87 @@ SCREENER_COLOR = {
 }
 
 
+def _draw_funnel(win, row: int, title: str, items: list[tuple], total: int) -> int:
+    """
+    Render a funnel table in two side-by-side columns.
+    items: list of (label, n, color_id)
+    Layout per cell:  label(12)  n(6)  pct(5)   — 26 chars + 2 gap = 28 per col
+    """
+    h, w = win.getmaxyx()
+    COL_W   = 28
+    LABEL_W = 12
+    N_W     = 6
+    PCT_W   = 5   # " 78% "
+
+    cols_per_row = max(1, (w - 4) // COL_W)
+    col = 0
+
+    for label, n, color_id in items:
+        if row >= h - 2:
+            break
+        pct = 100.0 * n / total if total else 0
+        x   = 2 + col * COL_W
+
+        _w(win, row, x,              f"{label:<{LABEL_W}}", curses.color_pair(color_id))
+        _w(win, row, x + LABEL_W,    f"{n:>{N_W},}",        curses.color_pair(C_DIM))
+        _w(win, row, x + LABEL_W + N_W + 1, f"{pct:>4.0f}%", curses.color_pair(C_DIM))
+
+        col += 1
+        if col >= cols_per_row:
+            col = 0
+            row += 1
+
+    if col > 0:
+        row += 1
+    return row + 1
+
+
 def draw_screener_funnel(win, d: dict, row: int) -> int:
     h, w = win.getmaxyx()
     _w(win, row, 2, "SCREENER FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    _w(win, row, 18, " — last 60 min  ", curses.color_pair(C_DIM))
+    _w(win, row, 18, " — last 60 min", curses.color_pair(C_DIM))
+    try:
+        win.hline(row, 33, "-", max(0, w - 35), curses.color_pair(C_DIM))
+    except curses.error:
+        pass
+    row += 1
+
+    screener = d.get("screener", {})
+    total    = sum(screener.values())
+    if total == 0:
+        _w(win, row, 4, "no screener activity yet", curses.color_pair(C_DIM))
+        return row + 2
+
+    items = [
+        (SCREENER_SHORT.get(k, k[:12]), screener[k], SCREENER_COLOR.get(k, C_DIM))
+        for k in SCREENER_FUNNEL_ORDER
+        if screener.get(k, 0) > 0
+    ]
+    return _draw_funnel(win, row, "SCREENER FUNNEL", items, total)
+
+
+def draw_scan_funnel(win, d: dict, row: int) -> int:
+    h, w = win.getmaxyx()
+    _w(win, row, 2, "ORDER MGR FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    _w(win, row, 19, " — last 60 min", curses.color_pair(C_DIM))
     try:
         win.hline(row, 34, "-", max(0, w - 36), curses.color_pair(C_DIM))
     except curses.error:
         pass
     row += 1
 
-    screener = d.get("screener", {})
-    total = sum(screener.values())
-    if total == 0:
-        _w(win, row, 4, "no screener activity yet", curses.color_pair(C_DIM))
-        return row + 2
-
-    COL_W = 22
-    cols_per_row = max(1, (w - 4) // COL_W)
-    col = 0
-
-    for key in SCREENER_FUNNEL_ORDER:
-        n = screener.get(key, 0)
-        if n == 0:
-            continue
-        pct   = 100.0 * n / total
-        label = SCREENER_SHORT.get(key, key[:12])
-        color = curses.color_pair(SCREENER_COLOR.get(key, C_DIM))
-        x = 2 + col * COL_W
-
-        _w(win, row, x,      f"{label:<12}", color)
-        _w(win, row, x + 12, f"{n:>4} ", curses.color_pair(C_DIM))
-        _w(win, row, x + 17, f"({pct:>4.0f}%)")
-
-        col += 1
-        if col >= cols_per_row:
-            col = 0
-            row += 1
-
-    if col > 0:
-        row += 1
-
-    return row + 1
-
-
-def draw_scan_funnel(win, d: dict, row: int) -> int:
-    h, w = win.getmaxyx()
-    _w(win, row, 2, "ORDER MGR FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    _w(win, row, 19, " — last 60 min  ", curses.color_pair(C_DIM))
-    try:
-        win.hline(row, 30, "-", max(0, w - 32), curses.color_pair(C_DIM))
-    except curses.error:
-        pass
-    row += 1
-
-    scan = d["scan"]
+    scan        = d.get("scan", {})
     total_evals = sum(scan.values())
     if total_evals == 0:
         _w(win, row, 4, "no scan activity yet", curses.color_pair(C_DIM))
         return row + 2
 
-    # Display in columns: label  N  pct%
-    COL_W = 22
-    cols_per_row = max(1, (w - 4) // COL_W)
-    col = 0
-
-    for key in FUNNEL_ORDER:
-        n = scan.get(key, 0)
-        if n == 0:
-            continue
-        pct  = 100.0 * n / total_evals
-        label = OUTCOME_SHORT.get(key, key)
-        color = curses.color_pair(OUTCOME_COLOR.get(key, C_DIM))
-        x = 2 + col * COL_W
-
-        _w(win, row, x,          f"{label:<12}", color)
-        _w(win, row, x + 12,     f"{n:>4} ", curses.color_pair(C_DIM))
-        _w(win, row, x + 17,     f"({pct:>4.0f}%)")
-
-        col += 1
-        if col >= cols_per_row:
-            col = 0
-            row += 1
-
-    if col > 0:
-        row += 1
-
-    return row + 1
+    items = [
+        (OUTCOME_SHORT.get(k, k[:12]), scan[k], OUTCOME_COLOR.get(k, C_DIM))
+        for k in FUNNEL_ORDER
+        if scan.get(k, 0) > 0
+    ]
+    return _draw_funnel(win, row, "ORDER MGR FUNNEL", items, total_evals)
 
 
 def _fmt_ttc(end_ts: int | None) -> str:
