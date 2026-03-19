@@ -515,7 +515,7 @@ def _draw_funnel(win, row: int, title: str, items: list[tuple], total: int) -> i
     N_W     = 6
     PCT_W   = 5   # " 78% "
 
-    cols_per_row = max(1, (w - 4) // COL_W)
+    cols_per_row = min(2, max(1, (w - 4) // COL_W))
     col = 0
 
     for label, n, color_id in items:
