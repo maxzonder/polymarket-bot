@@ -196,12 +196,16 @@ def load_data(db_path: Path) -> dict:
             "SELECT COUNT(*) FROM resting_orders WHERE created_at >= ?",
             (today_start,),
         ).fetchone()[0]
+        d["placed_today_markets"] = conn.execute(
+            "SELECT COUNT(DISTINCT market_id) FROM resting_orders WHERE created_at >= ?",
+            (today_start,),
+        ).fetchone()[0]
         d["cancelled_today"] = conn.execute(
             "SELECT COUNT(*) FROM resting_orders WHERE status='cancelled' AND created_at >= ?",
             (today_start,),
         ).fetchone()[0]
     else:
-        d["placed_today"] = d["cancelled_today"] = 0
+        d["placed_today"] = d["placed_today_markets"] = d["cancelled_today"] = 0
 
     if "positions" in tables:
         d["filled_today"] = conn.execute(
@@ -353,15 +357,19 @@ def draw_activity(win, d: dict, row: int) -> int:
     x = 2
     _w(win, row, x, "  Today      ", curses.color_pair(C_DIM))
     x += 13
-    for label, val, color in [
-        ("placed=",    placed,    C_GOOD if placed > 0 else C_DIM),
-        ("   filled=", filled,    C_GOOD if filled > 0 else C_DIM),
-        ("   cancelled=", cancelled, C_WARN if cancelled > 0 else C_DIM),
+    placed_markets = d.get("placed_today_markets", 0)
+    for label, val, extra, color in [
+        ("placed=",    placed,    f" ({placed_markets}m)", C_GOOD if placed > 0 else C_DIM),
+        ("   filled=", filled,    "",                      C_GOOD if filled > 0 else C_DIM),
+        ("   cancelled=", cancelled, "",                   C_WARN if cancelled > 0 else C_DIM),
     ]:
         _w(win, row, x, label, curses.color_pair(C_DIM))
         x += len(label)
         _w(win, row, x, str(val), curses.color_pair(color))
         x += len(str(val))
+        if extra:
+            _w(win, row, x, extra, curses.color_pair(C_DIM))
+            x += len(extra)
     row += 1
 
     return row + 1
