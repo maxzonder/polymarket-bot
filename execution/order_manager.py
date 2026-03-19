@@ -515,11 +515,16 @@ class OrderManager:
         )
 
     def _get_active_resting_prices(self, conn: sqlite3.Connection, token_id: str) -> set[float]:
-        rows = conn.execute(
+        """Return price levels that are already covered — either live resting bid or open position."""
+        resting = conn.execute(
             "SELECT price FROM resting_orders WHERE token_id=? AND status='live'",
             (token_id,),
         ).fetchall()
-        return {float(r["price"]) for r in rows}
+        filled = conn.execute(
+            "SELECT entry_price FROM positions WHERE token_id=? AND status='open'",
+            (token_id,),
+        ).fetchall()
+        return {float(r["price"]) for r in resting} | {float(r["entry_price"]) for r in filled}
 
     def _count_open_positions(self, conn: sqlite3.Connection) -> int:
         row = conn.execute("SELECT COUNT(*) FROM positions WHERE status='open'").fetchone()

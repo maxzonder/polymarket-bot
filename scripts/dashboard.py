@@ -27,6 +27,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.paths import DATA_DIR
+from config import load_config as _load_cfg
+
+try:
+    _mc = _load_cfg().mode_config
+    TIER_PRICES  = [t[0] for t in _mc.stake_tiers] if _mc.stake_tiers else []
+    TIER_STAKES  = {t[0]: t[1] for t in _mc.stake_tiers} if _mc.stake_tiers else {}
+except Exception:
+    TIER_PRICES = []
+    TIER_STAKES = {}
 
 DB_PATH = DATA_DIR / "positions.db"
 
@@ -633,6 +642,31 @@ def _fmt_ttc(end_ts: int | None) -> str:
     return f"{m}m"
 
 
+def _fmt_tier_col(tier_price: float, pos_map: dict, rest_map: dict) -> tuple[str, int]:
+    """
+    Return (text, color) for one tier column.
+    pos_map:  price → stake_usdc (filled position)
+    rest_map: price → fill_pct   (live resting bid)
+    Format: Tier1(0.001)=$0.50|100%   or   Tier2(0.005)=~40%   or   Tier3(0.010)=--
+    """
+    label = f"(0.{int(tier_price*1000):03d})"
+    if tier_price in pos_map:
+        stake = pos_map[tier_price]
+        text  = f"{label}=${stake:.2f}|100%"
+        color = C_GOOD
+    elif tier_price in rest_map:
+        pct = rest_map[tier_price]
+        if pct > 0.01:
+            text  = f"{label}=~{pct:.0%}"
+        else:
+            text  = f"{label}=resting"
+        color = C_WARN
+    else:
+        text  = f"{label}=--"
+        color = C_DIM
+    return text, color
+
+
 def draw_open_markets(win, d: dict, row: int) -> int:
     h, w = win.getmaxyx()
     markets = d.get("open_markets_detail", [])
@@ -646,48 +680,41 @@ def draw_open_markets(win, d: dict, row: int) -> int:
         pass
     row += 1
 
+    # Tier price labels: use config tiers, fallback to union of seen prices
+    tier_prices = TIER_PRICES or []
+
     for m in markets:
         if row >= h - 3:
             break
-        question  = (m.get("question") or m["market_id"])[:48]
-        invested  = float(m["total_invested"] or 0)
-        n_pos     = int(m["n_positions"] or 1)
-        ttc       = _fmt_ttc(m.get("end_ts"))
 
-        ttc_str      = f"[{ttc}]"
-        invested_str = f"${invested:.4f}"
-        pos_str      = f"×{n_pos}" if n_pos > 1 else ""
+        question = (m.get("question") or m["market_id"])
+        ttc      = _fmt_ttc(m.get("end_ts"))
+        ttc_str  = f"[{ttc}]"
 
-        right = f"{invested_str}{pos_str}  {ttc_str}"
-        q_max = max(10, w - 4 - len(right) - 2)
-        q_str = question[:q_max]
-
-        _w(win, row, 2, "  ", 0)
-        _w(win, row, 4, q_str, curses.color_pair(C_DIM))
-        _w(win, row, 4 + q_max + 1, invested_str, curses.color_pair(C_GOOD))
-        x = 4 + q_max + 1 + len(invested_str)
-        if pos_str:
-            _w(win, row, x, pos_str, curses.color_pair(C_DIM))
-            x += len(pos_str)
-        _w(win, row, x + 2, ttc_str, curses.color_pair(C_WARN))
+        # Line 1: question  [ttc]
+        q_max = max(10, w - 4 - len(ttc_str) - 3)
+        _w(win, row, 2, "  " + question[:q_max], curses.color_pair(C_DIM))
+        _w(win, row, w - len(ttc_str) - 1, ttc_str, curses.color_pair(C_WARN))
         row += 1
 
-        # Tier row: filled positions (green) + live resting bids (yellow)
+        # Line 2: tier columns
         if row < h - 2:
-            x = 6
-            pos_tiers  = sorted(m.get("pos_tiers",  []), key=lambda t: t[0])
-            rest_tiers = sorted(m.get("rest_tiers", []))
-            for price, stake in pos_tiers:
-                tag = f"+{price:.3f}=${stake:.2f} "
-                _w(win, row, x, tag, curses.color_pair(C_GOOD))
-                x += len(tag)
-            for price, pct in rest_tiers:
-                if pct > 0.01:
-                    tag = f"~{price:.3f}({pct:.0%}) "
-                else:
-                    tag = f"~{price:.3f} "
-                _w(win, row, x, tag, curses.color_pair(C_WARN))
-                x += len(tag)
+            pos_map  = {price: stake for price, stake in m.get("pos_tiers",  [])}
+            rest_map = {price: pct   for price, pct   in m.get("rest_tiers", [])}
+
+            # Derive tier list: config tiers + any seen prices not in config
+            all_prices = sorted(set(tier_prices) | set(pos_map) | set(rest_map))
+
+            x = 4
+            for i, tp in enumerate(all_prices):
+                if x >= w - 10:
+                    break
+                prefix = f"Tier{i+1}"
+                col_text, col_color = _fmt_tier_col(tp, pos_map, rest_map)
+                full = prefix + col_text
+                _w(win, row, x, prefix, curses.color_pair(C_DIM))
+                _w(win, row, x + len(prefix), col_text, curses.color_pair(col_color))
+                x += len(full) + 3   # 3-char gap between tiers
             row += 1
 
     return row + 1
