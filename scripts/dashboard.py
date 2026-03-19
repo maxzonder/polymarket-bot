@@ -19,6 +19,7 @@ import curses
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -682,19 +683,105 @@ def run(stdscr, db_path: Path, interval: int) -> None:
         # Resize: re-draw next cycle automatically
 
 
+# -- Watchdog -----------------------------------------------------------------
+
+# How long screener_log silence = bot considered dead (seconds)
+WATCHDOG_SILENCE_SECS = 15 * 60   # 15 min (screener runs every 5 min)
+WATCHDOG_CHECK_SECS   = 60        # check every 60 seconds
+
+
+def _tg_send(text: str) -> None:
+    """Fire-and-forget Telegram alert from watchdog thread."""
+    try:
+        import os
+        token   = "8660557840:AAEOHHZJpF6B5ttQrNIvh-AxKu9LsFuOj4k"
+        chat_id = os.getenv("TG_CHAT_ID", "39371757")
+        import urllib.request, json as _json
+        data = _json.dumps({"chat_id": chat_id, "text": text, "parse_mode": "HTML"}).encode()
+        req  = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=data, headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
+def _watchdog(db_path: Path, stop_event: threading.Event) -> None:
+    """
+    Background thread: checks every 60s if the bot is alive.
+    Sends a Telegram alert if:
+      - process gone (pgrep miss) AND
+      - screener_log has been silent for > WATCHDOG_SILENCE_SECS
+    Rate-limited: one alert per hour max.
+    """
+    last_alert_ts: float = 0.0
+
+    while not stop_event.is_set():
+        stop_event.wait(WATCHDOG_CHECK_SECS)
+        if stop_event.is_set():
+            break
+
+        try:
+            process_alive = check_bot_alive()
+            if process_alive:
+                continue  # all good
+
+            # Process gone — check screener_log recency
+            last_scan_ts: int | None = None
+            if db_path.exists():
+                try:
+                    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                    row = conn.execute(
+                        "SELECT MAX(scanned_at) FROM screener_log"
+                    ).fetchone()
+                    conn.close()
+                    last_scan_ts = row[0]
+                except Exception:
+                    pass
+
+            now = time.time()
+            silence = now - last_scan_ts if last_scan_ts else WATCHDOG_SILENCE_SECS + 1
+
+            if silence < WATCHDOG_SILENCE_SECS:
+                continue  # just restarting, screener data still fresh
+
+            # Rate-limit: one alert per hour
+            if now - last_alert_ts < 3600:
+                continue
+
+            last_alert_ts = now
+            ago = int(silence // 60)
+            _tg_send(
+                f"🔴 <b>Bot appears DOWN</b>\n"
+                f"Process not found + screener silent for {ago} min.\n"
+                f"Last scan: {datetime.fromtimestamp(last_scan_ts, tz=timezone.utc).strftime('%H:%M UTC') if last_scan_ts else 'never'}"
+            )
+        except Exception:
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Polymarket bot live dashboard")
     ap.add_argument("--db",       default=None, help="Path to positions.db")
     ap.add_argument("--interval", type=int, default=3, help="Refresh interval in seconds")
+    ap.add_argument("--no-watchdog", action="store_true", help="Disable Telegram watchdog")
     args = ap.parse_args()
 
     db_path  = Path(args.db) if args.db else DB_PATH
     interval = max(1, args.interval)
 
+    stop_event = threading.Event()
+    if not args.no_watchdog:
+        wd = threading.Thread(target=_watchdog, args=(db_path, stop_event), daemon=True)
+        wd.start()
+
     try:
         curses.wrapper(run, db_path, interval)
     except KeyboardInterrupt:
         pass
+    finally:
+        stop_event.set()
 
 
 if __name__ == "__main__":
