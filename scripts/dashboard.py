@@ -125,6 +125,10 @@ def load_data(db_path: Path) -> dict:
         "SELECT COUNT(*) FROM positions WHERE status='open'"
     ).fetchone()[0] if "positions" in tables else 0
 
+    d["open_markets"] = conn.execute(
+        "SELECT COUNT(DISTINCT market_id) FROM positions WHERE status='open'"
+    ).fetchone()[0] if "positions" in tables else 0
+
     d["live_resting"] = conn.execute(
         "SELECT COUNT(*) FROM resting_orders WHERE status='live'"
     ).fetchone()[0] if "resting_orders" in tables else 0
@@ -376,7 +380,7 @@ def draw_balance_positions(win, d: dict, row: int) -> int:
 
     # Row 1: free cash  |  open positions
     _w(win, row, 2,   f"  Free cash      ${d['free']:>9.4f}", free_attr)
-    _w(win, row, mid, f"  Open positions  {d['open_pos']:>4}   Deployed  ${d['deployed']:>8.4f}")
+    _w(win, row, mid, f"  Open positions  {d['open_pos']:>4}  ({d['open_markets']} markets)   Deployed  ${d['deployed']:>8.4f}")
     row += 1
 
     # Row 2: resting reserved  |  resting bids
