@@ -75,10 +75,18 @@ class RiskManager:
         if entry_price < 0.0005 and resolution_score.sample_count < 5:
             return None  # paper price artifact risk
 
-        # Compute max allowed stake given current deployment
+        # Determine base stake from price-tier schedule (if configured)
+        base_stake = self.mc.stake_usdc  # fallback
+        if self.mc.stake_tiers:
+            for tier_price, tier_stake in self.mc.stake_tiers:
+                if entry_price <= tier_price:
+                    base_stake = tier_stake
+                    break
+
+        # Hard cap: never exceed balance * max_capital_deployed_pct / max_positions
         max_total = self.balance_usdc * self.mc.max_capital_deployed_pct
         per_position_cap = max_total / max(self.mc.max_open_positions, 1)
-        stake = min(self.mc.stake_usdc, per_position_cap)
+        stake = min(base_stake, per_position_cap)
 
         # Scale stake by resolution_score for big_swan_mode
         if self.mc.optimize_metric == "tail_ev":
@@ -88,8 +96,9 @@ class RiskManager:
         stake = max(0.001, round(stake, 6))
         token_quantity = stake / entry_price
 
+        tier_info = f" base=${base_stake:.4f}" if self.mc.stake_tiers else ""
         rationale = (
-            f"mode={self.mc.name} stake=${stake:.4f} "
+            f"mode={self.mc.name} stake=${stake:.4f}{tier_info} "
             f"qty={token_quantity:.2f} tokens @ ${entry_price:.5f} "
             f"res_score={resolution_score.score:.3f} p_winner={resolution_score.p_winner:.2f} "
             f"tail_ev={resolution_score.tail_ev:.1f}"
