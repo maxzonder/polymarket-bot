@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS markets (
     question            TEXT,
     description         TEXT,
     category            TEXT,
+    slug                TEXT,
+    event_title         TEXT,
+    event_slug          TEXT,
+    event_description   TEXT,
+    tags                TEXT,
+    ticker              TEXT,
     resolution_source   TEXT,
     start_date          INTEGER,
     end_date            INTEGER,
@@ -77,13 +83,30 @@ CREATE INDEX IF NOT EXISTS idx_tokens_market ON tokens(market_id);
 """
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, sql_type: str) -> None:
+    if not _has_column(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+
+
 def init_db(conn: sqlite3.Connection):
     conn.executescript(SCHEMA)
     # Migrate existing DBs: add columns added after initial schema deployment
-    for col, col_type in [("restricted", "INTEGER"), ("volume_1wk", "REAL")]:
-        existing = {r[1] for r in conn.execute("PRAGMA table_info(markets)").fetchall()}
-        if col not in existing:
-            conn.execute(f"ALTER TABLE markets ADD COLUMN {col} {col_type}")
+    for col, col_type in [
+        ("restricted", "INTEGER"),
+        ("volume_1wk", "REAL"),
+        ("slug", "TEXT"),
+        ("event_title", "TEXT"),
+        ("event_slug", "TEXT"),
+        ("event_description", "TEXT"),
+        ("tags", "TEXT"),
+        ("ticker", "TEXT"),
+    ]:
+        _ensure_column(conn, "markets", col, col_type)
     conn.commit()
 
 
@@ -183,10 +206,8 @@ def parse_market(data: dict) -> Optional[dict]:
         return None
 
     events = data.get("events") or []
-    comment_count = None
-    if events:
-        ev = events[0] or {}
-        comment_count = ev.get("commentCount")
+    ev = events[0] or {} if events else {}
+    comment_count = ev.get("commentCount") if ev else None
 
     category = infer_category(data)
     start_ts = parse_ts(data.get("startDate"))
@@ -211,12 +232,20 @@ def parse_market(data: dict) -> Optional[dict]:
     cyom = 1 if data.get("cyom") else 0
     restricted = 1 if data.get("restricted") else 0
     volume_1wk = data.get("volume1wk") or data.get("volume1wkClob")
+    tags = ev.get("tags") or []
+    tags_json = json.dumps(tags, ensure_ascii=False) if tags else None
 
     return {
         "id": str(market_id),
         "question": data.get("question"),
         "description": data.get("description"),
         "category": category,
+        "slug": data.get("slug") or None,
+        "event_title": ev.get("title") or None,
+        "event_slug": ev.get("slug") or None,
+        "event_description": ev.get("description") or None,
+        "tags": tags_json,
+        "ticker": ev.get("ticker") or None,
         "resolution_source": data.get("resolutionSource", ""),
         "start_date": start_ts,
         "end_date": end_ts,
@@ -269,14 +298,16 @@ def parse_tokens(data: dict) -> list[dict]:
 
 MARKET_UPSERT_SQL = """
 INSERT INTO markets (
-    id, question, description, category, resolution_source,
-    start_date, end_date, closed_time, duration_hours,
+    id, question, description, category, slug,
+    event_title, event_slug, event_description, tags, ticker,
+    resolution_source, start_date, end_date, closed_time, duration_hours,
     volume, liquidity, comment_count, fees_enabled,
     neg_risk, group_item_title, cyom,
     restricted, volume_1wk
 ) VALUES (
-    :id, :question, :description, :category, :resolution_source,
-    :start_date, :end_date, :closed_time, :duration_hours,
+    :id, :question, :description, :category, :slug,
+    :event_title, :event_slug, :event_description, :tags, :ticker,
+    :resolution_source, :start_date, :end_date, :closed_time, :duration_hours,
     :volume, :liquidity, :comment_count, :fees_enabled,
     :neg_risk, :group_item_title, :cyom,
     :restricted, :volume_1wk
@@ -285,6 +316,12 @@ ON CONFLICT(id) DO UPDATE SET
     question=excluded.question,
     description=excluded.description,
     category=COALESCE(excluded.category, markets.category),
+    slug=excluded.slug,
+    event_title=excluded.event_title,
+    event_slug=excluded.event_slug,
+    event_description=excluded.event_description,
+    tags=excluded.tags,
+    ticker=excluded.ticker,
     resolution_source=excluded.resolution_source,
     start_date=excluded.start_date,
     end_date=excluded.end_date,
