@@ -752,7 +752,7 @@ class OrderManager:
                 "UPDATE tp_orders SET status='resolved' WHERE position_id=? AND status='moonbag'",
                 (pos["position_id"],),
             )
-            total_pnl = total_resolution_pnl + float(pos.get("realized_pnl") or 0)
+            total_pnl = total_resolution_pnl + float(pos["realized_pnl"] or 0)
             outcome_icon = "🏆" if is_winner else "💀"
             logger.info(
                 f"Position resolved: {pos['position_id'][:8]} token={token_id[:16]} "
