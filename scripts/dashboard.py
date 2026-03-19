@@ -212,8 +212,29 @@ def load_data(db_path: Path) -> dict:
             "SELECT COUNT(*) FROM positions WHERE opened_at >= ?",
             (today_start,),
         ).fetchone()[0]
+
+        # Open positions grouped by market, with question and estimated close time
+        open_mkts = conn.execute("""
+            SELECT
+                p.market_id,
+                SUM(p.entry_size_usdc)  AS total_invested,
+                COUNT(*)                AS n_positions,
+                (SELECT question FROM screener_log
+                 WHERE market_id = p.market_id
+                 ORDER BY scanned_at DESC LIMIT 1) AS question,
+                (SELECT CAST(scanned_at + hours_to_close * 3600 AS INTEGER)
+                 FROM screener_log
+                 WHERE market_id = p.market_id AND hours_to_close IS NOT NULL
+                 ORDER BY scanned_at DESC LIMIT 1) AS end_ts
+            FROM positions p
+            WHERE p.status = 'open'
+            GROUP BY p.market_id
+            ORDER BY total_invested DESC
+        """).fetchall()
+        d["open_markets_detail"] = [dict(r) for r in open_mkts]
     else:
         d["filled_today"] = 0
+        d["open_markets_detail"] = []
 
     # ── Order-manager scan funnel — last hour (late rejections) ──────────────
     if "scan_log" in tables:
@@ -571,6 +592,65 @@ def draw_scan_funnel(win, d: dict, row: int) -> int:
     return row + 1
 
 
+def _fmt_ttc(end_ts: int | None) -> str:
+    """Format time-to-close as 1d:2h:3m or 'expired'."""
+    if not end_ts:
+        return "?"
+    secs = int(end_ts - time.time())
+    if secs <= 0:
+        return "expired"
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m = rem // 60
+    if d > 0:
+        return f"{d}d:{h}h:{m:02d}m"
+    if h > 0:
+        return f"{h}h:{m:02d}m"
+    return f"{m}m"
+
+
+def draw_open_markets(win, d: dict, row: int) -> int:
+    h, w = win.getmaxyx()
+    markets = d.get("open_markets_detail", [])
+    if not markets:
+        return row
+
+    _w(win, row, 2, "OPEN POSITIONS BY MARKET", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    try:
+        win.hline(row, 27, "-", max(0, w - 29), curses.color_pair(C_DIM))
+    except curses.error:
+        pass
+    row += 1
+
+    for m in markets:
+        if row >= h - 2:
+            break
+        question  = (m.get("question") or m["market_id"])[:48]
+        invested  = float(m["total_invested"] or 0)
+        n_pos     = int(m["n_positions"] or 1)
+        ttc       = _fmt_ttc(m.get("end_ts"))
+
+        ttc_str      = f"[{ttc}]"
+        invested_str = f"${invested:.4f}"
+        pos_str      = f"×{n_pos}" if n_pos > 1 else ""
+
+        right = f"{invested_str}{pos_str}  {ttc_str}"
+        q_max = max(10, w - 4 - len(right) - 2)
+        q_str = question[:q_max]
+
+        _w(win, row, 2, "  ", 0)
+        _w(win, row, 4, q_str, curses.color_pair(C_DIM))
+        _w(win, row, 4 + q_max + 1, invested_str, curses.color_pair(C_GOOD))
+        x = 4 + q_max + 1 + len(invested_str)
+        if pos_str:
+            _w(win, row, x, pos_str, curses.color_pair(C_DIM))
+            x += len(pos_str)
+        _w(win, row, x + 2, ttc_str, curses.color_pair(C_WARN))
+        row += 1
+
+    return row + 1
+
+
 def draw_recent(win, d: dict, row: int) -> int:
     h, w = win.getmaxyx()
     if row >= h - 2:
@@ -681,6 +761,7 @@ def run(stdscr, db_path: Path, interval: int) -> None:
             row = draw_performance(stdscr, d, row)
             row = draw_screener_funnel(stdscr, d, row)
             row = draw_scan_funnel(stdscr, d, row)
+            row = draw_open_markets(stdscr, d, row)
             draw_recent(stdscr, d, row)
             draw_footer(stdscr, interval)
 
