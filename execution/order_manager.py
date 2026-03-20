@@ -330,6 +330,29 @@ class OrderManager:
                     conn.close()
                     return results
 
+            # ── Cluster cap ────────────────────────────────────────────────
+            if self.mc.max_resting_per_cluster > 0:
+                try:
+                    cluster_key = int(candidate.market_info.market_id) // 1000
+                except (ValueError, TypeError):
+                    cluster_key = None
+                if cluster_key is not None:
+                    all_live = conn.execute(
+                        "SELECT market_id FROM resting_orders WHERE status='live' GROUP BY market_id"
+                    ).fetchall()
+                    cluster_count = sum(
+                        1 for r in all_live
+                        if int(r["market_id"]) // 1000 == cluster_key
+                        and r["market_id"] != candidate.market_info.market_id
+                    )
+                    if cluster_count >= self.mc.max_resting_per_cluster:
+                        logger.debug(
+                            f"Cluster cap: market {candidate.market_info.market_id} "
+                            f"cluster={cluster_key} already has {cluster_count} markets"
+                        )
+                        self._log_scan(conn, candidate, price_level, "cluster_cap")
+                        continue
+
             # ── Paper balance gate (dry_run only) ─────────────────────────
             if self.config.dry_run:
                 bal = pb.get_balance(conn)

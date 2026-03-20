@@ -68,7 +68,8 @@ class ModeConfig:
     # ── Position sizing ───────────────────────────────────────────────────────
     stake_usdc: float          # default stake per trade (USDC tokens bought at entry)
     max_open_positions: int
-    max_resting_markets: int   # max distinct markets with live resting bids
+    max_resting_markets: int        # max distinct markets with live resting bids
+    max_resting_per_cluster: int    # max markets per cluster (market_id // 1000)
     max_capital_deployed_pct: float  # max % of balance in open positions
 
     # ── Time window ───────────────────────────────────────────────────────────
@@ -103,7 +104,8 @@ FAST_TP_MODE = ModeConfig(
     min_real_x_historical=5.0,
     stake_usdc=0.05,
     max_open_positions=30,
-    max_resting_markets=0,     # no resting bids in fast_tp
+    max_resting_markets=0,
+    max_resting_per_cluster=0,
     max_capital_deployed_pct=0.40,
     min_hours_to_close=1.0,
     max_hours_to_close=48.0,
@@ -127,7 +129,8 @@ BALANCED_MODE = ModeConfig(
     min_real_x_historical=5.0,
     stake_usdc=0.05,
     max_open_positions=20,
-    max_resting_markets=20,
+    max_resting_markets=1000,
+    max_resting_per_cluster=3,
     max_capital_deployed_pct=0.35,
     min_hours_to_close=1.0,
     max_hours_to_close=120.0,
@@ -151,7 +154,8 @@ BIG_SWAN_MODE = ModeConfig(
     min_real_x_historical=10.0,
     stake_usdc=0.05,            # fallback if no tier matches
     max_open_positions=100,
-    max_resting_markets=50,
+    max_resting_markets=1000,
+    max_resting_per_cluster=3,
     max_capital_deployed_pct=0.50,
     min_hours_to_close=1.0,
     max_hours_to_close=120.0,
@@ -182,7 +186,8 @@ DIP_MODE = ModeConfig(
     min_real_x_historical=2.0,  # lower bar vs big_swan (max upside 5–20x from these levels)
     stake_usdc=0.10,            # fallback if no tier matches
     max_open_positions=100,
-    max_resting_markets=20,
+    max_resting_markets=1000,
+    max_resting_per_cluster=1,
     max_capital_deployed_pct=0.50,
     min_hours_to_close=1.0,
     max_hours_to_close=120.0,
