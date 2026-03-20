@@ -152,11 +152,12 @@ class Screener:
             ))
 
         # Hard filter: hours to close
+        mc = self.config.mode_config
         if m.hours_to_close is not None:
-            if m.hours_to_close < self.config.min_hours_to_close:
+            if m.hours_to_close < mc.min_hours_to_close:
                 _log("rejected_hours_to_close_min")
                 return []
-            if m.hours_to_close > self.config.max_hours_to_close:
+            if m.hours_to_close > mc.max_hours_to_close:
                 _log("rejected_hours_to_close_max")
                 return []
 

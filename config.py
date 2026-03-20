@@ -63,6 +63,10 @@ class ModeConfig:
     max_open_positions: int
     max_capital_deployed_pct: float  # max % of balance in open positions
 
+    # ── Time window ───────────────────────────────────────────────────────────
+    min_hours_to_close: float   # reject markets closing sooner than this
+    max_hours_to_close: float   # reject markets closing later than this
+
     # ── Optimisation target ───────────────────────────────────────────────────
     # "tail_ev" | "ev_total" | "roi_pct"
     optimize_metric: str
@@ -92,6 +96,8 @@ FAST_TP_MODE = ModeConfig(
     stake_usdc=0.05,
     max_open_positions=30,
     max_capital_deployed_pct=0.40,
+    min_hours_to_close=1.0,
+    max_hours_to_close=48.0,
     optimize_metric="ev_total",
 )
 
@@ -113,6 +119,8 @@ BALANCED_MODE = ModeConfig(
     stake_usdc=0.05,
     max_open_positions=20,
     max_capital_deployed_pct=0.35,
+    min_hours_to_close=1.0,
+    max_hours_to_close=120.0,
     optimize_metric="ev_total",
 )
 
@@ -134,6 +142,8 @@ BIG_SWAN_MODE = ModeConfig(
     stake_usdc=0.05,            # fallback if no tier matches
     max_open_positions=100,
     max_capital_deployed_pct=0.50,
+    min_hours_to_close=1.0,
+    max_hours_to_close=120.0,
     optimize_metric="tail_ev",
     # Price-tier stakes: deeper floor = bigger bet (higher upside)
     # 0.001 → $0.50 (1000x potential), 0.005 → $0.25, 0.010 → $0.10
@@ -144,10 +154,41 @@ BIG_SWAN_MODE = ModeConfig(
     ),
 )
 
+DIP_MODE = ModeConfig(
+    name="dip_mode",
+    # moderate dip — resting bids at 5c/10c/15c/20c zones
+    entry_price_levels=(0.05, 0.10, 0.15, 0.20),
+    entry_price_max=0.50,       # screen markets with price up to 50c
+    use_resting_bids=True,
+    scanner_entry=False,        # pre-position only
+    tp_levels=(
+        TPLevel(x=2.0, fraction=0.30),   # quick capital recoup
+        TPLevel(x=5.0, fraction=0.30),   # partial profit
+    ),
+    moonbag_fraction=0.40,      # 40% held to resolution
+    min_entry_fill_score=0.05,
+    min_resolution_score=0.10,
+    min_real_x_historical=2.0,  # lower bar vs big_swan (max upside 5–20x from these levels)
+    stake_usdc=0.10,            # fallback if no tier matches
+    max_open_positions=100,
+    max_capital_deployed_pct=0.50,
+    min_hours_to_close=1.0,
+    max_hours_to_close=120.0,
+    optimize_metric="ev_total",
+    # deeper floor = larger bet
+    stake_tiers=(
+        (0.05,  0.40),
+        (0.10,  0.30),
+        (0.15,  0.20),
+        (0.20,  0.10),
+    ),
+)
+
 MODES: dict[str, ModeConfig] = {
     "fast_tp_mode": FAST_TP_MODE,
     "balanced_mode": BALANCED_MODE,
     "big_swan_mode": BIG_SWAN_MODE,
+    "dip_mode": DIP_MODE,
 }
 
 
@@ -176,8 +217,6 @@ class BotConfig:
     # ── Screener hard limits ──────────────────────────────────────────────────
     min_volume_usdc: float = 50.0
     max_volume_usdc: float = 50_000.0  # prefer illiquid markets
-    min_hours_to_close: float = 1.0    # at least 1 hour remaining
-    max_hours_to_close: float = 120.0  # 5 days — dry-run window (was 720)
 
     # ── Scorer DB window ─────────────────────────────────────────────────────
     # Only use swans_v2 rows with entry_min_price in this range for scoring
