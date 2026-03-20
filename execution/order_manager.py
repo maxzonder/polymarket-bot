@@ -514,7 +514,7 @@ class OrderManager:
         )
         logger.warning(
             f"Balance exhausted: free=${bal['free_balance']:.4f} "
-            f"cash=${bal['cash_balance']:.4f} reserved=${bal['reserved']:.4f}"
+            f"cash=${bal['cash_balance']:.4f} reserved=${bal['reserved_resting']:.4f}"
         )
 
     def _get_active_resting_prices(self, conn: sqlite3.Connection, token_id: str) -> set[float]:
