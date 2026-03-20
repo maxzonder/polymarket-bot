@@ -91,6 +91,12 @@ class EntryFillScorer:
                 JOIN tokens t ON t.token_id = s.token_id
                 JOIN markets m ON m.id = t.market_id
                 WHERE s.entry_min_price <= ?
+                  AND (
+                    m.closed_time IS NULL
+                    OR s.entry_ts_first IS NULL
+                    OR m.duration_hours IS NULL
+                    OR s.entry_ts_first < m.closed_time - m.duration_hours * 3600 * 0.02
+                  )
                 GROUP BY m.category
             """, (self.entry_price_max,)).fetchall()
         except Exception:
@@ -105,6 +111,12 @@ class EntryFillScorer:
                 FROM swans_v2 s
                 JOIN markets m ON s.market_id = m.id
                 WHERE s.entry_min_price <= ?
+                  AND (
+                    m.closed_time IS NULL
+                    OR s.entry_ts_first IS NULL
+                    OR m.duration_hours IS NULL
+                    OR s.entry_ts_first < m.closed_time - m.duration_hours * 3600 * 0.02
+                  )
                 GROUP BY m.category
             """, (self.entry_price_max,)).fetchall()
 
