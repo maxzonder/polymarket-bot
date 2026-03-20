@@ -59,8 +59,10 @@ class BotRunner:
         )
 
         # ── Components ────────────────────────────────────────────────────────
+        mc = self.config.mode_config
+        ef_price_max = max(mc.entry_price_levels) if mc.entry_price_levels else self.config.scorer_entry_price_max
         self.ef_scorer = EntryFillScorer(
-            entry_price_max=self.config.scorer_entry_price_max,
+            entry_price_max=ef_price_max,
             min_samples=self.config.scorer_min_samples,
         )
         self.res_scorer = ResolutionScorer(
