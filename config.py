@@ -189,10 +189,10 @@ DIP_MODE = ModeConfig(
     optimize_metric="ev_total",
     # deeper floor = larger bet
     stake_tiers=(
-        (0.05,  0.40),
-        (0.10,  0.30),
-        (0.15,  0.20),
-        (0.20,  0.10),
+        (0.05,  0.20),
+        (0.10,  0.10),
+        (0.15,  0.05),
+        (0.20,  0.05),
     ),
 )
 
