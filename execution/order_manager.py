@@ -316,6 +316,20 @@ class OrderManager:
                 self._log_scan(conn, candidate, price_level, "max_positions")
                 break
 
+            # ── Resting markets cap ────────────────────────────────────────
+            if self.mc.max_resting_markets > 0:
+                n_resting_markets = conn.execute(
+                    "SELECT COUNT(DISTINCT market_id) FROM resting_orders WHERE status='live'"
+                ).fetchone()[0]
+                if n_resting_markets >= self.mc.max_resting_markets:
+                    logger.info(
+                        f"Max resting markets reached ({n_resting_markets}/{self.mc.max_resting_markets}), skipping"
+                    )
+                    self._log_scan(conn, candidate, price_level, "max_resting_markets")
+                    conn.commit()
+                    conn.close()
+                    return results
+
             # ── Paper balance gate (dry_run only) ─────────────────────────
             if self.config.dry_run:
                 bal = pb.get_balance(conn)
