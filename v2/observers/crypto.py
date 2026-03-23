@@ -8,7 +8,15 @@ Every 30 minutes:
   4. Compute Black-Scholes-style model price using realised vol (30-day)
   5. Compute gap = model_price - polymarket_price
   6. Persist snapshot to obs_crypto.db
-  7. Track resolved outcomes to validate model directional accuracy
+  7. Reconcile resolved markets → cr_resolved + was_directionally_correct
+
+Parser note: question parsing uses a regex baseline intentionally for Phase 1.
+Regex gives high precision (no false positives in observation data) at the cost
+of recall (some valid markets won't be parsed). An LLM-based parser for broader
+recall is planned for Phase 2.
+
+Garbage time: computed from real market start_ts (startDate from Gamma),
+NOT from first_seen_ts. Falls back to first_seen_ts only if startDate absent.
 
 No trading. Pure observation.
 """
@@ -34,9 +42,10 @@ GAMMA_BASE      = "https://gamma-api.polymarket.com"
 COINGECKO_BASE  = "https://api.coingecko.com/api/v3"
 CLOB_BASE       = "https://clob.polymarket.com"
 
-POLL_INTERVAL_SEC = 1800   # 30 minutes
-PAGE_SIZE         = 500
-GARBAGE_TIME_PCT  = 0.02   # ignore last 2% of market duration
+POLL_INTERVAL_SEC    = 1800   # 30 minutes
+PAGE_SIZE            = 500
+GARBAGE_TIME_PCT     = 0.02   # ignore last 2% of market duration
+RESOLUTION_GRACE_SEC = 3600   # wait 1h after expiry before checking resolved
 
 # CoinGecko asset IDs
 ASSET_IDS = {
@@ -45,10 +54,9 @@ ASSET_IDS = {
     "SOL": "solana",
 }
 
-# Regex patterns to parse crypto threshold questions
-# "Will BTC hit $100,000 by Dec 31?"  /  "Will ETH be above $3,000 on..."
+# Regex baseline parser — Phase 1. High precision, lower recall by design.
 _PATTERNS = [
-    # "Will X be above/below $Y by/on ..."  or  "Will ETH drop below $1,500 ..."
+    # "Will X be above/below $Y ..."  or  "Will ETH drop below $1,500 ..."
     re.compile(
         r"will\s+(btc|eth|sol|bitcoin|ethereum|solana)\s+(?:be\s+)?"
         r"(above|below|reach|hit|exceed|"
@@ -97,7 +105,7 @@ def _parse_question(question: str) -> Optional[ParsedQuestion]:
             asset_raw, direction_raw, price_raw = groups
         else:
             asset_raw, price_raw = groups[0], groups[1]
-            direction_raw = "above"   # default for "reach/hit"
+            direction_raw = "above"
 
         asset = _ASSET_ALIASES.get(asset_raw.lower())
         if not asset:
@@ -109,9 +117,7 @@ def _parse_question(question: str) -> Optional[ParsedQuestion]:
             continue
 
         dir_lower = direction_raw.lower().strip()
-        if any(w in dir_lower for w in _ABOVE_WORDS):
-            direction = "above"
-        elif any(w in dir_lower for w in _BELOW_WORDS):
+        if any(w in dir_lower for w in _BELOW_WORDS):
             direction = "below"
         else:
             direction = "above"
@@ -128,8 +134,22 @@ def _parse_question(question: str) -> Optional[ParsedQuestion]:
     return None
 
 
+def _parse_date_field(raw: Optional[str]) -> Optional[int]:
+    """Parse ISO date string to unix timestamp."""
+    if not raw:
+        return None
+    try:
+        ed = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ed)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+
 def _fetch_crypto_markets() -> list[dict]:
-    """Fetch active crypto markets from Gamma API (BTC/ETH/SOL threshold questions)."""
+    """Fetch active crypto markets from Gamma API."""
     markets = []
     offset = 0
     while True:
@@ -172,20 +192,14 @@ def _get_spot_prices() -> dict[str, Optional[float]]:
         )
         resp.raise_for_status()
         data = resp.json()
-        result = {}
-        for asset, cg_id in ASSET_IDS.items():
-            result[asset] = data.get(cg_id, {}).get("usd")
-        return result
+        return {asset: data.get(cg_id, {}).get("usd") for asset, cg_id in ASSET_IDS.items()}
     except Exception as e:
         logger.warning(f"CoinGecko spot fetch failed: {e}")
         return {asset: None for asset in ASSET_IDS}
 
 
 def _get_realised_vol(asset: str) -> Optional[float]:
-    """
-    Fetch 30-day daily closes from CoinGecko and compute annualised realised vol.
-    Returns annualised vol as a decimal (e.g. 0.65 = 65%).
-    """
+    """30-day annualised realised vol from CoinGecko daily closes."""
     cg_id = ASSET_IDS.get(asset)
     if not cg_id:
         return None
@@ -203,8 +217,7 @@ def _get_realised_vol(asset: str) -> Optional[float]:
         n = len(log_returns)
         mean = sum(log_returns) / n
         variance = sum((r - mean) ** 2 for r in log_returns) / (n - 1)
-        daily_vol = math.sqrt(variance)
-        return daily_vol * math.sqrt(365)
+        return math.sqrt(variance) * math.sqrt(365)
     except Exception as e:
         logger.warning(f"CoinGecko vol fetch failed for {asset}: {e}")
         return None
@@ -221,20 +234,15 @@ def _bs_binary_price(
     Black-Scholes price for a binary (digital) option.
     direction='above' → P(S_T > K) = N(d2)
     direction='below' → P(S_T < K) = N(-d2)
-    Assumes zero drift (risk-neutral martingale approximation).
+    Zero-drift (risk-neutral) approximation.
     """
     if tte_years <= 0 or vol <= 0 or spot <= 0 or strike <= 0:
         return None
     try:
-        d2 = (math.log(spot / strike)) / (vol * math.sqrt(tte_years))
-        # N(d2) via error function
+        d2 = math.log(spot / strike) / (vol * math.sqrt(tte_years))
         def norm_cdf(x: float) -> float:
             return 0.5 * (1 + math.erf(x / math.sqrt(2)))
-
-        if direction == "above":
-            return norm_cdf(d2)
-        else:
-            return norm_cdf(-d2)
+        return norm_cdf(d2) if direction == "above" else norm_cdf(-d2)
     except Exception:
         return None
 
@@ -242,11 +250,7 @@ def _bs_binary_price(
 def _get_token_price(token_id: str) -> Optional[float]:
     """Get best_ask from CLOB for YES token."""
     try:
-        resp = requests.get(
-            f"{CLOB_BASE}/book",
-            params={"token_id": token_id},
-            timeout=10,
-        )
+        resp = requests.get(f"{CLOB_BASE}/book", params={"token_id": token_id}, timeout=10)
         resp.raise_for_status()
         book = resp.json()
         asks = book.get("asks") or []
@@ -257,33 +261,21 @@ def _get_token_price(token_id: str) -> Optional[float]:
     return None
 
 
-def _parse_end_date(m: dict) -> Optional[int]:
-    """Parse endDate or endDateIso to unix ts."""
-    raw = m.get("endDate") or m.get("endDateIso")
-    if not raw:
-        return None
-    try:
-        ed = raw.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(ed)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp())
-    except Exception:
-        return None
-
-
 def _upsert_market(conn, m: dict, parsed: Optional[ParsedQuestion], token_id: str) -> None:
-    """Insert or update market record."""
+    """Insert or update market record, storing real start_ts from Gamma."""
     now = int(time.time())
-    end_ts = _parse_end_date(m)
+    end_ts   = _parse_date_field(m.get("endDate") or m.get("endDateIso"))
+    start_ts = _parse_date_field(m.get("startDate") or m.get("startDateIso"))
+
     conn.execute(
         """INSERT INTO cr_markets
            (market_id, token_id, question, asset, threshold, direction,
-            expiry_ts, parse_template, parse_ok, first_seen_ts)
-           VALUES (?,?,?,?,?,?,?,?,?,?)
+            expiry_ts, start_ts, parse_template, parse_ok, first_seen_ts)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(market_id) DO UPDATE SET
                token_id=excluded.token_id,
                expiry_ts=COALESCE(excluded.expiry_ts, expiry_ts),
+               start_ts=COALESCE(excluded.start_ts, start_ts),
                parse_ok=excluded.parse_ok
         """,
         (
@@ -294,11 +286,37 @@ def _upsert_market(conn, m: dict, parsed: Optional[ParsedQuestion], token_id: st
             parsed.threshold if parsed else None,
             parsed.direction if parsed else None,
             end_ts,
+            start_ts,
             parsed.template if parsed else "other",
             1 if parsed else 0,
             now,
         ),
     )
+
+
+def _is_garbage_time(conn, market_id: str, end_ts: int, now_ts: float) -> bool:
+    """
+    Return True if we are in the last GARBAGE_TIME_PCT of market lifetime.
+
+    Uses real market start_ts (startDate from Gamma) for total duration.
+    Falls back to first_seen_ts only when startDate was absent.
+    """
+    row = conn.execute(
+        "SELECT start_ts, first_seen_ts FROM cr_markets WHERE market_id=?",
+        (market_id,),
+    ).fetchone()
+    if not row:
+        return False
+
+    market_start = row["start_ts"] or row["first_seen_ts"]
+    if not market_start:
+        return False
+
+    total_sec     = end_ts - market_start
+    remaining_sec = end_ts - now_ts
+    if total_sec <= 0:
+        return False
+    return (remaining_sec / total_sec) < GARBAGE_TIME_PCT
 
 
 def _save_snapshot(
@@ -334,13 +352,134 @@ def _save_snapshot(
     )
 
 
+def _reconcile_resolved(conn) -> int:
+    """
+    Check expired markets in cr_markets and reconcile resolved outcomes.
+
+    For each market past its expiry (+ grace period) with no resolved_ts:
+      1. Hit Gamma API to confirm resolved and read outcome
+      2. Find last snapshot before expiry
+      3. Insert into cr_resolved with was_directionally_correct
+      4. Update cr_markets.resolved_ts and outcome
+
+    Returns number of markets reconciled.
+    """
+    now = int(time.time())
+    cutoff = now - RESOLUTION_GRACE_SEC
+
+    candidates = conn.execute(
+        """SELECT market_id, token_id, asset, threshold, direction, expiry_ts
+           FROM cr_markets
+           WHERE expiry_ts IS NOT NULL
+             AND expiry_ts < ?
+             AND resolved_ts IS NULL
+             AND parse_ok = 1""",
+        (cutoff,),
+    ).fetchall()
+
+    n_reconciled = 0
+    for row in candidates:
+        market_id = row["market_id"]
+        try:
+            resp = requests.get(
+                f"{GAMMA_BASE}/markets/{market_id}",
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                data = data[0] if data else {}
+        except Exception as e:
+            logger.debug(f"Gamma fetch for resolved {market_id}: {e}")
+            continue
+
+        # Must be closed/resolved
+        if not (data.get("closed") or data.get("resolved")):
+            continue
+
+        # Determine YES/NO outcome from outcomePrices
+        outcome_prices_raw = data.get("outcomePrices", "[]")
+        if isinstance(outcome_prices_raw, str):
+            try:
+                outcome_prices_raw = json.loads(outcome_prices_raw)
+            except Exception:
+                outcome_prices_raw = []
+
+        if len(outcome_prices_raw) < 2:
+            continue
+
+        try:
+            yes_price = float(outcome_prices_raw[0])
+        except (ValueError, TypeError):
+            continue
+
+        # YES wins if its final price is 1 (or >= 0.99 accounting for rounding)
+        outcome = 1 if yes_price >= 0.99 else 0
+
+        # Find last snapshot before expiry
+        last_snap = conn.execute(
+            """SELECT polymarket_price, model_price, gap
+               FROM cr_snapshots
+               WHERE market_id=? AND ts <= ?
+               ORDER BY ts DESC LIMIT 1""",
+            (market_id, row["expiry_ts"]),
+        ).fetchone()
+
+        if not last_snap:
+            continue
+
+        gap = last_snap["gap"]
+        poly_price = last_snap["polymarket_price"]
+        model_price = last_snap["model_price"]
+
+        # Directionally correct: gap > 0 means model said price higher than poly,
+        # i.e. model predicted YES more likely → correct if YES won (outcome=1)
+        was_correct = None
+        if gap is not None:
+            if gap > 0:
+                was_correct = 1 if outcome == 1 else 0
+            elif gap < 0:
+                was_correct = 1 if outcome == 0 else 0
+            else:
+                was_correct = None  # gap=0, indeterminate
+
+        resolved_ts = _parse_date_field(
+            data.get("resolvedAt") or data.get("resolutionTime")
+        ) or now
+
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO cr_resolved
+                   (market_id, resolved_ts, outcome, last_gap,
+                    last_polymarket_price, last_model_price, was_directionally_correct)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (market_id, resolved_ts, outcome, gap,
+                 poly_price, model_price, was_correct),
+            )
+            conn.execute(
+                "UPDATE cr_markets SET resolved_ts=?, outcome=? WHERE market_id=?",
+                (resolved_ts, outcome, market_id),
+            )
+            n_reconciled += 1
+            logger.info(
+                f"RESOLVED {market_id} outcome={'YES' if outcome else 'NO'} "
+                f"gap={gap:+.3f} correct={was_correct}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to write resolution for {market_id}: {e}")
+
+        time.sleep(0.1)
+
+    return n_reconciled
+
+
 def run_once() -> dict:
     """Run one observation cycle. Returns summary dict."""
     init_crypto()
     markets = _fetch_crypto_markets()
     if not markets:
         logger.warning("No crypto markets fetched")
-        return {"markets": 0, "snapshots": 0, "parsed": 0}
+        return {"markets": 0, "snapshots": 0, "parsed": 0, "reconciled": 0}
 
     spot_prices = _get_spot_prices()
     vols: dict[str, Optional[float]] = {}
@@ -358,7 +497,7 @@ def run_once() -> dict:
         question = m.get("question", "")
         parsed = _parse_question(question)
 
-        # Pick YES token (index 0)
+        # YES token = index 0
         token_ids_raw = m.get("clobTokenIds", "[]")
         if isinstance(token_ids_raw, str):
             try:
@@ -375,38 +514,24 @@ def run_once() -> dict:
             continue
         n_parsed += 1
 
-        # Expiry / TTE
-        end_ts = _parse_end_date(m)
+        end_ts = _parse_date_field(m.get("endDate") or m.get("endDateIso"))
         if end_ts is None:
             continue
         tte_hours = (end_ts - now_ts) / 3600.0
         if tte_hours <= 0:
             continue
 
-        # Garbage time check — skip last 2% of market duration
-        # We need to know total duration. Approximate from first_seen_ts vs end_ts.
-        row = conn.execute(
-            "SELECT first_seen_ts FROM cr_markets WHERE market_id=?", (market_id,)
-        ).fetchone()
-        garbage_time = False
-        if row and row["first_seen_ts"]:
-            total_sec = end_ts - row["first_seen_ts"]
-            remaining_sec = end_ts - now_ts
-            if total_sec > 0 and remaining_sec / total_sec < GARBAGE_TIME_PCT:
-                garbage_time = True
+        garbage_time = _is_garbage_time(conn, market_id, end_ts, now_ts)
 
-        # Spot + vol (cached per asset per cycle)
         spot = spot_prices.get(parsed.asset)
         if parsed.asset not in vols:
             vols[parsed.asset] = _get_realised_vol(parsed.asset)
-            time.sleep(0.5)  # gentle rate limit
+            time.sleep(0.5)
         vol = vols[parsed.asset]
 
-        # Polymarket price
         poly_price = _get_token_price(token_id)
         time.sleep(0.05)
 
-        # Model price
         model_price = None
         if spot and vol and tte_hours > 0:
             model_price = _bs_binary_price(
@@ -417,10 +542,7 @@ def run_once() -> dict:
                 direction=parsed.direction,
             )
 
-        _save_snapshot(
-            conn, market_id, poly_price, model_price,
-            tte_hours, spot, vol, garbage_time,
-        )
+        _save_snapshot(conn, market_id, poly_price, model_price, tte_hours, spot, vol, garbage_time)
         n_snapshots += 1
 
         if model_price is not None and poly_price is not None:
@@ -432,6 +554,9 @@ def run_once() -> dict:
                     f"tte={tte_hours:.1f}h"
                 )
 
+    # Resolution reconciliation
+    n_reconciled = _reconcile_resolved(conn)
+
     conn.commit()
     conn.close()
 
@@ -439,10 +564,12 @@ def run_once() -> dict:
         "markets": len(markets),
         "parsed": n_parsed,
         "snapshots": n_snapshots,
+        "reconciled": n_reconciled,
         "ts": int(time.time()),
     }
     logger.info(
-        f"Cycle done: {len(markets)} markets, {n_parsed} parsed, {n_snapshots} snapshots"
+        f"Cycle done: {len(markets)} markets, {n_parsed} parsed, "
+        f"{n_snapshots} snapshots, {n_reconciled} resolved"
     )
     return summary
 

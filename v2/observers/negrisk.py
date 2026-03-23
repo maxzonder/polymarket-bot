@@ -4,10 +4,14 @@ Neg-Risk Group Observer — Phase 1A.
 Every 5 minutes:
   1. Fetch all open neg_risk=true markets from Gamma API
   2. Cluster into groups by event_slug
-  3. For each group: fetch per-leg orderbook from CLOB
-  4. Compute sum_best_ask (executable cost to buy all outcomes)
+  3. For each group: fetch YES-token orderbook per leg from CLOB
+  4. Compute sum_best_ask (executable cost to buy all YES outcomes)
   5. Persist snapshot + per-leg detail to obs_negrisk.db
   6. Track dislocation episodes (sum_best_ask < DISLOCATION_THRESHOLD)
+
+Leg selection: always the YES token for each market (clobTokenIds index matching
+"Yes" in outcomes[], fallback to index 0). This makes sum_best_ask a coherent,
+resolution-consistent basket — not "cheapest token from each market".
 
 No trading. Pure observation.
 """
@@ -84,7 +88,6 @@ def _cluster_by_event(markets: list[dict]) -> dict[str, list[dict]]:
     """Group markets by event_slug. Falls back to event_title if slug missing."""
     groups: dict[str, list[dict]] = defaultdict(list)
     for m in markets:
-        # prefer event_slug, fall back to event_title, then market_id itself
         events = m.get("events") or []
         slug = None
         title = None
@@ -113,51 +116,70 @@ def _fetch_orderbook(token_id: str) -> tuple[Optional[float], Optional[float], O
         return None, None, None, None
 
 
+def _get_yes_token_id(m: dict) -> Optional[str]:
+    """
+    Return the YES-token ID for a market.
+
+    clobTokenIds[] and outcomes[] are parallel arrays from Gamma.
+    Find the index where outcome name is "Yes" (case-insensitive);
+    fall back to index 0 if no explicit "Yes" label found.
+    """
+    token_ids_raw = m.get("clobTokenIds", "[]")
+    if isinstance(token_ids_raw, str):
+        try:
+            token_ids_raw = json.loads(token_ids_raw)
+        except Exception:
+            token_ids_raw = []
+
+    if not token_ids_raw:
+        return None
+
+    outcomes_raw = m.get("outcomes", "[]")
+    if isinstance(outcomes_raw, str):
+        try:
+            outcomes_raw = json.loads(outcomes_raw)
+        except Exception:
+            outcomes_raw = []
+
+    for i, outcome in enumerate(outcomes_raw):
+        if str(outcome).lower() in ("yes", "true", "1") and i < len(token_ids_raw):
+            return str(token_ids_raw[i])
+
+    # Fallback: Polymarket convention is YES at index 0
+    return str(token_ids_raw[0])
+
+
 def _get_legs(markets_in_group: list[dict]) -> list[LegBook]:
-    """For each market, get the cheaper token's orderbook (the one to BUY for arb)."""
+    """
+    For each market, fetch the YES-token orderbook.
+
+    YES token represents the specific outcome this market covers in the group.
+    In a neg-risk group exactly one YES resolves to $1, all others to $0,
+    so sum(YES best_asks) is the coherent executable cost of the full basket.
+    Picking cheapest token would mix YES/NO arbitrarily and break this invariant.
+    """
     legs = []
     for m in markets_in_group:
         market_id = str(m.get("id", ""))
         volume = float(m.get("volumeNum") or m.get("volume") or 0)
 
-        token_ids_raw = m.get("clobTokenIds", "[]")
-        if isinstance(token_ids_raw, str):
-            try:
-                token_ids_raw = json.loads(token_ids_raw)
-            except Exception:
-                token_ids_raw = []
-
-        outcome_prices_raw = m.get("outcomePrices", "[]")
-        if isinstance(outcome_prices_raw, str):
-            try:
-                outcome_prices_raw = json.loads(outcome_prices_raw)
-            except Exception:
-                outcome_prices_raw = []
-
-        if not token_ids_raw:
+        token_id = _get_yes_token_id(m)
+        if not token_id:
             continue
 
-        # Pick the token with lower best_ask (cheaper to buy = the one we want in arb)
-        best_token = None
-        best_ask_found = None
-        for tid in token_ids_raw:
-            bid, ask, bid_sz, ask_sz = _fetch_orderbook(str(tid))
-            if ask is not None:
-                if best_ask_found is None or ask < best_ask_found:
-                    best_ask_found = ask
-                    best_token = LegBook(
-                        market_id=market_id,
-                        token_id=str(tid),
-                        best_bid=bid,
-                        best_ask=ask,
-                        best_bid_size=bid_sz,
-                        best_ask_size=ask_sz,
-                        market_volume=volume,
-                    )
-            time.sleep(0.05)  # gentle rate limit
+        bid, ask, bid_sz, ask_sz = _fetch_orderbook(token_id)
+        time.sleep(0.05)  # gentle rate limit
 
-        if best_token:
-            legs.append(best_token)
+        if ask is not None:
+            legs.append(LegBook(
+                market_id=market_id,
+                token_id=token_id,
+                best_bid=bid,
+                best_ask=ask,
+                best_bid_size=bid_sz,
+                best_ask_size=ask_sz,
+                market_volume=volume,
+            ))
 
     return legs
 
@@ -211,7 +233,15 @@ def _save_snapshot(conn, group_id: int, legs: list[LegBook]) -> int:
 
 
 def _update_dislocations(conn, group_id: int, sum_ask: Optional[float], ts: int) -> None:
-    """Open/close dislocation episode records."""
+    """Open/close dislocation episode records.
+
+    Episode lifecycle:
+      - end_ts=NULL  → episode is open and ongoing
+      - end_ts set   → episode closed (dislocation ended)
+
+    During continuation we update aggregate stats only; end_ts stays NULL.
+    end_ts is only written when the group exits the dislocation zone.
+    """
     if sum_ask is None:
         return
 
@@ -223,14 +253,16 @@ def _update_dislocations(conn, group_id: int, sum_ask: Optional[float], ts: int)
     if sum_ask < DISLOCATION_THRESHOLD:
         gap = 1.0 - sum_ask
         if open_ep:
+            # Episode continues — update stats, keep end_ts=NULL
             conn.execute(
                 """UPDATE nr_dislocations
-                   SET end_ts=?, min_sum_ask=MIN(min_sum_ask,?), max_gap=MAX(max_gap,?),
+                   SET min_sum_ask=MIN(min_sum_ask,?), max_gap=MAX(max_gap,?),
                        n_snapshots=n_snapshots+1
                    WHERE id=?""",
-                (ts, sum_ask, gap, open_ep["id"]),
+                (sum_ask, gap, open_ep["id"]),
             )
         else:
+            # New episode starts
             group_vol = conn.execute(
                 "SELECT total_group_vol FROM nr_snapshots WHERE group_id=? ORDER BY ts DESC LIMIT 1",
                 (group_id,),
@@ -244,6 +276,7 @@ def _update_dislocations(conn, group_id: int, sum_ask: Optional[float], ts: int)
             )
     else:
         if open_ep:
+            # Dislocation ended — close the episode
             conn.execute(
                 "UPDATE nr_dislocations SET end_ts=? WHERE id=?",
                 (ts, open_ep["id"]),
@@ -259,7 +292,6 @@ def run_once() -> dict:
         return {"groups": 0, "dislocations": 0}
 
     groups = _cluster_by_event(markets)
-    # filter by event_title from events list
     event_titles: dict[str, Optional[str]] = {}
     for slug, ms in groups.items():
         events = ms[0].get("events") or []

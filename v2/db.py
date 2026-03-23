@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS cr_markets (
     threshold       REAL,
     direction       TEXT,             -- above / below
     expiry_ts       INTEGER,
+    start_ts        INTEGER,          -- real market open time from Gamma startDate
     parse_template  TEXT,             -- rise_to / dip_to / up_or_down / other
     parse_ok        INTEGER DEFAULT 0,
     first_seen_ts   INTEGER,
@@ -123,6 +124,10 @@ def init_crypto() -> sqlite3.Connection:
     conn = sqlite3.connect(str(CRYPTO_DB))
     conn.row_factory = sqlite3.Row
     conn.executescript(_CRYPTO_DDL)
+    # Migration: add start_ts if column doesn't exist yet (existing DBs)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(cr_markets)")}
+    if "start_ts" not in cols:
+        conn.execute("ALTER TABLE cr_markets ADD COLUMN start_ts INTEGER")
     conn.commit()
     return conn
 
