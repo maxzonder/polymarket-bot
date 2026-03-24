@@ -166,7 +166,7 @@ def _get_legs(markets_in_group: list[dict]) -> list[LegBook]:
 
         # last_trade_price already in Gamma response — no extra call
         try:
-            ltp = float(m["lastTradePrice"]) if m.get("lastTradePrice") else None
+            ltp = float(m["lastTradePrice"]) if m.get("lastTradePrice") is not None else None
         except (ValueError, TypeError):
             ltp = None
 
