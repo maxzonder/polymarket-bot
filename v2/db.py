@@ -3,11 +3,12 @@ Initialize observation databases for v2.
 
 obs_negrisk.db  — neg-risk group snapshots
 obs_crypto.db   — crypto threshold gap snapshots
+obs_sports.db   — sports external-anchor + internal-inconsistency snapshots
 """
 from __future__ import annotations
 
 import sqlite3
-from .utils.paths import NEGRISK_DB, CRYPTO_DB, ensure_dirs
+from .utils.paths import NEGRISK_DB, CRYPTO_DB, SPORTS_DB, ensure_dirs
 
 
 # ── Neg-Risk schema ────────────────────────────────────────────────────────────
@@ -145,6 +146,105 @@ def init_crypto() -> sqlite3.Connection:
         conn.execute("ALTER TABLE cr_markets ADD COLUMN start_ts INTEGER")
     conn.commit()
     return conn
+
+
+# ── Sports schema ──────────────────────────────────────────────────────────────
+
+_SPORTS_DDL = """
+PRAGMA journal_mode=WAL;
+
+-- Raw evidence for every match attempt (audit trail)
+CREATE TABLE IF NOT EXISTS sp_match_attempts (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                    REAL NOT NULL,
+    event_title           TEXT NOT NULL,
+    parsed_sport          TEXT,
+    parsed_home           TEXT,
+    parsed_away           TEXT,
+    normalized_home       TEXT,
+    normalized_away       TEXT,
+    candidate_external_id TEXT,
+    candidate_home        TEXT,
+    candidate_away        TEXT,
+    candidate_commence_ts REAL,
+    date_window_score     REAL,
+    name_match_score      REAL,
+    final_score           REAL,
+    accepted              INTEGER DEFAULT 0
+);
+
+-- Accepted canonical events (score >= threshold)
+CREATE TABLE IF NOT EXISTS sp_events (
+    event_id       TEXT PRIMARY KEY,
+    event_title    TEXT NOT NULL,
+    sport          TEXT,
+    team_home      TEXT,
+    team_away      TEXT,
+    game_ts        REAL,
+    external_id    TEXT,
+    match_score    REAL,
+    created_ts     REAL NOT NULL
+);
+
+-- Per-market per-cycle snapshot
+CREATE TABLE IF NOT EXISTS sp_snapshots (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id            TEXT NOT NULL,
+    event_id             TEXT,
+    ts                   REAL NOT NULL,
+    market_type          TEXT,
+    poly_price           REAL,
+    external_implied     REAL,
+    mode_a_gap           REAL,
+    external_fetch_ts    REAL,
+    external_quote_age_s REAL,
+    tte_hours            REAL
+);
+
+-- Per-event per-cycle basket aggregate (Mode A and B kept separate)
+CREATE TABLE IF NOT EXISTS sp_baskets (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id                 TEXT NOT NULL,
+    ts                       REAL NOT NULL,
+    n_markets                INTEGER,
+    n_with_external          INTEGER DEFAULT 0,
+    n_aligned_mode_a         INTEGER DEFAULT 0,
+    avg_gap_mode_a           REAL,
+    n_semantic_pairs_checked INTEGER DEFAULT 0,
+    n_contradicting_pairs    INTEGER DEFAULT 0,
+    mode_b_score             REAL
+);
+
+-- Post-resolution accuracy tracking
+CREATE TABLE IF NOT EXISTS sp_resolved (
+    market_id            TEXT PRIMARY KEY,
+    resolved_ts          REAL,
+    outcome              INTEGER,
+    last_mode_a_gap      REAL,
+    last_poly_price      REAL,
+    last_external_implied REAL,
+    mode_a_was_correct   INTEGER,
+    last_mode_b_score    REAL,
+    mode_b_direction     TEXT,
+    mode_b_was_correct   INTEGER
+);
+"""
+
+
+def init_sports() -> sqlite3.Connection:
+    ensure_dirs()
+    conn = sqlite3.connect(str(SPORTS_DB))
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_SPORTS_DDL)
+    conn.commit()
+    return conn
+
+
+def conn_sports() -> sqlite3.Connection:
+    c = sqlite3.connect(str(SPORTS_DB))
+    c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
 
 
 def conn_negrisk() -> sqlite3.Connection:

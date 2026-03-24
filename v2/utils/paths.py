@@ -16,7 +16,7 @@ except ImportError:
                 os.environ.setdefault(_k.strip(), _v.strip())
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-DATA_DIR = Path(os.environ.get("POLYMARKET_DATA_DIR", str(PROJECT_ROOT))).expanduser()
+DATA_DIR = Path(os.environ.get("POLYMARKET_DATA_DIR", "~/.polybot")).expanduser()
 
 # v2 has its own subdirectory — no collision with v1 DBs
 V2_DIR = DATA_DIR / "v2"
@@ -24,7 +24,8 @@ LOGS_DIR = V2_DIR / "logs"
 
 # Observation DBs
 NEGRISK_DB = V2_DIR / "obs_negrisk.db"
-CRYPTO_DB   = V2_DIR / "obs_crypto.db"
+CRYPTO_DB  = V2_DIR / "obs_crypto.db"
+SPORTS_DB  = V2_DIR / "obs_sports.db"
 
 # Historical dataset (shared, read-only from v2)
 DATASET_DB = DATA_DIR / "polymarket_dataset.db"

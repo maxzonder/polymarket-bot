@@ -463,7 +463,7 @@ def _reconcile_resolved(conn) -> int:
             n_reconciled += 1
             logger.info(
                 f"RESOLVED {market_id} outcome={'YES' if outcome else 'NO'} "
-                f"gap={gap:+.3f} correct={was_correct}"
+                f"gap={f'{gap:+.3f}' if gap is not None else None} correct={was_correct}"
             )
         except Exception as e:
             logger.warning(f"Failed to write resolution for {market_id}: {e}")

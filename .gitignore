@@ -206,3 +206,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 logs/
+
+# v2 runtime artifacts
+v2/*.db
+v2/*.db-shm
+v2/*.db-wal
