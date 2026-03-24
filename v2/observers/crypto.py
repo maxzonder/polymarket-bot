@@ -497,14 +497,26 @@ def run_once() -> dict:
         question = m.get("question", "")
         parsed = _parse_question(question)
 
-        # YES token = index 0
+        # YES token — find by outcomes[] label, fallback to index 0
         token_ids_raw = m.get("clobTokenIds", "[]")
         if isinstance(token_ids_raw, str):
             try:
                 token_ids_raw = json.loads(token_ids_raw)
             except Exception:
                 token_ids_raw = []
-        token_id = str(token_ids_raw[0]) if token_ids_raw else ""
+        outcomes_raw = m.get("outcomes", "[]")
+        if isinstance(outcomes_raw, str):
+            try:
+                outcomes_raw = json.loads(outcomes_raw)
+            except Exception:
+                outcomes_raw = []
+        token_id = ""
+        for i, outcome in enumerate(outcomes_raw):
+            if str(outcome).lower() in ("yes", "true", "1") and i < len(token_ids_raw):
+                token_id = str(token_ids_raw[i])
+                break
+        if not token_id and token_ids_raw:
+            token_id = str(token_ids_raw[0])
         if not token_id:
             continue
 
