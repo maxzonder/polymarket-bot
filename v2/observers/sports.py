@@ -105,25 +105,42 @@ def _parse_date(raw: Optional[str]) -> Optional[float]:
 
 def _classify_market_type(question: str) -> str:
     q = question.lower()
+    # "Team A vs Team B" format — direct winner market
+    if re.search(r"\bvs\.?\b", q):
+        return "winner"
     for keyword, mtype in _MARKET_TYPE_RULES:
         if keyword in q:
             return mtype
     return "other"
 
 
-def _extract_team_direction(question: str, team_home: Optional[str], team_away: Optional[str]) -> Optional[str]:
+def _extract_yes_team(question: str, team_home: Optional[str], team_away: Optional[str]) -> Optional[str]:
     """
-    Return 'home' or 'away' based on which team appears to be the YES side
-    of the question. Used for Mode B pairing.
+    Return 'home' or 'away' (relative to external odds) for the YES outcome.
+
+    For "Team A vs Team B" questions: YES = first team (index 0).
+    Match first team against external home/away by last-word lookup.
+    For other formats: find which team name appears first/most prominently.
     """
     if not team_home or not team_away:
         return None
     q = question.lower()
-    home_l = team_home.lower()
-    away_l = team_away.lower()
-    # Simple: whichever team name appears first in the question
-    hi = q.find(home_l.split()[-1])  # use last word of team name (e.g. "Warriors")
-    ai = q.find(away_l.split()[-1])
+    home_word = team_home.lower().split()[-1]
+    away_word = team_away.lower().split()[-1]
+
+    # "X vs Y" format: YES = left side of vs
+    vs_match = re.search(r"(.+?)\s+vs\.?\s+", q)
+    if vs_match:
+        left = vs_match.group(1).strip()
+        if home_word in left:
+            return "home"
+        if away_word in left:
+            return "away"
+        return None
+
+    # Other formats: which team name appears first in question text
+    hi = q.find(home_word)
+    ai = q.find(away_word)
     if hi == -1 and ai == -1:
         return None
     if hi == -1:
@@ -131,6 +148,11 @@ def _extract_team_direction(question: str, team_home: Optional[str], team_away: 
     if ai == -1:
         return "home"
     return "home" if hi <= ai else "away"
+
+
+def _extract_team_direction(question: str, team_home: Optional[str], team_away: Optional[str]) -> Optional[str]:
+    """Alias kept for Mode B compatibility."""
+    return _extract_yes_team(question, team_home, team_away)
 
 
 def _get_yes_price(market: dict) -> Optional[float]:
@@ -453,13 +475,13 @@ def run_once() -> dict:
             quote_age = None
 
             if match.accepted and mtype == "winner":
-                # Map to external implied: which team is the YES side?
-                direction = _extract_team_direction(
-                    m.get("question", ""), team_home, team_away
+                # Identify which external team is the YES outcome
+                yes_side = _extract_yes_team(
+                    m.get("question", ""), match.external_home, match.external_away
                 )
-                if direction == "home" and match.home_implied is not None:
+                if yes_side == "home" and match.home_implied is not None:
                     external_implied = match.home_implied
-                elif direction == "away" and match.away_implied is not None:
+                elif yes_side == "away" and match.away_implied is not None:
                     external_implied = match.away_implied
 
                 if external_implied is not None and poly_price is not None:
