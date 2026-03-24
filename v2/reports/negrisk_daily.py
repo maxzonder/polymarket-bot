@@ -177,6 +177,33 @@ def report(hours: int = 24, min_size: float = 5.0) -> None:
                 f"{r['max_ask']:>7.4f}"
             )
 
+    # ── Resolved groups ───────────────────────────────────────────────────────
+    res_row = conn.execute(
+        "SELECT COUNT(*) total, SUM(had_dislocation) with_dis FROM nr_resolved"
+    ).fetchone()
+    if res_row["total"]:
+        print(f"\nResolved groups total: {res_row['total']} "
+              f"(of which {res_row['with_dis']} had dislocation episode)")
+
+    # ── last_trade_price activity — detect stale vs live legs ─────────────────
+    print(f"\nLeg activity — last snapshot (last_trade_price coverage):")
+    act = conn.execute(
+        """SELECT
+             COUNT(*) total,
+             SUM(CASE WHEN l.last_trade_price IS NOT NULL THEN 1 ELSE 0 END) with_ltp,
+             AVG(l.last_trade_price) avg_ltp
+           FROM nr_legs l
+           JOIN nr_snapshots s ON s.id = l.snapshot_id
+           WHERE s.ts = (SELECT MAX(ts) FROM nr_snapshots WHERE group_id = s.group_id)
+             AND s.ts >= ?""",
+        (since,),
+    ).fetchone()
+    if act["total"]:
+        pct = 100 * act["with_ltp"] / act["total"]
+        print(f"  Legs with last_trade_price: {act['with_ltp']}/{act['total']} ({pct:.0f}%)")
+        if act["avg_ltp"]:
+            print(f"  Avg last_trade_price: {act['avg_ltp']:.4f}")
+
     conn.close()
 
 

@@ -46,7 +46,18 @@ CREATE TABLE IF NOT EXISTS nr_legs (
     best_ask        REAL,
     best_bid_size   REAL,
     best_ask_size   REAL,
+    last_trade_price REAL,            -- last traded price from Gamma (no extra API call)
     market_volume   REAL
+);
+
+-- Resolved neg-risk groups: which leg (market) won
+CREATE TABLE IF NOT EXISTS nr_resolved (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id        INTEGER NOT NULL REFERENCES nr_groups(id),
+    resolved_ts     INTEGER NOT NULL,
+    winner_market_id TEXT,            -- market whose YES token resolved to 1
+    n_legs          INTEGER,
+    had_dislocation INTEGER DEFAULT 0 -- 1 if group ever had sum_best_ask < threshold
 );
 
 -- Dislocation episodes: start/end of continuous sum_best_ask < threshold
@@ -115,6 +126,10 @@ def init_negrisk() -> sqlite3.Connection:
     conn = sqlite3.connect(str(NEGRISK_DB))
     conn.row_factory = sqlite3.Row
     conn.executescript(_NEGRISK_DDL)
+    # Migrations for existing DBs
+    leg_cols = {row[1] for row in conn.execute("PRAGMA table_info(nr_legs)")}
+    if "last_trade_price" not in leg_cols:
+        conn.execute("ALTER TABLE nr_legs ADD COLUMN last_trade_price REAL")
     conn.commit()
     return conn
 

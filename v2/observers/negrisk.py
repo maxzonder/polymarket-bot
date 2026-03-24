@@ -48,6 +48,7 @@ class LegBook:
     best_ask: Optional[float]
     best_bid_size: Optional[float]
     best_ask_size: Optional[float]
+    last_trade_price: Optional[float]  # from Gamma — no extra API call
     market_volume: float
 
 
@@ -163,6 +164,12 @@ def _get_legs(markets_in_group: list[dict]) -> list[LegBook]:
         market_id = str(m.get("id", ""))
         volume = float(m.get("volumeNum") or m.get("volume") or 0)
 
+        # last_trade_price already in Gamma response — no extra call
+        try:
+            ltp = float(m["lastTradePrice"]) if m.get("lastTradePrice") else None
+        except (ValueError, TypeError):
+            ltp = None
+
         token_id = _get_yes_token_id(m)
         if not token_id:
             continue
@@ -178,6 +185,7 @@ def _get_legs(markets_in_group: list[dict]) -> list[LegBook]:
                 best_ask=ask,
                 best_bid_size=bid_sz,
                 best_ask_size=ask_sz,
+                last_trade_price=ltp,
                 market_volume=volume,
             ))
 
@@ -223,10 +231,10 @@ def _save_snapshot(conn, group_id: int, legs: list[LegBook]) -> int:
         conn.execute(
             """INSERT INTO nr_legs
                (snapshot_id, market_id, token_id, best_bid, best_ask,
-                best_bid_size, best_ask_size, market_volume)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                best_bid_size, best_ask_size, last_trade_price, market_volume)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (snap_id, leg.market_id, leg.token_id, leg.best_bid, leg.best_ask,
-             leg.best_bid_size, leg.best_ask_size, leg.market_volume),
+             leg.best_bid_size, leg.best_ask_size, leg.last_trade_price, leg.market_volume),
         )
 
     return snap_id
@@ -283,6 +291,104 @@ def _update_dislocations(conn, group_id: int, sum_ask: Optional[float], ts: int)
             )
 
 
+def _reconcile_resolved(conn) -> int:
+    """
+    For known groups: check Gamma if all markets are now closed.
+    If so, determine winner (YES token = 1) and write to nr_resolved.
+    Runs once per cycle — checks only groups not yet in nr_resolved.
+    """
+    unresolved = conn.execute(
+        """SELECT g.id, g.event_slug, g.n_markets
+           FROM nr_groups g
+           WHERE NOT EXISTS (SELECT 1 FROM nr_resolved r WHERE r.group_id = g.id)
+           AND g.first_seen_ts < ?""",
+        (int(time.time()) - 3600,),  # only check groups seen > 1h ago
+    ).fetchall()
+
+    n_resolved = 0
+    for group in unresolved:
+        group_id = group["id"]
+        slug = group["event_slug"]
+
+        # Get distinct market_ids in this group from nr_legs
+        market_ids = [
+            r["market_id"] for r in conn.execute(
+                """SELECT DISTINCT l.market_id FROM nr_legs l
+                   JOIN nr_snapshots s ON s.id = l.snapshot_id
+                   WHERE s.group_id = ?""",
+                (group_id,),
+            ).fetchall()
+        ]
+        if not market_ids:
+            continue
+
+        # Check Gamma for each market — all must be closed
+        closed_markets = []
+        winner_market_id = None
+        all_closed = True
+
+        for mid in market_ids[:20]:  # cap at 20 to avoid long loops
+            try:
+                resp = requests.get(
+                    f"{GAMMA_BASE}/markets/{mid}", timeout=10
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+            except Exception:
+                all_closed = False
+                break
+
+            if not (data.get("closed") or not data.get("active", True)):
+                all_closed = False
+                break
+
+            # Determine winner from outcomePrices
+            op_raw = data.get("outcomePrices", "[]")
+            if isinstance(op_raw, str):
+                try:
+                    op_raw = json.loads(op_raw)
+                except Exception:
+                    op_raw = []
+            if op_raw:
+                try:
+                    yes_price = float(op_raw[0])
+                    if yes_price >= 0.99:
+                        winner_market_id = mid
+                except (ValueError, TypeError):
+                    pass
+
+            closed_markets.append(mid)
+            time.sleep(0.05)
+
+        if not all_closed or len(closed_markets) < len(market_ids):
+            continue
+
+        # Check if group ever had a dislocation
+        had_dis = conn.execute(
+            "SELECT COUNT(*) n FROM nr_dislocations WHERE group_id=?",
+            (group_id,),
+        ).fetchone()["n"] > 0
+
+        resolved_ts = int(time.time())
+        conn.execute(
+            """INSERT OR IGNORE INTO nr_resolved
+               (group_id, resolved_ts, winner_market_id, n_legs, had_dislocation)
+               VALUES (?,?,?,?,?)""",
+            (group_id, resolved_ts, winner_market_id,
+             len(closed_markets), 1 if had_dis else 0),
+        )
+        n_resolved += 1
+        logger.info(
+            f"RESOLVED group {slug[:40]} "
+            f"winner={winner_market_id or 'unknown'} "
+            f"had_dislocation={had_dis}"
+        )
+
+    return n_resolved
+
+
 def run_once() -> dict:
     """Run one observation cycle. Returns summary dict."""
     init_negrisk()
@@ -327,11 +433,17 @@ def run_once() -> dict:
                 f"gap={1-sum_ask:.4f} legs={len(legs)}"
             )
 
+    n_resolved = _reconcile_resolved(conn)
     conn.commit()
     conn.close()
 
-    summary = {"groups": n_groups, "dislocations": n_dis, "ts": int(time.time())}
-    logger.info(f"Cycle done: {n_groups} groups, {n_dis} dislocations")
+    summary = {
+        "groups": n_groups,
+        "dislocations": n_dis,
+        "resolved": n_resolved,
+        "ts": int(time.time()),
+    }
+    logger.info(f"Cycle done: {n_groups} groups, {n_dis} dislocations, {n_resolved} resolved")
     return summary
 
 
