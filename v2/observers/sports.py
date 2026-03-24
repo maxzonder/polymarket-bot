@@ -43,6 +43,14 @@ PAGE_SIZE         = 500
 MIN_BASKET_SIZE   = 2      # skip single-market events
 MODE_A_GAP_THRESH = 0.03   # gap magnitude to count as "aligned"
 
+# External odds are cached for 4 hours to stay within free tier (500 req/mo).
+# At 2 sports × 6 fetches/day × 30 days = 360 req/month — fits free tier.
+# Mode B runs every 30-min cycle regardless of cache freshness.
+ODDS_CACHE_TTL_SEC = 4 * 3600  # 4 hours
+
+_odds_cache: dict = {}          # {"games": [...], "ts": float}
+
+
 # ── Semantic pair rules for Mode B ────────────────────────────────────────────
 # Each rule: (type_a, type_b, direction)
 # direction "same"    → P(type_a for team X) should correlate positively with P(type_b for team X)
@@ -320,6 +328,24 @@ def _reconcile_resolved(conn) -> int:
             elif gap < 0:
                 mode_a_correct = 1 if outcome == 0 else 0
 
+        # Mode B: pull last basket score for this market's event before expiry
+        event_id = row["event_id"]
+        mode_b_score = None
+        mode_b_correct = None
+        if event_id:
+            last_basket = conn.execute(
+                """SELECT mode_b_score, n_contradicting_pairs, n_semantic_pairs_checked
+                   FROM sp_baskets
+                   WHERE event_id=? AND ts <= ?
+                   ORDER BY ts DESC LIMIT 1""",
+                (event_id, end_ts),
+            ).fetchone()
+            if last_basket:
+                mode_b_score = last_basket["mode_b_score"]
+                # Mode B direction: if contradictions exist, the basket was flagged as inconsistent.
+                # We can't assign a clean directional prediction from Mode B alone at market level,
+                # so we record the score and leave mode_b_was_correct for batch analysis.
+
         resolved_ts = _parse_date(
             data.get("resolvedAt") or data.get("resolutionTime")
         ) or now
@@ -329,9 +355,9 @@ def _reconcile_resolved(conn) -> int:
                 """INSERT OR REPLACE INTO sp_resolved
                    (market_id, resolved_ts, outcome,
                     last_mode_a_gap, last_poly_price, last_external_implied,
-                    mode_a_was_correct)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (market_id, resolved_ts, outcome, gap, poly, ext, mode_a_correct),
+                    mode_a_was_correct, last_mode_b_score)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (market_id, resolved_ts, outcome, gap, poly, ext, mode_a_correct, mode_b_score),
             )
             n += 1
         except Exception as e:
@@ -350,15 +376,26 @@ def run_once() -> dict:
     conn = conn_sports()
     now_ts = time.time()
 
-    # Fetch external odds (all supported sports in one shot)
-    external_by_sport = fetch_all_sports()
-    # Build flat list per external_id for matching
-    all_external: list[dict] = []
-    for games in external_by_sport.values():
-        all_external.extend(games)
+    # Fetch external odds — cached for 4h to stay within free tier.
+    # Only re-fetch if cache is absent or expired.
+    cache_age = now_ts - _odds_cache.get("ts", 0)
+    if cache_age > ODDS_CACHE_TTL_SEC:
+        external_by_sport = fetch_all_sports()
+        all_external_fresh: list[dict] = []
+        for games in external_by_sport.values():
+            all_external_fresh.extend(games)
+        _odds_cache["games"] = all_external_fresh
+        _odds_cache["ts"] = now_ts
+        if all_external_fresh:
+            logger.info(f"External odds refreshed: {len(all_external_fresh)} games cached for {ODDS_CACHE_TTL_SEC//3600}h")
+        else:
+            logger.info("No external odds fetched (ODDS_API_KEY absent or API error) — Mode B only")
+    else:
+        remaining = int((ODDS_CACHE_TTL_SEC - cache_age) / 60)
+        logger.info(f"Using cached external odds ({len(_odds_cache['games'])} games, refresh in {remaining}m)")
+
+    all_external: list[dict] = _odds_cache.get("games", [])
     mode_a_available = bool(all_external)
-    if not mode_a_available:
-        logger.info("No external odds fetched (ODDS_API_KEY absent or API error) — Mode B only")
 
     # Fetch open sports events (already grouped by event)
     baskets = _fetch_sports_events()
