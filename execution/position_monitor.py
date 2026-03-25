@@ -58,6 +58,7 @@ class PositionMonitor:
         else:
             self._check_fills_real()
         self._check_resolutions()
+        self._update_peak_prices()
 
     # ── Fill detection ────────────────────────────────────────────────────────
 
@@ -211,6 +212,42 @@ class PositionMonitor:
                 conn = self._conn()
 
         conn.close()
+
+    # ── Peak price tracking ───────────────────────────────────────────────────
+
+    def _update_peak_prices(self) -> None:
+        """
+        For each open position, fetch current best_bid and update peak_price / peak_x
+        if the current price exceeds the stored peak.
+        Called after every fill-check cycle.
+        """
+        conn = self._conn()
+        open_pos = conn.execute(
+            "SELECT position_id, token_id, entry_price, peak_price FROM positions WHERE status='open'"
+        ).fetchall()
+        conn.close()
+
+        for pos in open_pos:
+            token_id   = pos["token_id"]
+            entry_price = float(pos["entry_price"])
+            current_peak = float(pos["peak_price"] or 0.0)
+            if entry_price <= 0:
+                continue
+            try:
+                book = get_orderbook(token_id)
+                bid  = book.best_bid
+                if bid is None or bid <= current_peak:
+                    continue
+                peak_x = bid / entry_price
+                conn = self._conn()
+                conn.execute(
+                    "UPDATE positions SET peak_price=?, peak_x=? WHERE position_id=?",
+                    (bid, round(peak_x, 4), pos["position_id"]),
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
 
     # ── Resolution detection ──────────────────────────────────────────────────
 

@@ -158,6 +158,11 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             realized_roi        REAL,
             time_to_fill_hours  REAL,
             tp_5x_hit           INTEGER,
+            tp_10x_hit          INTEGER,
+            tp_20x_hit          INTEGER,
+            tp_moonbag_hit      INTEGER,
+            peak_price          REAL,
+            peak_x              REAL,
             entry_price         REAL,
             entry_size_usdc     REAL,
             position_status     TEXT,
@@ -201,12 +206,20 @@ class OrderManager:
         # Migrations: add columns that may not exist in older DBs.
         migrations = [
             "ALTER TABLE tp_orders      ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE tp_orders      ADD COLUMN filled_at INTEGER",
             "ALTER TABLE resting_orders ADD COLUMN candidate_id TEXT",
             "ALTER TABLE resting_orders ADD COLUMN filled_quantity REAL NOT NULL DEFAULT 0",
             "ALTER TABLE resting_orders ADD COLUMN outcome_name TEXT",
             "ALTER TABLE scan_log       ADD COLUMN candidate_id TEXT",
             "ALTER TABLE screener_log   ADD COLUMN candidate_id TEXT",
             "ALTER TABLE positions      ADD COLUMN is_winner INTEGER",
+            "ALTER TABLE positions      ADD COLUMN peak_price REAL",
+            "ALTER TABLE positions      ADD COLUMN peak_x REAL",
+            "ALTER TABLE ml_outcomes    ADD COLUMN tp_10x_hit INTEGER",
+            "ALTER TABLE ml_outcomes    ADD COLUMN tp_20x_hit INTEGER",
+            "ALTER TABLE ml_outcomes    ADD COLUMN tp_moonbag_hit INTEGER",
+            "ALTER TABLE ml_outcomes    ADD COLUMN peak_price REAL",
+            "ALTER TABLE ml_outcomes    ADD COLUMN peak_x REAL",
         ]
         for sql in migrations:
             try:
@@ -705,8 +718,8 @@ class OrderManager:
         now = int(time.time())
         conn = self._conn()
         conn.execute(
-            "UPDATE tp_orders SET status='matched', filled_quantity = filled_quantity + ? WHERE order_id=?",
-            (fill_quantity, order_id),
+            "UPDATE tp_orders SET status='matched', filled_quantity = filled_quantity + ?, filled_at=? WHERE order_id=?",
+            (fill_quantity, now, order_id),
         )
         # Find position and persist partial PnL
         row = conn.execute(

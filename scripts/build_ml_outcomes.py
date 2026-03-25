@@ -75,6 +75,29 @@ SELECT
                AND p.entry_price > 0
                AND tp.sell_price >= p.entry_price * 5
          ) THEN 1 ELSE 0 END                    AS tp_5x_hit,
+    CASE WHEN EXISTS (
+             SELECT 1 FROM tp_orders tp
+             WHERE tp.position_id = p.position_id
+               AND tp.status = 'matched'
+               AND p.entry_price > 0
+               AND tp.sell_price >= p.entry_price * 10
+         ) THEN 1 ELSE 0 END                    AS tp_10x_hit,
+    CASE WHEN EXISTS (
+             SELECT 1 FROM tp_orders tp
+             WHERE tp.position_id = p.position_id
+               AND tp.status = 'matched'
+               AND p.entry_price > 0
+               AND tp.sell_price >= p.entry_price * 20
+         ) THEN 1 ELSE 0 END                    AS tp_20x_hit,
+    CASE WHEN EXISTS (
+             SELECT 1 FROM tp_orders tp
+             WHERE tp.position_id = p.position_id
+               AND tp.label = 'moonbag_resolution'
+               AND tp.status IN ('matched', 'resolved')
+               AND p.is_winner = 1
+         ) THEN 1 ELSE 0 END                    AS tp_moonbag_hit,
+    p.peak_price,
+    p.peak_x,
 
     p.entry_price,
     p.entry_size_usdc,
@@ -94,29 +117,38 @@ INSERT INTO ml_outcomes (
     materialized_at, candidate_id, market_id, token_id, question, category,
     current_price, hours_to_close, volume_usdc, ef_score, res_score,
     entry_level, order_id,
-    got_fill, is_winner, realized_pnl, realized_roi, time_to_fill_hours, tp_5x_hit,
+    got_fill, is_winner, realized_pnl, realized_roi, time_to_fill_hours,
+    tp_5x_hit, tp_10x_hit, tp_20x_hit, tp_moonbag_hit,
+    peak_price, peak_x,
     entry_price, entry_size_usdc, position_status, opened_at, closed_at
 )
 VALUES (
     ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?,
-    ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?,
+    ?, ?,
     ?, ?, ?, ?, ?
 )
 ON CONFLICT(candidate_id, entry_level) DO UPDATE SET
-    materialized_at  = excluded.materialized_at,
-    got_fill         = excluded.got_fill,
-    is_winner        = excluded.is_winner,
-    realized_pnl     = excluded.realized_pnl,
-    realized_roi     = excluded.realized_roi,
+    materialized_at    = excluded.materialized_at,
+    got_fill           = excluded.got_fill,
+    is_winner          = excluded.is_winner,
+    realized_pnl       = excluded.realized_pnl,
+    realized_roi       = excluded.realized_roi,
     time_to_fill_hours = excluded.time_to_fill_hours,
-    tp_5x_hit        = excluded.tp_5x_hit,
-    entry_price      = excluded.entry_price,
-    entry_size_usdc  = excluded.entry_size_usdc,
-    position_status  = excluded.position_status,
-    opened_at        = excluded.opened_at,
-    closed_at        = excluded.closed_at
+    tp_5x_hit          = excluded.tp_5x_hit,
+    tp_10x_hit         = excluded.tp_10x_hit,
+    tp_20x_hit         = excluded.tp_20x_hit,
+    tp_moonbag_hit     = excluded.tp_moonbag_hit,
+    peak_price         = excluded.peak_price,
+    peak_x             = excluded.peak_x,
+    entry_price        = excluded.entry_price,
+    entry_size_usdc    = excluded.entry_size_usdc,
+    position_status    = excluded.position_status,
+    opened_at          = excluded.opened_at,
+    closed_at          = excluded.closed_at
 """
 
 
@@ -157,6 +189,11 @@ def build(conn: sqlite3.Connection, rebuild: bool = False) -> int:
             r["realized_roi"],
             r["time_to_fill_hours"],
             r["tp_5x_hit"],
+            r["tp_10x_hit"],
+            r["tp_20x_hit"],
+            r["tp_moonbag_hit"],
+            r["peak_price"],
+            r["peak_x"],
             r["entry_price"],
             r["entry_size_usdc"],
             r["position_status"],
