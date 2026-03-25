@@ -62,7 +62,8 @@ python scripts/market_level_features_v1_1.py --recompute
 ### `build_ml_outcomes.py`
 Материализует таблицу `ml_outcomes` в `positions.db`. Линкует цепочку:
 `screener_log` → `resting_orders` → `positions` → `tp_orders`.
-Поля: `got_fill`, `is_winner`, `realized_pnl`, `realized_roi`, `time_to_fill_hours`, `tp_5x_hit`.
+Поля: `got_fill`, `is_winner`, `realized_pnl`, `realized_roi`, `time_to_fill_hours`,
+`tp_5x_hit`, `tp_10x_hit`, `tp_20x_hit`, `tp_moonbag_hit`, `peak_price`, `peak_x`.
 Безопасно перезапускать (UPSERT).
 
 ```bash
