@@ -164,20 +164,40 @@ class Screener:
                 candidate_id,
             ))
 
-        # Hard filter: hours to close
+        # Hard filter: hours to close.
+        # If hours_to_close is None (Gamma didn't return it), apply a safe default
+        # rather than silently bypassing the time-gate. This prevents markets with
+        # unknown deadlines from flooding the candidate pool.
         mc = self.config.mode_config
-        if m.hours_to_close is not None:
-            if m.hours_to_close < mc.min_hours_to_close:
-                _log("rejected_hours_to_close_min")
-                return []
-            if m.hours_to_close > mc.max_hours_to_close:
-                _log("rejected_hours_to_close_max")
-                return []
+        hours = m.hours_to_close
+        if hours is None:
+            hours = mc.hours_to_close_null_default
+            _log("hours_to_close_null_default_applied")
+        if hours < mc.min_hours_to_close:
+            _log("rejected_hours_to_close_min")
+            return []
+        if hours > mc.max_hours_to_close:
+            _log("rejected_hours_to_close_max")
+            return []
 
         # Hard filter: must have token IDs
         if not m.token_ids:
             _log("rejected_missing_token_ids")
             return []
+
+        # v1.1: market-level score gate — runs BEFORE ef_score.
+        # Rationale: ef_score is category-level and can't differentiate within a category.
+        # market_scorer uses per-market signals (volume, duration, analogy, neg_risk).
+        # Running it first means ef_score never fires on markets already rejected by
+        # market_scorer, making the funnel easier to read and market_scorer effective.
+        # Issue #47 identified that running market_scorer AFTER ef_score made it a
+        # dead gate (ef_score pre-filtered all markets that would fail market_scorer).
+        ms_obj: Optional[MarketScore] = None
+        if self.market_scorer is not None:
+            ms_obj = self.market_scorer.score(m)
+            if ms_obj.tier == "reject":
+                _log("rejected_market_score")
+                return []
 
         ef_score_obj  = self.ef_scorer.get(m.category)
         res_score_obj = self.res_scorer.get(m.category)
@@ -191,14 +211,6 @@ class Screener:
         if res_s < self.mc.min_resolution_score:
             _log("rejected_resolution_score", ef=ef_s, res=res_s)
             return []
-
-        # v1.1: market-level score gate
-        ms_obj: Optional[MarketScore] = None
-        if self.market_scorer is not None:
-            ms_obj = self.market_scorer.score(m)
-            if ms_obj.tier == "reject":
-                _log("rejected_market_score", ef=ef_s, res=res_s)
-                return []
 
         candidates: list[EntryCandidate] = []
 

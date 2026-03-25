@@ -103,6 +103,12 @@ class ModeConfig:
     # 0.0 = disabled (no cap). Works with ExposureManager.
     max_exposure_per_market: float = 0.0
 
+    # ── Time-gate null fallback ───────────────────────────────────────────────
+    # If Gamma returns None for hours_to_close, treat as this many hours rather
+    # than silently bypassing the time-gate. Prevents markets with unknown deadlines
+    # from escaping the filter entirely. Default 48h = safe middle ground.
+    hours_to_close_null_default: float = 48.0
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -174,7 +180,8 @@ BIG_SWAN_MODE = ModeConfig(
     max_resting_per_cluster=3,
     max_capital_deployed_pct=0.50,
     min_hours_to_close=1.0,
-    max_hours_to_close=120.0,
+    max_hours_to_close=720.0,   # raised from 120h: Stage 0 shows >6mo = 10.6% swan_rate
+    hours_to_close_null_default=48.0,  # safe fallback for markets without deadline info
     optimize_metric="tail_ev",
     # Price-tier stakes: deeper floor = bigger bet (higher upside)
     # 0.001 → $0.50 (1000x potential), 0.005 → $0.25, 0.010 → $0.10
