@@ -7,11 +7,14 @@
 ## Ежедневный пайплайн
 
 ### `daily_pipeline.py`
-Оркестратор всех ML-шагов. Запускать раз в сутки (например, cron 04:00 UTC).
+Оркестратор всех ML-шагов. **Запускается автоматически ботом каждый день в 04:00 UTC**
+через `_daily_pipeline_loop` в `bot/main_loop.py` — cron не нужен.
 Порядок шагов: `analyzer` → `feature_mart_v1_1` → `feature_mart` → `ml_outcomes` → `rejected_outcomes` → `recalibrate`.
+После успешного прогона бот автоматически рефрешит `MarketScorer`.
 
+Ручной запуск (отладка / разовый прогон):
 ```bash
-python scripts/daily_pipeline.py                        # все шаги
+python scripts/daily_pipeline.py                             # все шаги
 python scripts/daily_pipeline.py --step feature_mart_v1_1   # один шаг
 ```
 
