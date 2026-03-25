@@ -87,6 +87,22 @@ class ModeConfig:
     # Empty tuple = disabled (use stake_usdc for all levels).
     stake_tiers: tuple[tuple[float, float], ...] = ()
 
+    # ── v1.1 Market-score gates (issue #44 Stage 1) ────────────────────────────
+    # Minimum market_score to consider a market at all. 0.0 = disabled (pass all).
+    min_market_score: float = 0.0
+
+    # Quality-weighted stake schedule keyed on market_score (not entry price).
+    # Tuple of (min_market_score_threshold, stake_usdc) sorted descending by threshold.
+    # Example: ((0.60, 0.50), (0.40, 0.25), (0.25, 0.10))
+    # Falls back to stake_usdc if no tier matches.
+    # Empty tuple = disabled (use price-based stake_tiers instead).
+    market_score_tiers: tuple[tuple[float, float], ...] = ()
+
+    # ── v1.1 Per-market exposure cap (issue #44 Stage 1) ──────────────────────
+    # Maximum total USDC across all fills on the same (market_id, token_id).
+    # 0.0 = disabled (no cap). Works with ExposureManager.
+    max_exposure_per_market: float = 0.0
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -167,6 +183,18 @@ BIG_SWAN_MODE = ModeConfig(
         (0.005, 0.25),
         (0.010, 0.10),
     ),
+    # v1.1: market_score gate — reject bottom-half markets
+    min_market_score=0.25,
+    # v1.1: quality-weighted stake override (higher score → bigger stake per level)
+    # Applied as a multiplier on top of stake_tiers: top10 gets max, pass gets min.
+    # Set to non-empty to activate (replaces stake_tiers when market_score_tiers active).
+    market_score_tiers=(
+        (0.60, 0.50),   # top10:  $0.50 per entry level
+        (0.40, 0.25),   # top25:  $0.25 per entry level
+        (0.25, 0.10),   # pass:   $0.10 per entry level
+    ),
+    # v1.1: per-market cap — never deploy more than $2.00 on a single token
+    max_exposure_per_market=2.0,
 )
 
 DIP_MODE = ModeConfig(

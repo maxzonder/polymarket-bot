@@ -204,6 +204,8 @@ def replay_candidate(
     clob: ClobClient,
     mc,
     positions_db_path: str,
+    activation_delay: int = 0,
+    fill_fraction: float = 1.0,
 ) -> dict:
     """
     Drive one swan candidate through the full entry → TP → resolution path.
@@ -214,6 +216,13 @@ def replay_candidate(
     3. Partial fills    : order stays pending with reduced qty until fully consumed
     4. Single dispatch  : on_entry_filled called exactly once per order (at full fill or
                           trade-file end); filled_entries == Positions opened always holds
+
+    v1.1 pessimistic fill model (issue #44 Stage 1):
+    5. activation_delay : BUY fills only active at/after entry_ts_first + activation_delay
+                          Simulates queue priority — we're not first in the book.
+    6. fill_fraction    : fill_qty <= trade_budget * fill_fraction per trade print.
+                          Simulates that we capture only a fraction of available liquidity.
+                          Default=1.0 (oracle/optimistic); 0.3 = conservative live estimate.
 
     Returns a result dict summarising what happened.
     """
@@ -324,22 +333,27 @@ def replay_candidate(
         trade_side = trade.get("side", "")
 
         # ── Check resting BUY fills (only at/after signal time) ───────────────
-        # Temporal gate: orders inactive before the floor event.
+        # Temporal gate: orders inactive before the floor event (+ activation_delay).
         # Liquidity drain: trade_budget is shared sequentially across all fills.
         # Partial fills: on_entry_filled deferred until order fully consumed.
         # Side filter: only SELL-side trades (taker selling) can fill our BUY bids.
         #   Iterating in descending price order restores correct BUY price priority:
         #   higher-priced bids have first claim on available liquidity.
-        if trade_side in ("SELL", "") and trade_ts >= entry_ts_first and pending_buys:
+        # fill_fraction: we capture at most fill_fraction of any single trade's budget.
+        fill_gate = entry_ts_first + activation_delay
+        if trade_side in ("SELL", "") and trade_ts >= fill_gate and pending_buys:
+            # Apply fill_fraction: cap how much of this trade we can consume
+            effective_budget = trade_budget * fill_fraction
             for order_id, order in sorted(
                 pending_buys.items(), key=lambda kv: kv[1]["price"], reverse=True
             ):
-                if trade_budget <= 0:
+                if effective_budget <= 0:
                     break
                 bid_price = order["price"]
                 if trade_price <= bid_price:
-                    fill_qty = min(order["remaining_qty"], trade_budget)
-                    trade_budget -= fill_qty
+                    fill_qty = min(order["remaining_qty"], effective_budget)
+                    effective_budget -= fill_qty
+                    trade_budget -= fill_qty  # also drain real budget for TP pass
                     order["remaining_qty"] -= fill_qty
                     order["filled_qty"] += fill_qty
 
@@ -466,6 +480,8 @@ def run_replay(
     limit: Optional[int],
     mode: str,
     output_dir: Path,
+    activation_delay: int = 0,
+    fill_fraction: float = 1.0,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     positions_db = output_dir / "positions.db"
@@ -500,13 +516,21 @@ def run_replay(
         f"Replay starting: {start} → {end} | mode={mode} | candidates={len(candidates)}"
         + (f" (limit={limit})" if limit else "")
     )
+    logger.info(
+        f"Fill model: activation_delay={activation_delay}s fill_fraction={fill_fraction:.2f}"
+        f" ({'pessimistic' if fill_fraction < 1.0 or activation_delay > 0 else 'oracle'})"
+    )
     logger.info(f"Output dir: {output_dir}")
 
     results: list[dict] = []
     t0 = time.monotonic()
 
     for i, candidate in enumerate(candidates, 1):
-        result = replay_candidate(candidate, om, clob, mc, str(positions_db))
+        result = replay_candidate(
+            candidate, om, clob, mc, str(positions_db),
+            activation_delay=activation_delay,
+            fill_fraction=fill_fraction,
+        )
         results.append(result)
 
         status = result["status"]
@@ -542,6 +566,13 @@ def main() -> None:
                     choices=["big_swan_mode", "balanced_mode", "fast_tp_mode"])
     ap.add_argument("--out",   default=None,
                     help="Output directory (default: data/replay_runs/<timestamp>)")
+    # v1.1 pessimistic fill model flags (issue #44 Stage 1)
+    ap.add_argument("--pessimistic", action="store_true",
+                    help="Enable pessimistic fill model: activation_delay=300s, fill_fraction=0.3")
+    ap.add_argument("--activation-delay", type=int, default=0, metavar="SECONDS",
+                    help="Seconds after entry_ts_first before BUY fills activate (default: 0)")
+    ap.add_argument("--fill-fraction", type=float, default=1.0, metavar="F",
+                    help="Max fraction of each trade's liquidity we can fill (default: 1.0=oracle)")
     args = ap.parse_args()
 
     if args.out:
@@ -550,12 +581,21 @@ def main() -> None:
         ts = time.strftime("%Y%m%d_%H%M%S")
         output_dir = DATA_DIR / "replay_runs" / ts
 
+    # --pessimistic shorthand: conservative calibration values from issue #44
+    activation_delay = args.activation_delay
+    fill_fraction    = args.fill_fraction
+    if args.pessimistic:
+        activation_delay = max(activation_delay, 300)   # 5 min queue delay
+        fill_fraction    = min(fill_fraction, 0.3)      # capture 30% of available liquidity
+
     run_replay(
         start=date.fromisoformat(args.start),
         end=date.fromisoformat(args.end),
         limit=args.limit,
         mode=args.mode,
         output_dir=output_dir,
+        activation_delay=activation_delay,
+        fill_fraction=fill_fraction,
     )
 
 

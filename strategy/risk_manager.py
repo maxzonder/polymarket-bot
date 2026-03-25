@@ -22,6 +22,7 @@ from typing import Optional
 
 from config import ModeConfig, TPLevel
 from strategy.scorer import ResolutionScore
+from strategy.market_scorer import MarketScore
 
 
 @dataclass
@@ -64,44 +65,77 @@ class RiskManager:
         self,
         token_id: str,
         entry_price: float,
-        resolution_score: ResolutionScore,
+        resolution_score: Optional[ResolutionScore] = None,
         open_positions: int = 0,
+        market_score: Optional[MarketScore] = None,
     ) -> Optional[SizedPosition]:
         """
         Compute stake for a new position.
         Returns None if position should be rejected on risk grounds.
-        """
-        # Anti-garbage: reject if price is suspiciously low with no historical data
-        if entry_price < 0.0005 and resolution_score.sample_count < 5:
-            return None  # paper price artifact risk
 
-        # Determine base stake from price-tier schedule (if configured).
-        # Max per-token exposure = sum of all tier stakes (e.g. $0.50+$0.25+$0.10=$0.85).
-        # Balance gate in OrderManager prevents placement when funds are insufficient.
-        base_stake = self.mc.stake_usdc  # fallback
-        if self.mc.stake_tiers:
+        v1.1: If market_score is provided and market_score_tiers is configured,
+        quality-weighted sizing overrides price-tier sizing.
+        market_score < min_market_score → reject (return None).
+        """
+        # v1.1: reject markets below score threshold
+        if market_score is not None and self.mc.min_market_score > 0:
+            if market_score.total < self.mc.min_market_score:
+                return None
+
+        # Anti-garbage: reject if price is suspiciously low with no historical data
+        if resolution_score is not None:
+            if entry_price < 0.0005 and resolution_score.sample_count < 5:
+                return None  # paper price artifact risk
+
+        # ── Stake determination (v1.1 priority order) ─────────────────────────
+        # 1. If market_score_tiers configured: quality-weighted sizing
+        # 2. Else if stake_tiers configured: price-based sizing
+        # 3. Else: flat stake_usdc fallback
+        base_stake = self.mc.stake_usdc
+        tier_source = "flat"
+
+        if self.mc.market_score_tiers and market_score is not None:
+            # Quality-weighted: higher market_score → larger stake per fill
+            for threshold, tier_stake in sorted(
+                self.mc.market_score_tiers, key=lambda t: t[0], reverse=True
+            ):
+                if market_score.total >= threshold:
+                    base_stake = tier_stake
+                    tier_source = f"score_tier(>={threshold:.2f})"
+                    break
+        elif self.mc.stake_tiers:
+            # Price-based (v1 legacy behaviour)
             for tier_price, tier_stake in self.mc.stake_tiers:
                 if entry_price <= tier_price:
                     base_stake = tier_stake
+                    tier_source = f"price_tier(<={tier_price:.4f})"
                     break
 
         stake = base_stake
 
-        # Scale stake by resolution_score for big_swan_mode
-        if self.mc.optimize_metric == "tail_ev":
-            score_factor = 0.5 + resolution_score.score * 0.5  # 0.5 to 1.0
+        # Legacy resolution_score scaling for non-v1.1 modes (no market_score_tiers)
+        if (
+            self.mc.optimize_metric == "tail_ev"
+            and not self.mc.market_score_tiers
+            and resolution_score is not None
+        ):
+            score_factor = 0.5 + resolution_score.score * 0.5
             stake = stake * score_factor
 
         stake = max(0.001, round(stake, 6))
         token_quantity = stake / entry_price
 
-        tier_info = f" base=${base_stake:.4f}" if self.mc.stake_tiers else ""
+        score_info = f" mscore={market_score.total:.3f}({market_score.tier})" if market_score else ""
         rationale = (
-            f"mode={self.mc.name} stake=${stake:.4f}{tier_info} "
-            f"qty={token_quantity:.2f} tokens @ ${entry_price:.5f} "
-            f"res_score={resolution_score.score:.3f} p_winner={resolution_score.p_winner:.2f} "
-            f"tail_ev={resolution_score.tail_ev:.1f}"
+            f"mode={self.mc.name} stake=${stake:.4f}[{tier_source}]{score_info} "
+            f"qty={token_quantity:.2f} tokens @ ${entry_price:.5f}"
         )
+        if resolution_score is not None:
+            rationale += (
+                f" res_score={resolution_score.score:.3f} "
+                f"p_winner={resolution_score.p_winner:.2f} "
+                f"tail_ev={resolution_score.tail_ev:.1f}"
+            )
 
         return SizedPosition(
             token_id=token_id,

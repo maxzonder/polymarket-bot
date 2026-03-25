@@ -21,8 +21,10 @@ from pathlib import Path
 from typing import Optional
 
 from api.gamma_client import MarketInfo, fetch_open_markets
+from api.clob_client import get_orderbook
 from config import BotConfig
 from strategy.scorer import EntryFillScorer, ResolutionScorer
+from strategy.market_scorer import MarketScore, MarketScorer
 from utils.logger import setup_logger
 from utils.paths import DATA_DIR
 
@@ -49,6 +51,7 @@ class EntryCandidate:
     suggested_entry_levels: list[float]  # price levels for resting bids
     candidate_id: str = ""      # UUID linking screener_log → scan_log → resting_orders
     rationale: str = ""         # human-readable explanation
+    market_score: Optional[MarketScore] = None  # v1.1: market-level score breakdown
 
 
 class Screener:
@@ -63,11 +66,19 @@ class Screener:
     - not fees_enabled if category penalised (configurable)
 
     Soft scoring (produces ranking):
-    - entry_fill_score from EntryFillScorer (historical dip frequency)
-    - resolution_score from ResolutionScorer (tail EV per category)
+    v1.1: market_scorer (MarketScorer) replaces category-level EntryFillScorer +
+          ResolutionScorer for ranking. Legacy scorers still supported as fallback.
+    - market_score from MarketScorer (per-market, not per-category)
+    - entry_fill_score from EntryFillScorer (backward-compat)
+    - resolution_score from ResolutionScorer (backward-compat)
     - category_weight from config
-    - duration weight (shorter markets score higher for near-term opportunities)
-    - liquidity_inefficiency weight (lower volume = higher score)
+    - duration weight
+    - liquidity_inefficiency weight
+
+    v1.1 CLOB pricing:
+    - YES token: use Gamma best_ask (unchanged)
+    - NO token: query real CLOB best_ask for candidates that pass market_score gate.
+      Synthetic (1-YES) used as fast pre-filter; CLOB used for final price.
     """
 
     def __init__(
@@ -76,11 +87,13 @@ class Screener:
         entry_fill_scorer: EntryFillScorer,
         resolution_scorer: ResolutionScorer,
         db_path: Optional[Path] = None,
+        market_scorer: Optional[MarketScorer] = None,
     ):
         self.config = config
         self.mc = config.mode_config
         self.ef_scorer = entry_fill_scorer
         self.res_scorer = resolution_scorer
+        self.market_scorer = market_scorer
         self._db_path = str(db_path or DATA_DIR / "positions.db")
 
     def scan(self) -> list[EntryCandidate]:
@@ -179,17 +192,27 @@ class Screener:
             _log("rejected_resolution_score", ef=ef_s, res=res_s)
             return []
 
+        # v1.1: market-level score gate
+        ms_obj: Optional[MarketScore] = None
+        if self.market_scorer is not None:
+            ms_obj = self.market_scorer.score(m)
+            if ms_obj.tier == "reject":
+                _log("rejected_market_score", ef=ef_s, res=res_s)
+                return []
+
         candidates: list[EntryCandidate] = []
 
         # Each token (YES, NO) is evaluated separately
         for i, token_id in enumerate(m.token_ids):
             outcome_name = m.outcome_names[i] if i < len(m.outcome_names) else f"outcome_{i}"
 
-            # Current price for this specific token from Gamma (rough; OrderManager checks book)
+            # Current price for this specific token.
+            # YES (i=0): use Gamma best_ask / last_trade_price.
+            # NO  (i>0): use synthetic (1-YES) as fast pre-filter.
+            #            If candidate passes price gate, refine with real CLOB ask.
             if i == 0:
                 price = m.best_ask if m.best_ask is not None else m.last_trade_price
             else:
-                # NO token price ≈ 1 - YES price
                 yes_price = m.best_ask if m.best_ask is not None else m.last_trade_price
                 price = (1.0 - yes_price) if yes_price is not None else None
 
@@ -207,7 +230,19 @@ class Screener:
                 _log("rejected_price_ge_0_99", token_id=token_id, price=price)
                 continue
 
-            total_score = self._compute_total_score(m, ef_s, res_s)
+            # v1.1: for NO token that passed the price gate, refine with real CLOB ask.
+            # This fixes Issue #44 Problem 2 for the final price used in ordering.
+            # We already know from validation (issue #45) that synthetic is accurate
+            # to within 0.003 on average, but we use real price for final candidates.
+            if i > 0:
+                try:
+                    ob = get_orderbook(token_id)
+                    if ob.best_ask is not None and ob.best_ask > 0:
+                        price = ob.best_ask
+                except Exception:
+                    pass  # fallback to synthetic — acceptable per issue #45 verdict
+
+            total_score = self._compute_total_score(m, ef_s, res_s, ms_obj)
 
             # Determine resting bid levels for this token
             entry_levels = [lvl for lvl in self.mc.entry_price_levels if lvl < price]
@@ -222,11 +257,13 @@ class Screener:
             _log("passed_to_order_manager", token_id=token_id, price=price,
                  ef=ef_s, res=res_s, candidate_id=candidate_id)
 
+            ms_info = f" {ms_obj.rationale}" if ms_obj else ""
             rationale = (
                 f"category={m.category} fill_score={ef_s:.3f} res_score={res_s:.3f} "
                 f"p_winner={res_score_obj.p_winner:.2f} p_20x={res_score_obj.p_20x:.3f} "
                 f"tail_ev={res_score_obj.tail_ev:.1f} "
                 f"vol=${m.volume_usdc:.0f} hrs_to_close={f'{m.hours_to_close:.1f}' if m.hours_to_close is not None else 'N/A'}"
+                f"{ms_info}"
             )
 
             candidates.append(EntryCandidate(
@@ -240,6 +277,7 @@ class Screener:
                 suggested_entry_levels=entry_levels,
                 candidate_id=candidate_id,
                 rationale=rationale,
+                market_score=ms_obj,
             ))
 
         return candidates
@@ -249,6 +287,7 @@ class Screener:
         m: MarketInfo,
         ef_score: float,
         res_score: float,
+        market_score: Optional[MarketScore] = None,
     ) -> float:
         """
         Weighted composite score for ranking candidates.
@@ -288,14 +327,23 @@ class Screener:
         cat_weight = self.config.category_weights.get(m.category or "", 1.0)
 
         if mode == "tail_ev":
-            # big_swan: resolution score dominates
-            score = (
-                0.40 * res_score
-                + 0.25 * ef_score
-                + 0.15 * liq_score
-                + 0.10 * duration_score
-                + 0.10 * min(cat_weight / 1.5, 1.0)
-            )
+            if market_score is not None:
+                # v1.1: market_score replaces category-level signals for big_swan_mode
+                score = (
+                    0.60 * market_score.total
+                    + 0.20 * liq_score
+                    + 0.10 * duration_score
+                    + 0.10 * min(cat_weight / 1.5, 1.0)
+                )
+            else:
+                # legacy: resolution score dominates
+                score = (
+                    0.40 * res_score
+                    + 0.25 * ef_score
+                    + 0.15 * liq_score
+                    + 0.10 * duration_score
+                    + 0.10 * min(cat_weight / 1.5, 1.0)
+                )
         else:
             # fast_tp / balanced: fill score more important (need the dip to happen)
             score = (
