@@ -34,6 +34,7 @@ from execution.position_monitor import PositionMonitor
 from strategy.risk_manager import RiskManager
 from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.screener import Screener
+from strategy.market_scorer import MarketScorer
 from utils.logger import setup_logger
 from utils import telegram
 
@@ -68,11 +69,17 @@ class BotRunner:
         self.res_scorer = ResolutionScorer(
             min_samples=self.config.scorer_min_samples,
         )
+        # v1.1: MarketScorer wired in; falls back gracefully if feature_mart_v1_1
+        # is not yet built (analogy table will be empty, scoring still works).
+        self.market_scorer = MarketScorer(
+            min_score=self.config.mode_config.min_market_score,
+        )
         self.screener = Screener(
             config=self.config,
             entry_fill_scorer=self.ef_scorer,
             resolution_scorer=self.res_scorer,
             db_path=POSITIONS_DB,
+            market_scorer=self.market_scorer,
         )
         self.clob = ClobClient(
             private_key=self.config.private_key,
@@ -225,6 +232,7 @@ class BotRunner:
                 # Refresh scorers from updated DB
                 await asyncio.to_thread(self.ef_scorer.refresh)
                 await asyncio.to_thread(self.res_scorer.refresh)
+                await asyncio.to_thread(self.market_scorer.refresh)
 
                 # Sync persisted cash_balance into RiskManager
                 if self.config.dry_run:

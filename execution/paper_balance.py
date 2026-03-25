@@ -33,7 +33,7 @@ from utils.logger import setup_logger
 
 logger = setup_logger("paper_balance")
 
-INITIAL_BALANCE_USDC = 10.0
+INITIAL_BALANCE_USDC = 100.0
 
 
 def init_tables(conn: sqlite3.Connection) -> None:

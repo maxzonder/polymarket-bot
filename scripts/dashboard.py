@@ -275,6 +275,26 @@ def load_data(db_path: Path) -> dict:
         d["filled_today"] = 0
         d["open_markets_detail"] = []
 
+    # ── Exposure summary (v1.1) ───────────────────────────────────────────────
+    if "exposure_v1_1" in tables:
+        rows = conn.execute(
+            "SELECT COUNT(*) n, SUM(total_stake_usdc) total, MAX(fill_count) max_fills "
+            "FROM exposure_v1_1"
+        ).fetchone()
+        d["exposure_markets"] = rows[0] or 0
+        d["exposure_total"]   = float(rows[1] or 0.0)
+        d["exposure_max_fills"] = rows[2] or 0
+        top = conn.execute(
+            "SELECT market_id, token_id, total_stake_usdc, fill_count, avg_entry_price "
+            "FROM exposure_v1_1 ORDER BY total_stake_usdc DESC LIMIT 5"
+        ).fetchall()
+        d["exposure_top"] = [dict(r) for r in top]
+    else:
+        d["exposure_markets"] = 0
+        d["exposure_total"]   = 0.0
+        d["exposure_max_fills"] = 0
+        d["exposure_top"] = []
+
     # ── Order-manager scan funnel — last hour (late rejections) ──────────────
     if "scan_log" in tables:
         rows = conn.execute(
@@ -506,6 +526,7 @@ SCREENER_FUNNEL_ORDER = [
     "rejected_missing_token_ids",
     "rejected_entry_fill_score",
     "rejected_resolution_score",
+    "rejected_market_score",
     "rejected_price_none",
     "rejected_price_le_zero",
     "rejected_price_above_entry_max",
@@ -520,6 +541,7 @@ SCREENER_SHORT = {
     "rejected_missing_token_ids":    "no_tokens",
     "rejected_entry_fill_score":     "ef_score",
     "rejected_resolution_score":     "res_score",
+    "rejected_market_score":         "mkt_score",
     "rejected_price_none":           "price_none",
     "rejected_price_le_zero":        "price_zero",
     "rejected_price_above_entry_max":"price_high",
@@ -534,6 +556,7 @@ SCREENER_COLOR = {
     "rejected_missing_token_ids":    C_WARN,
     "rejected_entry_fill_score":     C_DIM,
     "rejected_resolution_score":     C_DIM,
+    "rejected_market_score":         C_WARN,
     "rejected_price_none":           C_WARN,
     "rejected_price_le_zero":        C_WARN,
     "rejected_price_above_entry_max":C_DIM,
@@ -599,6 +622,39 @@ def draw_screener_funnel(win, d: dict, row: int) -> int:
         if screener.get(k, 0) > 0
     ]
     return _draw_funnel(win, row, "SCREENER FUNNEL", items, total)
+
+
+def draw_exposure(win, d: dict, row: int) -> int:
+    h, w = win.getmaxyx()
+    markets = d.get("exposure_markets", 0)
+    total   = d.get("exposure_total", 0.0)
+    top     = d.get("exposure_top", [])
+    if not top:
+        return row
+
+    _w(win, row, 2, "EXPOSURE (v1.1)", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    summary = f"  {markets} markets  ${total:.2f} deployed"
+    _w(win, row, 18, summary, curses.color_pair(C_DIM))
+    try:
+        win.hline(row, 18 + len(summary), "-", max(0, w - 20 - len(summary)), curses.color_pair(C_DIM))
+    except curses.error:
+        pass
+    row += 1
+
+    for r in top:
+        if row >= h - 2:
+            break
+        mid = r["market_id"][:8]
+        tok = r["token_id"][-6:]
+        stake = float(r["total_stake_usdc"])
+        fills = int(r["fill_count"])
+        avg   = float(r["avg_entry_price"])
+        _w(win, row, 4,
+           f"  mkt={mid}… tok=…{tok}  stake=${stake:.2f}  fills={fills}  avg_price=${avg:.4f}",
+           curses.color_pair(C_DIM))
+        row += 1
+
+    return row + 1
 
 
 def draw_scan_funnel(win, d: dict, row: int) -> int:
@@ -830,6 +886,7 @@ def run(stdscr, db_path: Path, interval: int) -> None:
             row = draw_performance(stdscr, d, row)
             row = draw_screener_funnel(stdscr, d, row)
             row = draw_scan_funnel(stdscr, d, row)
+            row = draw_exposure(stdscr, d, row)
             row = draw_open_markets(stdscr, d, row)
             draw_recent(stdscr, d, row)
             draw_footer(stdscr, interval)
