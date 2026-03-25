@@ -276,16 +276,29 @@ class BotConfig:
     # Minimum sample count to compute a reliable score
     scorer_min_samples: int = 5
 
-    # ── Category EV weights (updated by profit module) ────────────────────────
+    # ── Category EV weights (derived from feature_mart_v1_1 Dec–Feb 2026) ──────
+    # Formula: clip(tail_ev / crypto_tail_ev, 0.5, 1.5)
+    # tail_ev = swan_rate * win_rate * avg_x per category
+    # crypto used as base (1.0): swan_rate=1.16%, win_rate=14.5%, avg_x=37.8 → tail_ev=0.064
+    #
+    # category     swan%   win%  avg_x  tail_ev  weight
+    # geopolitics  14.98%  6.1%   31.7   0.288    1.5  (was 1.1, raw 4.5x)
+    # politics      2.89% 10.7%   30.9   0.096    1.5  (was 1.2, raw 1.5x)
+    # crypto        1.16% 14.5%   37.8   0.064    1.0  (base)
+    # weather       0.92% 17.9%   38.2   0.063    1.0  (was 0.8)
+    # sports        0.43% 23.8%   51.4   0.053    0.8  (was 1.3, raw 0.83x)
+    # tech          1.58%  9.9%   23.9   0.037    0.6  (was 0.9, raw 0.58x)
+    # entertainment 1.77%  4.3%   15.5   0.012    0.5  (was 0.7, raw 0.18x)
+    # esports       no data in Dec–Feb window     1.0  (was 1.5, unknown)
     category_weights: dict = field(default_factory=lambda: {
-        "sports": 1.3,
-        "esports": 1.5,
-        "politics": 1.2,
-        "crypto": 1.0,
-        "geopolitics": 1.1,
-        "weather": 0.8,
-        "entertainment": 0.7,
-        "tech": 0.9,
+        "geopolitics":  1.5,
+        "politics":     1.5,
+        "crypto":       1.0,
+        "weather":      1.0,
+        "esports":      1.0,
+        "sports":       0.8,
+        "tech":         0.6,
+        "entertainment":0.5,
     })
 
     @property
