@@ -328,7 +328,7 @@ class BotRunner:
                 f"Cash (free):   ${bal['free_balance']:.4f}",
                 f"Reserved (resting orders): ${bal['reserved_resting']:.4f}",
                 f"Deployed (open positions): ${bal['reserved_positions']:.4f}  [info]",
-                f"Resting orders: {stats['live_resting_bids']}",
+                f"Resting orders: {stats['live_resting_bids']} ({stats.get('resting_markets', '?')} markets)",
                 f"Open positions: {stats['open_positions']}",
                 f"Realized PnL:   ${pnl:+.4f}  ROI: {roi:+.1f}%",
                 f"Trading: {'🔴 BLOCKED' if blocked else '🟢 ACTIVE'}",

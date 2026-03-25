@@ -142,6 +142,10 @@ def load_data(db_path: Path) -> dict:
         "SELECT COUNT(*) FROM resting_orders WHERE status='live'"
     ).fetchone()[0] if "resting_orders" in tables else 0
 
+    d["resting_markets"] = conn.execute(
+        "SELECT COUNT(DISTINCT market_id) FROM resting_orders WHERE status='live'"
+    ).fetchone()[0] if "resting_orders" in tables else 0
+
     d["live_tp"] = conn.execute(
         "SELECT COUNT(*) FROM tp_orders WHERE status='live'"
     ).fetchone()[0] if "tp_orders" in tables else 0
@@ -473,7 +477,7 @@ def draw_balance_positions(win, d: dict, row: int) -> int:
 
     # Row 2: resting reserved  |  resting bids
     _w(win, row, 2,   f"  Resting rsrv   ${d['reserved_resting']:>9.4f}", curses.color_pair(C_WARN))
-    _w(win, row, mid, f"  Resting bids   {d['live_resting']:>5}   Reserved  ${d['reserved_resting']:>8.4f}", curses.color_pair(C_WARN))
+    _w(win, row, mid, f"  Resting bids   {d['live_resting']:>5} ({d.get('resting_markets', '?')}m)   Rsrv ${d['reserved_resting']:>8.4f}", curses.color_pair(C_WARN))
     row += 1
 
     # Row 3: cash balance  |  TP orders live

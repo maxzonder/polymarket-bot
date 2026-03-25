@@ -290,6 +290,9 @@ class PositionMonitor:
         live_resting = conn.execute(
             "SELECT COUNT(*) FROM resting_orders WHERE status='live'"
         ).fetchone()[0]
+        resting_markets = conn.execute(
+            "SELECT COUNT(DISTINCT market_id) FROM resting_orders WHERE status='live'"
+        ).fetchone()[0]
         live_tp = conn.execute(
             "SELECT COUNT(*) FROM tp_orders WHERE status='live'"
         ).fetchone()[0]
@@ -300,6 +303,7 @@ class PositionMonitor:
         return {
             "open_positions": open_pos,
             "live_resting_bids": live_resting,
+            "resting_markets": resting_markets,
             "live_tp_orders": live_tp,
             "resolved_positions": resolved[0],
             "total_realized_pnl": round(float(resolved[1]), 6),
