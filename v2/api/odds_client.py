@@ -34,10 +34,22 @@ def _api_key() -> Optional[str]:
 
 
 def decimal_to_implied(decimal_odds: float) -> float:
-    """Convert decimal odds to implied probability (no vig removal)."""
+    """Convert decimal odds to raw implied probability (before vig removal)."""
     if decimal_odds <= 0:
         return 0.0
     return 1.0 / decimal_odds
+
+
+def remove_vig(home_raw: float, away_raw: float) -> tuple[float, float]:
+    """Normalize raw implied probabilities to remove bookmaker vig.
+
+    Sum of raw implied probs > 1.0 (the vig margin). Dividing by the total
+    gives true probabilities that sum to 1.0.
+    """
+    total = home_raw + away_raw
+    if total <= 0:
+        return 0.5, 0.5
+    return home_raw / total, away_raw / total
 
 
 def american_to_implied(american_odds: int) -> float:
@@ -124,6 +136,10 @@ def fetch_odds(sport_key: str, fetch_ts: Optional[float] = None) -> list[dict]:
         if not home_odds or not away_odds:
             continue
 
+        home_raw = decimal_to_implied(home_odds)
+        away_raw = decimal_to_implied(away_odds)
+        home_implied, away_implied = remove_vig(home_raw, away_raw)
+
         games.append({
             "external_id":   g["id"],
             "sport_key":     sport_key,
@@ -131,8 +147,8 @@ def fetch_odds(sport_key: str, fetch_ts: Optional[float] = None) -> list[dict]:
             "commence_ts":   commence_ts,
             "home_team":     home,
             "away_team":     away,
-            "home_implied":  decimal_to_implied(home_odds),
-            "away_implied":  decimal_to_implied(away_odds),
+            "home_implied":  home_implied,
+            "away_implied":  away_implied,
             "bookmaker":     bm["key"],
             "fetch_ts":      fetch_ts,
         })

@@ -34,6 +34,11 @@ def _run_crypto() -> None:
     run_loop()
 
 
+def _run_sports() -> None:
+    from .observers.sports import run_loop
+    run_loop()
+
+
 def main(only: str | None = None) -> None:
     threads: list[threading.Thread] = []
 
@@ -46,6 +51,11 @@ def main(only: str | None = None) -> None:
         t = threading.Thread(target=_run_crypto, name="crypto", daemon=True)
         threads.append(t)
         logger.info("Starting crypto observer thread")
+
+    if only in (None, "sports"):
+        t = threading.Thread(target=_run_sports, name="sports", daemon=True)
+        threads.append(t)
+        logger.info("Starting sports observer thread")
 
     if not threads:
         logger.error(f"Unknown --only value: {only!r}")
@@ -78,9 +88,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="v2 observer scheduler")
     parser.add_argument(
         "--only",
-        choices=["negrisk", "crypto"],
+        choices=["negrisk", "crypto", "sports"],
         default=None,
-        help="Run only one observer (default: both)",
+        help="Run only one observer (default: all three)",
     )
     args = parser.parse_args()
     main(only=args.only)

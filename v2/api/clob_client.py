@@ -118,7 +118,7 @@ class ClobClient:
         self._clob = None   # lazy-init real client
 
         if paper_db_path is None:
-            from utils.paths import DATA_DIR
+            from ..utils.paths import DATA_DIR
             paper_db_path = DATA_DIR / "paper_trades.db"
         self.paper_db_path = paper_db_path
 

@@ -413,13 +413,23 @@ def run_once() -> dict:
             continue
         n_groups += 1
         title = event_titles.get(slug)
+        n_expected = len(ms)
 
         legs = _get_legs(ms)
         if not legs:
             continue
 
-        group_id = _upsert_group(conn, slug, title, len(ms))
+        group_id = _upsert_group(conn, slug, title, n_expected)
         _save_snapshot(conn, group_id, legs)
+
+        # Partial snapshot: fewer legs than markets → CLOB calls silently failed.
+        # sum_ask over a subset would show false dislocation — skip signal entirely.
+        if len(legs) < n_expected:
+            logger.warning(
+                f"Partial snapshot {slug[:40]}: {len(legs)}/{n_expected} legs fetched — "
+                "skipping dislocation check"
+            )
+            continue
 
         asks = [l.best_ask for l in legs if l.best_ask is not None]
         sum_ask = sum(asks) if len(asks) == len(legs) else None
