@@ -283,6 +283,30 @@ def load_data(db_path: Path) -> dict:
         d["filled_today"] = 0
         d["open_markets_detail"] = []
 
+    # ── Resting bids by market ────────────────────────────────────────────────
+    if "resting_orders" in tables:
+        resting_mkts = conn.execute("""
+            SELECT
+                r.market_id,
+                COUNT(*)               AS n_orders,
+                SUM(r.price * r.size)  AS reserved_usdc,
+                GROUP_CONCAT(CAST(ROUND(r.price,4) AS TEXT), '/') AS price_levels,
+                (SELECT question FROM screener_log
+                 WHERE market_id = r.market_id
+                 ORDER BY scanned_at DESC LIMIT 1) AS question,
+                (SELECT CAST(scanned_at + hours_to_close * 3600 AS INTEGER)
+                 FROM screener_log
+                 WHERE market_id = r.market_id AND hours_to_close IS NOT NULL
+                 ORDER BY scanned_at DESC LIMIT 1) AS end_ts
+            FROM resting_orders r
+            WHERE r.status = 'live'
+            GROUP BY r.market_id
+            ORDER BY reserved_usdc DESC
+        """).fetchall()
+        d["resting_markets_detail"] = [dict(r) for r in resting_mkts]
+    else:
+        d["resting_markets_detail"] = []
+
     # ── Exposure summary (v1.1) ───────────────────────────────────────────────
     if "exposure_v1_1" in tables:
         rows = conn.execute(
@@ -668,6 +692,43 @@ def draw_exposure(win, d: dict, row: int) -> int:
     return row + 1
 
 
+def draw_resting_markets(win, d: dict, row: int) -> int:
+    h, w = win.getmaxyx()
+    markets = d.get("resting_markets_detail", [])
+    if not markets:
+        return row
+
+    _w(win, row, 2, "RESTING BIDS BY MARKET", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    summary = f"  {len(markets)} markets"
+    _w(win, row, 25, summary, curses.color_pair(C_DIM))
+    try:
+        win.hline(row, 25 + len(summary), "-", max(0, w - 27 - len(summary)), curses.color_pair(C_DIM))
+    except curses.error:
+        pass
+    row += 1
+
+    for m in markets:
+        if row >= h - 2:
+            break
+        question = (m.get("question") or m["market_id"])
+        ttc_str  = f"[{_fmt_ttc(m.get('end_ts'))}]"
+        prices   = m.get("price_levels", "")
+        rsrv     = float(m.get("reserved_usdc") or 0)
+        n        = int(m.get("n_orders") or 0)
+
+        q_max = max(10, w - 4 - len(ttc_str) - 3)
+        _w(win, row, 2, "  " + question[:q_max], curses.color_pair(C_DIM))
+        _w(win, row, w - len(ttc_str) - 1, ttc_str, curses.color_pair(C_WARN))
+        row += 1
+
+        if row < h - 2:
+            detail = f"    {n} bids @ {prices}  rsrv=${rsrv:.2f}"
+            _w(win, row, 2, detail, curses.color_pair(C_DIM))
+            row += 1
+
+    return row + 1
+
+
 def draw_scan_funnel(win, d: dict, row: int) -> int:
     h, w = win.getmaxyx()
     _w(win, row, 2, "ORDER MGR FUNNEL", curses.color_pair(C_HEADER) | curses.A_BOLD)
@@ -896,6 +957,7 @@ def run(stdscr, db_path: Path, interval: int) -> None:
             row = draw_balance_positions(stdscr, d, row)
             row = draw_performance(stdscr, d, row)
             row = draw_open_markets(stdscr, d, row)
+            row = draw_resting_markets(stdscr, d, row)
             row = draw_screener_funnel(stdscr, d, row)
             row = draw_scan_funnel(stdscr, d, row)
             row = draw_exposure(stdscr, d, row)
