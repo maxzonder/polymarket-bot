@@ -23,8 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import subprocess
+import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from api.clob_client import ClobClient
@@ -109,6 +112,7 @@ class BotRunner:
             order_manager=self.order_manager,
         )
         self._last_report_ts: float = 0.0
+        self._last_pipeline_date: str = ""  # "YYYY-MM-DD" of last successful run
 
     async def run(self) -> None:
         """Start all loops concurrently. Runs until shutdown."""
@@ -133,6 +137,7 @@ class BotRunner:
             self._screener_loop(),
             self._monitor_loop(),
             self._cleanup_loop(),
+            self._daily_pipeline_loop(),
         )
 
     # ── Screener loop ─────────────────────────────────────────────────────────
@@ -252,6 +257,60 @@ class BotRunner:
                 if self._shutdown:
                     break
                 await asyncio.sleep(1)
+
+    # ── Daily pipeline loop ───────────────────────────────────────────────────
+
+    async def _daily_pipeline_loop(self) -> None:
+        """
+        Runs daily_pipeline.py once per day at ~04:00 UTC.
+        Fires when wall-clock hour == 4 and today hasn't been processed yet.
+        Steps: analyzer → feature_mart_v1_1 → feature_mart → ml_outcomes →
+               rejected_outcomes → recalibrate.
+        Non-blocking: runs in a subprocess so the bot loops are unaffected.
+        """
+        logger.info("Daily pipeline loop started | trigger=04:00 UTC daily")
+        _scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        _pipeline_script = _scripts_dir / "daily_pipeline.py"
+
+        while not self._shutdown:
+            await asyncio.sleep(60)   # check every minute
+            if self._shutdown:
+                break
+
+            now_dt = datetime.now(timezone.utc)
+            today_str = now_dt.strftime("%Y-%m-%d")
+
+            # Fire between 04:00 and 04:59 UTC, once per calendar day
+            if now_dt.hour != 4:
+                continue
+            if self._last_pipeline_date == today_str:
+                continue
+
+            logger.info(f"Daily pipeline: starting ({today_str})")
+            try:
+                result = await asyncio.to_thread(
+                    lambda: subprocess.run(
+                        [sys.executable, str(_pipeline_script)],
+                        capture_output=True,
+                        text=True,
+                        timeout=1800,   # 30 min hard limit
+                    )
+                )
+                if result.returncode == 0:
+                    logger.info(f"Daily pipeline: completed OK ({today_str})")
+                    self._last_pipeline_date = today_str
+                    # Refresh MarketScorer with newly built feature_mart_v1_1
+                    await asyncio.to_thread(self.market_scorer.refresh)
+                    logger.info("Daily pipeline: MarketScorer refreshed")
+                else:
+                    logger.error(
+                        f"Daily pipeline: FAILED (exit {result.returncode})\n"
+                        + "\n".join(result.stderr.strip().splitlines()[-20:])
+                    )
+            except subprocess.TimeoutExpired:
+                logger.error("Daily pipeline: TIMEOUT after 30 min")
+            except Exception as e:
+                logger.error(f"Daily pipeline: ERROR: {e}", exc_info=True)
 
     def _send_hourly_report(self) -> None:
         """Build and send a compact Telegram status snapshot."""
