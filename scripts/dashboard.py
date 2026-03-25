@@ -51,6 +51,7 @@ C_TITLE  = 6   # magenta    — main title
 OUTCOME_SHORT = {
     "placed":               "placed",
     "duplicate":            "dup",
+    "cluster_cap":          "cluster_cap",
     "depth_gate_dead_book": "dead_book",
     "depth_gate_thin":      "thin_book",
     "depth_gate_error":     "book_err",
@@ -63,6 +64,7 @@ OUTCOME_SHORT = {
 OUTCOME_COLOR = {
     "placed":               C_GOOD,
     "duplicate":            C_DIM,
+    "cluster_cap":          C_DIM,
     "depth_gate_dead_book": C_WARN,
     "depth_gate_thin":      C_WARN,
     "depth_gate_error":     C_WARN,
@@ -75,6 +77,7 @@ OUTCOME_COLOR = {
 OUTCOME_SYM = {
     "placed":               "✓",
     "duplicate":            "↩",
+    "cluster_cap":          "■",
     "depth_gate_dead_book": "✗",
     "depth_gate_thin":      "~",
     "depth_gate_error":     "!",
@@ -88,6 +91,7 @@ OUTCOME_SYM = {
 FUNNEL_ORDER = [
     "placed",
     "duplicate",
+    "cluster_cap",
     "depth_gate_dead_book",
     "depth_gate_thin",
     "depth_gate_error",
@@ -525,6 +529,7 @@ def draw_performance(win, d: dict, row: int) -> int:
 
 SCREENER_FUNNEL_ORDER = [
     "passed_to_order_manager",
+    "hours_to_close_null_default_applied",
     "rejected_hours_to_close_min",
     "rejected_hours_to_close_max",
     "rejected_missing_token_ids",
@@ -539,33 +544,35 @@ SCREENER_FUNNEL_ORDER = [
 ]
 
 SCREENER_SHORT = {
-    "passed_to_order_manager":       "-> order_mgr",
-    "rejected_hours_to_close_min":   "htc_min",
-    "rejected_hours_to_close_max":   "htc_max",
-    "rejected_missing_token_ids":    "no_tokens",
-    "rejected_entry_fill_score":     "ef_score",
-    "rejected_resolution_score":     "res_score",
-    "rejected_market_score":         "mkt_score",
-    "rejected_price_none":           "price_none",
-    "rejected_price_le_zero":        "price_zero",
-    "rejected_price_above_entry_max":"price_high",
-    "rejected_price_ge_0_99":        "price_99",
-    "rejected_no_entry_levels":      "no_levels",
+    "passed_to_order_manager":            "-> order_mgr",
+    "hours_to_close_null_default_applied":"htc_null_def",
+    "rejected_hours_to_close_min":        "htc_min",
+    "rejected_hours_to_close_max":        "htc_max",
+    "rejected_missing_token_ids":         "no_tokens",
+    "rejected_entry_fill_score":          "ef_score",
+    "rejected_resolution_score":          "res_score",
+    "rejected_market_score":              "mkt_score",
+    "rejected_price_none":                "price_none",
+    "rejected_price_le_zero":             "price_zero",
+    "rejected_price_above_entry_max":     "price_high",
+    "rejected_price_ge_0_99":             "price_99",
+    "rejected_no_entry_levels":           "no_levels",
 }
 
 SCREENER_COLOR = {
-    "passed_to_order_manager":       C_GOOD,
-    "rejected_hours_to_close_min":   C_DIM,
-    "rejected_hours_to_close_max":   C_DIM,
-    "rejected_missing_token_ids":    C_WARN,
-    "rejected_entry_fill_score":     C_DIM,
-    "rejected_resolution_score":     C_DIM,
-    "rejected_market_score":         C_WARN,
-    "rejected_price_none":           C_WARN,
-    "rejected_price_le_zero":        C_WARN,
-    "rejected_price_above_entry_max":C_DIM,
-    "rejected_price_ge_0_99":        C_DIM,
-    "rejected_no_entry_levels":      C_WARN,
+    "passed_to_order_manager":            C_GOOD,
+    "hours_to_close_null_default_applied":C_DIM,
+    "rejected_hours_to_close_min":        C_DIM,
+    "rejected_hours_to_close_max":        C_DIM,
+    "rejected_missing_token_ids":         C_WARN,
+    "rejected_entry_fill_score":          C_DIM,
+    "rejected_resolution_score":          C_DIM,
+    "rejected_market_score":              C_WARN,
+    "rejected_price_none":                C_WARN,
+    "rejected_price_le_zero":             C_WARN,
+    "rejected_price_above_entry_max":     C_DIM,
+    "rejected_price_ge_0_99":             C_DIM,
+    "rejected_no_entry_levels":           C_WARN,
 }
 
 
@@ -888,10 +895,10 @@ def run(stdscr, db_path: Path, interval: int) -> None:
             row = draw_activity(stdscr, d, row)
             row = draw_balance_positions(stdscr, d, row)
             row = draw_performance(stdscr, d, row)
+            row = draw_open_markets(stdscr, d, row)
             row = draw_screener_funnel(stdscr, d, row)
             row = draw_scan_funnel(stdscr, d, row)
             row = draw_exposure(stdscr, d, row)
-            row = draw_open_markets(stdscr, d, row)
             draw_recent(stdscr, d, row)
             draw_footer(stdscr, interval)
 
