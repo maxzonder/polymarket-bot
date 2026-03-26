@@ -205,12 +205,16 @@ class Screener:
         res_s = res_score_obj.score
 
         # Hard filter: scoring gates from mode config
-        if ef_s < self.mc.min_entry_fill_score:
-            _log("rejected_entry_fill_score", ef=ef_s, res=res_s)
-            return []
-        if res_s < self.mc.min_resolution_score:
-            _log("rejected_resolution_score", ef=ef_s, res=res_s)
-            return []
+        # v1.1 FIX: If market_scorer is active, bypass category-level ef/res hard gates.
+        # market_scorer acts as the unified quality gate. Category-wide gates kill 
+        # entire high-opportunity sectors (like crypto) unfairly.
+        if self.market_scorer is None:
+            if ef_s < self.mc.min_entry_fill_score:
+                _log("rejected_entry_fill_score", ef=ef_s, res=res_s)
+                return []
+            if res_s < self.mc.min_resolution_score:
+                _log("rejected_resolution_score", ef=ef_s, res=res_s)
+                return []
 
         candidates: list[EntryCandidate] = []
 
@@ -317,9 +321,8 @@ class Screener:
         # For big_swan: longer duration = more time for event to materialise
         hours = m.hours_to_close or 24.0
         if mode == "tail_ev":
-            # big_swan: prefer markets with 12–168h remaining (1 week sweet spot)
-            duration_score = 1.0 - abs(hours - 72) / max(hours, 72)
-            duration_score = max(0.0, min(1.0, duration_score))
+            # big_swan: issue #53 shows short is fine. Flat 1.0 up to 168h, then decay.
+            duration_score = 1.0 if hours <= 168.0 else max(0.5, 168.0 / hours)
         else:
             # fast_tp / balanced: prefer markets closing within 48h
             duration_score = max(0.0, 1.0 - hours / 48.0)
