@@ -288,7 +288,9 @@ class OrderManager:
         """
         results: list[OrderResult] = []
         now = int(time.time())
-        expires_at = now + self.config.resting_order_ttl
+        # expires_at deprecated: resting bids are GTC (commit 7855cac).
+        # Kept in DB schema for historical rows but no longer used as cancellation trigger.
+        expires_at = 0
 
         conn = self._conn()
         active_prices = self._get_active_resting_prices(conn, candidate.token_id)
@@ -318,6 +320,7 @@ class OrderManager:
                 entry_price=price_level,
                 resolution_score=dummy_res,
                 open_positions=self._count_open_positions(conn),
+                market_score=candidate.market_score,
             )
             if sized is None:
                 logger.debug(f"Risk rejected position: {candidate.token_id} @ ${price_level}")
@@ -496,6 +499,7 @@ class OrderManager:
             entry_price=execution_price,
             resolution_score=dummy_res,
             open_positions=self._count_open_positions(conn),
+            market_score=candidate.market_score,
         )
         if sized is None:
             logger.debug(f"Risk rejected scanner entry: {candidate.token_id[:16]} @ ${execution_price:.5f}")
@@ -531,7 +535,7 @@ class OrderManager:
                 market_id=candidate.market_info.market_id,
                 price=execution_price,
                 size=sized.token_quantity,
-                expires_at=now + self.config.resting_order_ttl,
+                expires_at=0,  # GTC — no TTL (commit 7855cac)
                 mode=self.mc.name,
                 candidate_id=candidate.candidate_id or None,
                 outcome_name=candidate.outcome_name or "",
@@ -624,12 +628,6 @@ class OrderManager:
         now = int(time.time())
         stake_usdc = fill_price * fill_quantity
 
-        from strategy.scorer import ResolutionScore
-        dummy_res = ResolutionScore(
-            category=None, sample_count=0, p_winner=0.1, avg_real_x=5.0,
-            p_20x=0.05, p_50x=0.02, p_100x=0.01, avg_resolution_x=10.0,
-            tail_ev=1.0, score=0.1,
-        )
         sized = SizedPosition(
             token_id=token_id,
             entry_price=fill_price,
