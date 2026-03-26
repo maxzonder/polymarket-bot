@@ -169,7 +169,7 @@ class MarketScorer:
             comment_count=market.comment_count,
             hours_to_close=market.hours_to_close,
             category=market.category,
-            neg_risk=False,   # MarketInfo doesn't expose neg_risk — use fallback
+            neg_risk=market.neg_risk,
         )
 
     def score_from_db(
@@ -228,11 +228,16 @@ class MarketScorer:
         cat = (category or "null").lower()
         vbk = _vol_bucket(volume)
         # Try exact match, then category-only, then global fallback
-        analogy_score = (
-            self._analogy.get((cat, vbk))
-            or self._analogy.get(("null", vbk))
-            or 0.05  # global floor: rare but possible
-        )
+        # Explicit None checks: a stored 0.0 (proven zero swan_rate) must not
+        # fall through to the floor. Python treats 0.0 as falsy in `or` chains.
+        _analogy_exact = self._analogy.get((cat, vbk))
+        _analogy_null  = self._analogy.get(("null", vbk))
+        if _analogy_exact is not None:
+            analogy_score = _analogy_exact
+        elif _analogy_null is not None:
+            analogy_score = _analogy_null
+        else:
+            analogy_score = 0.05  # global floor: rare but possible
 
         # ── context_score: neg_risk flag ──────────────────────────────────────
         # neg_risk=1 shows 4.5x higher swan_rate (2.7% vs 0.6%) from cohort analysis.
