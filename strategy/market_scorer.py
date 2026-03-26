@@ -211,18 +211,11 @@ class MarketScorer:
         niche_score = 1.0 / (1.0 + math.log1p(max(comment_count, 0)))
 
         # ── time_score: duration proxy via hours_to_close ────────────────────
-        # We use hours_to_close as a forward-looking duration proxy at screener time.
-        # Prefer markets with 168h–8760h remaining (1 week to 1 year).
-        # Markets < 24h are penalised (not enough time for event to materialise).
+        # Issue #53 shows <1d and 1-3d markets have ~16% win rate (equal to 3-7d).
+        # We must NOT penalize short markets down to 0.1. Base score 0.5 for anything short,
+        # scaling up gently to 1.0 at 720h.
         hours = hours_to_close or 0.0
-        if hours < 24:
-            time_score = 0.1
-        elif hours < 168:
-            # 1–7 days: linear ramp
-            time_score = 0.1 + 0.5 * (hours - 24) / 144
-        else:
-            # 7 days to 1 year: saturates at 1.0 by 720h (1 month)
-            time_score = min(0.6 + 0.4 * (hours - 168) / (720 - 168), 1.0)
+        time_score = min(0.5 + 0.5 * (hours / 720.0), 1.0)
 
         # ── analogy_score: historical good_swan_rate ──────────────────────────
         cat = (category or "null").lower()
