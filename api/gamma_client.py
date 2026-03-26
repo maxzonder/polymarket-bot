@@ -216,7 +216,18 @@ def fetch_open_markets(
     limit_pages: int = 50,
 ) -> list[MarketInfo]:
     """
-    Returns all active markets where best_ask (or last_trade_price) <= price_max.
+    Returns all active markets where at least one token is in the entry zone.
+
+    Entry zone: token price <= price_max.
+    Gamma's bestAsk is the YES-token price.  The NO-token price is synthetic:
+    no_price = 1 - yes_price.
+
+    A market passes if:
+      • YES price <= price_max  (YES is a swan candidate), OR
+      • NO  price <= price_max  (NO is a swan candidate, i.e. YES >= 1 - price_max)
+
+    Previously only the first condition was checked, silently dropping half the
+    universe — every high-probability YES market whose NO token is in the floor zone.
 
     Paginates through Gamma API with volume filter applied server-side.
     Client-side filter on price since Gamma API doesn't filter by price.
@@ -249,9 +260,16 @@ def fetch_open_markets(
             m = _parse_market(raw, now_ts)
             if m is None:
                 continue
-            # price filter — use best_ask, fallback to last_trade_price
-            price = m.best_ask if m.best_ask is not None else m.last_trade_price
-            if price is not None and price <= price_max:
+            # price filter: include market if AT LEAST ONE token is in the entry zone.
+            # YES price  = best_ask (Gamma market-level field).
+            # NO  price  = 1 - YES (synthetic; CLOB real price fetched later per-token).
+            # Condition: yes_price <= price_max  OR  (1 - yes_price) <= price_max
+            #   ↳ equivalent to: yes_price <= price_max  OR  yes_price >= 1 - price_max
+            yes_price = m.best_ask if m.best_ask is not None else m.last_trade_price
+            if yes_price is None:
+                continue
+            no_price = 1.0 - yes_price
+            if yes_price <= price_max or no_price <= price_max:
                 markets.append(m)
 
         if len(page) < PAGE_SIZE:
