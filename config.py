@@ -175,10 +175,10 @@ BIG_SWAN_MODE = ModeConfig(
     min_resolution_score=0.15,
     min_real_x_historical=10.0,
     stake_usdc=0.05,            # fallback if no tier matches
-    max_open_positions=100,
-    max_resting_markets=1000,
-    max_resting_per_cluster=3,
-    max_capital_deployed_pct=0.50,
+    max_open_positions=500,
+    max_resting_markets=5000,
+    max_resting_per_cluster=10,
+    max_capital_deployed_pct=0.99,
     min_hours_to_close=1.0,
     max_hours_to_close=720.0,   # raised from 120h: Stage 0 shows >6mo = 10.6% swan_rate
     hours_to_close_null_default=48.0,  # safe fallback for markets without deadline info

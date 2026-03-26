@@ -33,8 +33,9 @@ logger = setup_logger("screener")
 _SCREENER_LOG_INSERT = """
     INSERT INTO screener_log
         (scanned_at, market_id, token_id, question, category,
-         current_price, hours_to_close, volume_usdc, ef_score, res_score, outcome, candidate_id)
-    VALUES (?,?,?,?,?, ?,?,?,?,?,?,?)
+         current_price, hours_to_close, volume_usdc, ef_score, res_score, outcome, candidate_id,
+         market_score)
+    VALUES (?,?,?,?,?, ?,?,?,?,?,?,?, ?)
 """
 
 
@@ -148,7 +149,7 @@ class Screener:
         q = (m.question or "")[:120]
 
         def _log(outcome: str, token_id=None, price=None, ef=None, res=None,
-                 candidate_id=None) -> None:
+                 candidate_id=None, ms=None) -> None:
             log_entries.append((
                 now,
                 m.market_id,
@@ -162,6 +163,7 @@ class Screener:
                 res,
                 outcome,
                 candidate_id,
+                ms,
             ))
 
         # Hard filter: hours to close.
@@ -196,7 +198,7 @@ class Screener:
         if self.market_scorer is not None:
             ms_obj = self.market_scorer.score(m)
             if ms_obj.tier == "reject":
-                _log("rejected_market_score")
+                _log("rejected_market_score", ms=ms_obj.total)
                 return []
 
         ef_score_obj  = self.ef_scorer.get(m.category)
@@ -269,9 +271,10 @@ class Screener:
                      ef=ef_s, res=res_s)
                 continue
 
+            ms_score = ms_obj.total if ms_obj else None
             candidate_id = str(uuid.uuid4())
             _log("passed_to_order_manager", token_id=token_id, price=price,
-                 ef=ef_s, res=res_s, candidate_id=candidate_id)
+                 ef=ef_s, res=res_s, candidate_id=candidate_id, ms=ms_score)
 
             ms_info = f" {ms_obj.rationale}" if ms_obj else ""
             rationale = (

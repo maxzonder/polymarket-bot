@@ -131,7 +131,8 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             ef_score       REAL,
             res_score      REAL,
             outcome        TEXT    NOT NULL,
-            candidate_id   TEXT
+            candidate_id   TEXT,
+            market_score   REAL
         );
         CREATE INDEX IF NOT EXISTS idx_screener_at        ON screener_log(scanned_at);
         CREATE INDEX IF NOT EXISTS idx_screener_outcome   ON screener_log(outcome);
@@ -174,6 +175,14 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_ml_got_fill  ON ml_outcomes(got_fill);
     """)
     pb.init_tables(conn)
+    # Migrations for existing DBs
+    for migration in [
+        "ALTER TABLE screener_log ADD COLUMN market_score REAL",
+    ]:
+        try:
+            conn.execute(migration)
+        except Exception:
+            pass  # column already exists
     conn.commit()
 
 
@@ -703,13 +712,8 @@ class OrderManager:
             f"entry=${fill_price:.5f} qty={fill_quantity:.2f} stake=${stake_usdc:.4f} "
             f"moonbag={moonbag_qty:.2f}"
         )
-        send_message(
-            f"✅ <b>Entry filled</b>\n"
-            f"Token: <code>{token_id[:24]}</code>\n"
-            f"Price: ${fill_price:.5f}   Qty: {fill_quantity:.2f}\n"
-            f"Stake: ${stake_usdc:.4f}   Moonbag: {moonbag_qty:.2f}\n"
-            f"Position: <code>{position_id[:8]}</code>"
-        )
+        # Entry-fill alert disabled for data-collection mode (issue #57).
+        # Only hourly summary is sent — see main_loop._hourly_report_loop.
 
     def on_tp_filled(self, order_id: str, fill_price: float, fill_quantity: float) -> None:
         """Called when a TP SELL order gets filled. Accumulates partial PnL into position."""
@@ -811,11 +815,8 @@ class OrderManager:
                 f"winner={is_winner} moonbag_pnl=${moonbag_pnl:.4f} "
                 f"tp_residual_pnl=${tp_residual_pnl:.4f}"
             )
-            send_message(
-                f"{outcome_icon} <b>Market resolved</b> — {'WIN' if is_winner else 'LOSS'}\n"
-                f"Token: <code>{token_id[:24]}</code>\n"
-                f"Total PnL: ${total_pnl:+.4f}"
-            )
+            # Resolution alert disabled for data-collection mode (issue #57).
+            # Only hourly summary is sent — see main_loop._hourly_report_loop.
 
         conn.commit()
         conn.close()

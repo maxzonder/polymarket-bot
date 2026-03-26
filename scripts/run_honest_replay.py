@@ -208,15 +208,6 @@ def simulate_token(
     is_winner   = bool(row.get("is_winner", False))
     category    = row.get("category") or ""
 
-    # ── Static screener: hours_to_close check ─────────────────────────────────
-    # Use end_date vs start_ts as proxy for duration seen by bot.
-    # Real bot also checks per scan tick; we use discovery-time estimate.
-    hours_at_start = (end_date - start_ts) / 3600.0
-    if hours_at_start < mc.min_hours_to_close:
-        return {"status": "rejected_hours_min", "token_id": token_id, "market_id": market_id}
-    if hours_at_start > mc.max_hours_to_close:
-        return {"status": "rejected_hours_max", "token_id": token_id, "market_id": market_id}
-
     # ── Load trades ────────────────────────────────────────────────────────────
     fpath = _find_latest_trade_file(market_id, token_id)
     if fpath is None:
@@ -233,6 +224,16 @@ def simulate_token(
     # Skip if market already closed before simulation window
     if end_date <= start_ts:
         return {"status": "rejected_closed_before_start", "token_id": token_id, "market_id": market_id}
+
+    # ── Hours-to-close check at DISCOVERY time (not at start_ts) ─────────────
+    # Critical: a market appearing on Jan 15 with end_date Feb 14 has 30 days
+    # at discovery — valid for max_hours_to_close=720h. Using start_ts (Dec 1)
+    # would compute 75 days and wrongly reject it.
+    hours_at_discovery = (end_date - discovery_ts) / 3600.0
+    if hours_at_discovery < mc.min_hours_to_close:
+        return {"status": "rejected_hours_min", "token_id": token_id, "market_id": market_id}
+    if hours_at_discovery > mc.max_hours_to_close:
+        return {"status": "rejected_hours_max", "token_id": token_id, "market_id": market_id}
 
     # ── Current price at discovery time ───────────────────────────────────────
     current_price = _price_at(trades, discovery_ts)
@@ -487,6 +488,16 @@ def run_honest_replay(
     paper_db     = output_dir / "paper_trades.db"
 
     om_module.POSITIONS_DB = positions_db
+
+    # Suppress verbose loggers and Telegram during replay.
+    import logging
+    logging.getLogger("order_manager").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.CRITICAL)
+    # Patch send_message in every module that has already imported it by name.
+    import utils.telegram as _tg
+    _noop = lambda *a, **kw: None
+    _tg.send_message = _noop
+    om_module.send_message = _noop  # order_manager imports send_message at module level
 
     from execution.order_manager import OrderManager
 
