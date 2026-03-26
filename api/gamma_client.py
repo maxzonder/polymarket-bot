@@ -37,6 +37,7 @@ class MarketInfo:
     fees_enabled: bool
     end_date_ts: Optional[int]   # unix timestamp
     hours_to_close: Optional[float]
+    neg_risk: bool = False         # negRisk flag from Gamma (4.5x higher swan_rate)
 
 
 def _parse_float(val) -> Optional[float]:
@@ -186,6 +187,7 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
             pass
 
     fees_enabled = bool(raw.get("feesEnabled"))
+    neg_risk = bool(raw.get("negRisk", False))
 
     return MarketInfo(
         market_id=str(market_id),
@@ -203,6 +205,7 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
         fees_enabled=fees_enabled,
         end_date_ts=end_date_ts,
         hours_to_close=hours_to_close,
+        neg_risk=neg_risk,
     )
 
 
