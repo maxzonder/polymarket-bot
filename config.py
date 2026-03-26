@@ -262,9 +262,11 @@ class BotConfig:
     monitor_interval: int = 90       # 1.5 minutes
     resting_cleanup_interval: int = 3600  # 1 hour
 
-    # ── Resting order TTL ────────────────────────────────────────────────────
-    # cancel unfilled resting bids older than this (seconds)
-    resting_order_ttl: int = 86400   # 24 hours
+    # ── Resting order TTL (DEPRECATED — commit 7855cac) ─────────────────────
+    # No longer used as cancellation trigger. Resting bids are GTC and stay
+    # live until the market closes or disappears from Gamma.
+    # Field kept for backward-compat with DB schema (expires_at column).
+    resting_order_ttl: int = 0       # deprecated, was 86400
 
     # ── Screener hard limits ──────────────────────────────────────────────────
     min_volume_usdc: float = 50.0
