@@ -828,54 +828,48 @@ class OrderManager:
 
     def cancel_stale_orders(self) -> int:
         """
-        Cancel resting BUY orders that are:
-        1. Older than resting_order_ttl (config)
-        2. Or their market has resolved/closed
+        Cancel resting BUY orders whose market has resolved or closed.
+        No time-based TTL — resting bids are GTC and stay live until:
+          1. Market is gone from Gamma (market is None)
+          2. Market has closed (hours_to_close <= 0)
 
         Returns count of cancelled orders.
         """
-        now = int(time.time())
         conn = self._conn()
 
-        # Expired by TTL
-        expired = conn.execute(
-            "SELECT order_id, token_id, market_id FROM resting_orders "
-            "WHERE status='live' AND expires_at < ?",
-            (now,),
-        ).fetchall()
-
-        cancelled = 0
-        for row in expired:
-            if self.clob.cancel_order(row["order_id"]):
-                conn.execute(
-                    "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
-                    (row["order_id"],),
-                )
-                cancelled += 1
-                logger.info(f"Cancelled stale resting bid: {row['order_id'][:8]} token={row['token_id'][:16]}")
-
-        # Check market status for live orders
-        live_orders = conn.execute(
+        live_markets = conn.execute(
             "SELECT DISTINCT market_id FROM resting_orders WHERE status='live'"
         ).fetchall()
 
-        for row in live_orders:
+        cancelled = 0
+        for row in live_markets:
             market_id = row["market_id"]
             try:
                 market = fetch_market(market_id)
-                if market is None:
-                    # Market no longer exists / closed
-                    orders_to_cancel = conn.execute(
-                        "SELECT order_id FROM resting_orders WHERE market_id=? AND status='live'",
-                        (market_id,),
-                    ).fetchall()
-                    for o in orders_to_cancel:
-                        if self.clob.cancel_order(o["order_id"]):
-                            conn.execute(
-                                "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
-                                (o["order_id"],),
-                            )
-                            cancelled += 1
+                closed = (
+                    market is None
+                    or (market.hours_to_close is not None and market.hours_to_close <= 0)
+                )
+                if not closed:
+                    continue
+
+                reason = "vanished" if market is None else "closed"
+                orders_to_cancel = conn.execute(
+                    "SELECT order_id, token_id FROM resting_orders "
+                    "WHERE market_id=? AND status='live'",
+                    (market_id,),
+                ).fetchall()
+                for o in orders_to_cancel:
+                    if self.clob.cancel_order(o["order_id"]):
+                        conn.execute(
+                            "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
+                            (o["order_id"],),
+                        )
+                        cancelled += 1
+                        logger.info(
+                            f"Cancelled resting bid ({reason}): "
+                            f"{o['order_id'][:8]} token={o['token_id'][:16]}"
+                        )
             except Exception:
                 pass
 
