@@ -63,7 +63,6 @@ def _market_json_path(day_str: str, market_id: str) -> str:
 
 def _fetch_markets_for_date(day: date) -> list[dict]:
     day_str  = day.isoformat()
-    next_day = (day + timedelta(days=1)).isoformat()
     markets: list[dict] = []
     offset = 0
 
@@ -72,7 +71,7 @@ def _fetch_markets_for_date(day: date) -> list[dict]:
             "closed": "true",
             "include_tag": "true",
             "end_date_min": f"{day_str}T00:00:00Z",
-            "end_date_max": f"{next_day}T00:00:00Z",
+            "end_date_max": f"{day_str}T23:59:59Z",
             "volume_num_min": 50,
             "limit": MARKETS_PAGE_SIZE,
             "offset": offset,
