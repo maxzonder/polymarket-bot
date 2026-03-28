@@ -95,10 +95,24 @@ python scripts/swan_analyzer.py --date-from 2026-03-01 --date-to 2026-03-28
 
 ---
 
+## Глобальный порог — SWAN_ENTRY_THRESHOLD
+
+Порог `--entry-threshold` вынесен в `config.py` как:
+
+```python
+SWAN_ENTRY_THRESHOLD = max(max(m.entry_price_levels) for m in MODES.values())
+```
+
+Автоматически равен максимальному уровню входа среди всех режимов бота. При добавлении нового режима с более высокими уровнями — порог обновится автоматически.
+
+`check_swan_threshold(threshold)` — возвращает список предупреждений если порог не покрывает уровни какого-либо режима. Вызывается при старте `swan_analyzer.py`.
+
+---
+
 ## Текущее состояние
 
-После запуска `--recompute --date-from 2025-08-01 --date-to 2026-03-15` (Mar 28 2026):
-- **3,943 событий** в `swans_v2`
-- avg real_x = 48.66x, max = 1000x
-- winners = 629 (16%)
-- avg entry liquidity = $157.89
+После запуска `--recompute --date-from 2025-08-01 --date-to 2026-03-15` с `threshold=0.20` (Mar 28 2026):
+- **32,980 событий** в `swans_v2` (было 3,943 при threshold=0.02)
+- avg real_x = 14.45x, max = 1000x
+- winners = 24,424 (74%)
+- avg entry liquidity = $496.51
