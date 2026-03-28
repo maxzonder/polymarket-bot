@@ -38,6 +38,31 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 
 **Пропуск:** если файл уже существует на диске — рынок не перекачивается.
 
+### Поля market JSON (полный список от API)
+
+Сохраняется весь JSON as-is. Поля используемые парсером выделены, остальные хранятся в файле но в БД не попадают.
+
+| Поле | Используется |
+|------|-------------|
+| `id`, `question`, `description`, `slug` | ✅ парсер |
+| `conditionId` | ✅ trades (для запроса трейдов) |
+| `startDate`, `endDate`, `closedTime` | ✅ парсер |
+| `volumeNum` / `volume`, `liquidity` | ✅ парсер |
+| `volume1wk` / `volume1wkClob` | ✅ парсер |
+| `clobTokenIds`, `outcomes`, `outcomePrices` | ✅ парсер (tokens + is_winner) |
+| `resolutionSource`, `feesEnabled`, `negRisk` | ✅ парсер |
+| `restricted`, `groupItemTitle`, `cyom` | ✅ парсер |
+| `events[0]` (title, slug, tags, ticker, commentCount) | ✅ парсер |
+| `lastTradePrice`, `bestAsk` | ❌ не используется (CLOB snapshot, устаревает) |
+| `volume1mo`, `volume1yr`, `volumeClob` | ❌ не используется |
+| `oneDayPriceChange`, `oneWeekPriceChange` и др. | ❌ не используется |
+| `image`, `icon`, `tags` (корневые) | ❌ не используется |
+| `active`, `closed`, `archived`, `featured`, `new` | ❌ не используется |
+| `marketMakerAddress`, `questionID`, `resolvedBy` | ❌ не используется |
+| `umaEndDate`, `umaBond`, `umaReward`, `umaResolutionStatus` | ❌ не используется (UMA oracle) |
+| `spread`, `bestAsk`, `acceptingOrders` | ❌ не используется |
+| `rfqEnabled`, `holdingRewardsEnabled`, `feeType` | ❌ не используется |
+
 ---
 
 ## Шаг 2 — Скачивание трейдов
@@ -51,13 +76,30 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 - Пагинация по 1000 трейдов, max offset 3000
 - Sleep 100ms между рынками
 
-Из каждого трейда сохраняет: `side`, `size`, `price`, `timestamp`. Разбивает по токенам (`asset`).
+Трейды разбиваются по токенам (`asset`) — для бинарного рынка два файла: YES-токен и NO-токен.
 
 **Результат:** JSON-файлы в `database/{yyyy-mm-dd}/{market_id}_trades/{token_id}.json`
 
 Каждый файл — массив трейдов для одного токена за всё время жизни рынка.
 
 **Пропуск:** если папка `{market_id}_trades/` существует и непустая — рынок не перекачивается.
+
+### Поля trade JSON (полный список от API)
+
+| Поле | Сохраняется | Описание |
+|------|-------------|----------|
+| `side` | ✅ | BUY или SELL |
+| `size` | ✅ | объём в токенах |
+| `price` | ✅ | цена сделки |
+| `timestamp` | ✅ | unix timestamp |
+| `asset` | используется как имя файла | token_id (не пишется внутрь файла) |
+| `outcome` | ❌ | название исхода (YES/NO/Lions) — есть в market JSON |
+| `outcomeIndex` | ❌ | индекс токена — определяется из имени файла |
+| `conditionId` | ❌ | id рынка — известен из структуры папок |
+| `title`, `slug`, `eventSlug`, `icon` | ❌ | метаданные рынка — есть в market JSON |
+| `proxyWallet` | ❌ | кошелёк трейдера |
+| `name`, `pseudonym`, `bio`, `profileImage` | ❌ | профиль трейдера |
+| `transactionHash` | ❌ | хэш on-chain транзакции |
 
 ---
 
