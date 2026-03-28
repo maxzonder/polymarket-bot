@@ -112,11 +112,8 @@ def _collect_markets_day(day: date):
         return
 
     total = len(markets)
-    saved = errors = 0
-    logger.info(f"[markets][{day_str}] Got {total}, saving JSONs...")
+    saved = skipped = errors = 0
     t_save = time.monotonic()
-
-    skipped = 0
     for i, market in enumerate(markets, 1):
         market_id = market.get("id")
         if not market_id:
@@ -137,7 +134,10 @@ def _collect_markets_day(day: date):
             eta = int((total - i) / rate) if rate > 0 else 0
             logger.info(f"[markets][{day_str}] {i}/{total} saved — {rate:.0f}/s, ETA ~{eta}s")
 
-    logger.info(f"[markets][{day_str}] DONE in {int(time.monotonic()-t0)}s | saved={saved} skipped={skipped} errors={errors}")
+    if saved:
+        logger.info(f"[markets][{day_str}] Got {total} — saved={saved} skipped={skipped} errors={errors} ({int(time.monotonic()-t0)}s)")
+    else:
+        logger.info(f"[markets][{day_str}] Got {total} — all skipped")
 
 
 def collect_markets(start: date, end: date):
