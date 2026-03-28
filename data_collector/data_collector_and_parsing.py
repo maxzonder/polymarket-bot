@@ -597,14 +597,11 @@ def _parse_day(conn: sqlite3.Connection, day_str: str):
     total = len(market_files)
     logger.info(f"[parse][{day_str}] Found {total} market JSONs")
 
-    ok = skipped = errors = 0
+    ok = errors = 0
     t0 = time.monotonic()
 
     for i, fname in enumerate(market_files, 1):
         market_id = fname[:-5]
-        if conn.execute("SELECT 1 FROM markets WHERE id=?", (market_id,)).fetchone():
-            skipped += 1
-            continue
 
         fpath = os.path.join(day_dir, fname)
         try:
@@ -636,9 +633,9 @@ def _parse_day(conn: sqlite3.Connection, day_str: str):
             elapsed = time.monotonic() - t0
             rate = i / elapsed if elapsed > 0 else 0
             eta = int((total - i) / rate) if rate > 0 else 0
-            logger.info(f"[parse][{day_str}] {i}/{total} — {rate:.0f}/s ETA ~{eta}s | ok={ok} skip={skipped} err={errors}")
+            logger.info(f"[parse][{day_str}] {i}/{total} — {rate:.0f}/s ETA ~{eta}s | ok={ok} err={errors}")
 
-    logger.info(f"[parse][{day_str}] DONE in {int(time.monotonic()-t0)}s | ok={ok} skipped={skipped} errors={errors}")
+    logger.info(f"[parse][{day_str}] DONE in {int(time.monotonic()-t0)}s | ok={ok} errors={errors}")
 
 
 def parse_markets(start: date, end: date):
