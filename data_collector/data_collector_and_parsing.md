@@ -158,5 +158,3 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 | `is_winner` | INTEGER (0/1) | `outcomePrices[i] >= 0.99` |
 
 Запись: UPSERT по `token_id`.
-
-Запись: всегда UPSERT — один и тот же `market_id` может лежать в нескольких датовых папках (Polymarket меняет `end_date`), поэтому пропуска нет: каждый файл парсится, при конфликте поля обновляются последним значением.
