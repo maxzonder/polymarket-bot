@@ -30,17 +30,15 @@ from typing import Optional
 import requests
 
 if __package__:
-    from data_collector import state_db
     from utils.logger import setup_logger
 else:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from data_collector import state_db
     from utils.logger import setup_logger
 
 from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
 
 ensure_runtime_dirs()
-logger = setup_logger("ingest")
+logger = setup_logger("data_collector_and_parsing")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -118,17 +116,19 @@ def _collect_markets_day(day: date):
     logger.info(f"[markets][{day_str}] Got {total}, saving JSONs...")
     t_save = time.monotonic()
 
+    skipped = 0
     for i, market in enumerate(markets, 1):
         market_id = market.get("id")
         if not market_id:
             continue
+        if os.path.exists(_market_json_path(day_str, str(market_id))):
+            skipped += 1
+            continue
         try:
             _save_market_json(day_str, market)
-            state_db.mark_downloaded(day_str, str(market_id))
             saved += 1
         except Exception as e:
             logger.warning(f"[markets][{day_str}] {market_id}: save failed — {e}")
-            state_db.mark_error(day_str, str(market_id), str(e))
             errors += 1
 
         if i % PROGRESS_STEP == 0:
@@ -137,7 +137,7 @@ def _collect_markets_day(day: date):
             eta = int((total - i) / rate) if rate > 0 else 0
             logger.info(f"[markets][{day_str}] {i}/{total} saved — {rate:.0f}/s, ETA ~{eta}s")
 
-    logger.info(f"[markets][{day_str}] DONE in {int(time.monotonic()-t0)}s | saved={saved} errors={errors}")
+    logger.info(f"[markets][{day_str}] DONE in {int(time.monotonic()-t0)}s | saved={saved} skipped={skipped} errors={errors}")
 
 
 def collect_markets(start: date, end: date):
@@ -247,7 +247,8 @@ def _collect_trades_day(day: date):
     for i, fname in enumerate(market_files, 1):
         market_id = fname[:-5]
 
-        if state_db.is_trades_downloaded(day_str, market_id):
+        trades_folder = _trades_dir(day_str, market_id)
+        if os.path.isdir(trades_folder) and os.listdir(trades_folder):
             skipped += 1
             continue
 
@@ -273,11 +274,9 @@ def _collect_trades_day(day: date):
             trades = _fetch_trades(condition_id, start_ts, end_ts)
             for token_id, token_trades in _split_by_token(trades).items():
                 _save_trades(day_str, market_id, token_id, token_trades)
-            state_db.mark_trades_downloaded(day_str, market_id)
             ok += 1
         except Exception as e:
             logger.warning(f"[trades][{day_str}] {market_id}: fetch error — {e}")
-            state_db.mark_error(day_str, market_id, f"trades: {e}")
             errors += 1
 
         time.sleep(TRADES_SLEEP)
@@ -585,7 +584,7 @@ def _parse_day(conn: sqlite3.Connection, day_str: str):
 
     for i, fname in enumerate(market_files, 1):
         market_id = fname[:-5]
-        if state_db.is_market_parsed(day_str, market_id):
+        if conn.execute("SELECT 1 FROM markets WHERE id=?", (market_id,)).fetchone():
             skipped += 1
             continue
 
@@ -609,7 +608,6 @@ def _parse_day(conn: sqlite3.Connection, day_str: str):
             for tr in _parse_token_rows(data):
                 conn.execute(_TOKEN_UPSERT, tr)
             conn.commit()
-            state_db.mark_parsed(day_str, market_id)
             ok += 1
         except Exception as e:
             conn.rollback()
@@ -650,7 +648,6 @@ def run(
     skip_trades: bool = False,
     skip_parse: bool = False,
 ) -> None:
-    state_db.init_db()
     logger.info(f"Ingest started: {start} → {end}")
 
     if not skip_markets:
