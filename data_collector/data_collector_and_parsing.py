@@ -239,7 +239,7 @@ def _collect_trades_day(day: date):
 
     market_files = [f for f in os.listdir(day_dir) if f.endswith(".json") and not f.startswith("collector")]
     total = len(market_files)
-    logger.info(f"[trades][{day_str}] Found {total} markets, downloading trades...")
+    logger.info(f"[trades][{day_str}] Found {total} markets")
 
     ok = skipped = errors = 0
     t0 = time.monotonic()
