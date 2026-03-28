@@ -395,15 +395,31 @@ _CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     ("crypto", (
         "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "doge", "xrp", "gold", "silver",
         "oil", "nasdaq", "s&p", "spy", "qqq", "fed", "cpi", "rate cut", "treasury", "eur", "jpy", "rial",
+        # crypto tokens
+        "bnb", "hyperliquid", "hype", "ethena", "ena", "chainlink", "link", "avax", "avalanche",
+        "polygon", "matic", "arbitrum", "arb", "optimism", "op ", "sui ", "aptos", "apt ",
+        "pepe", "shib", "floki", "wif ", "bonk", "meme", "airdrop", "nft",
+        # stock indices
+        "nikkei", "dow jones", "dji", "ftse", "dax", "hang seng", "hsi", "russell", "rut ",
+        "nya ", "nyk ",
+        # individual stocks
+        "palantir", "pltr", "airbnb", "abnb", "rocket lab", "rklb", "opendoor",
+        "coinbase", "coin ", "robinhood", "hood ", "rivian", "lucid", "rivn",
+        "up or down",
     )),
     ("sports", (
         "fc ", " vs ", "game ", "match ", "mlb", "nba", "nhl", "nfl", "uefa", "champions league",
         "world cup", "premier league", "serie a", "la liga", "bundesliga", "tennis", "f1", "formula 1",
         "ufc", "cricket", "afghanistan", "south africa", "win on ",
+        "sailgp", "sailing", "golf", "pga", "masters", "nascar", "indycar", "mls", "wnba",
+        "olympics", "wimbledon", "tour de france", "cycling", "swimming", "athletics",
+        "boxing", "wrestling", "esports", "league of legends", "dota", "cs2",
     )),
     ("politics", (
         "trump", "biden", "election", "senate", "house", "republican", "democrat", "white house",
         "prime minister", "president", "governor", "mayor", "parliament", "minister",
+        "elon musk", "doge ", "department of",
+        "unemployment rate", "gdp", "inflation", "interest rate", "jobs report",
     )),
     ("geopolitics", (
         "iran", "iraq", "israel", "gaza", "hamas", "hezbollah", "ukraine", "russia", "china", "taiwan",
@@ -414,6 +430,8 @@ _CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
     )),
     ("entertainment", (
         "oscar", "grammy", "emmy", "sag awards", "box office", "movie", "album", "netflix", "actor", "actress",
+        "rotten tomatoes", "tomatometer", "box office", "spotify", "billboard",
+        "casino", "poker", "hustler",
     )),
     ("tech", (
         "openai", "chatgpt", "apple", "google", "microsoft", "nvidia", "tesla", "meta", "amazon",
