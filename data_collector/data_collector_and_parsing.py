@@ -683,7 +683,7 @@ def run(
         logger.info("=== Step 3/3: Parse into DB [SKIPPED] ===")
 
     logger.info(f"Ingest finished: {start} → {end}")
-    logger.info("Next step: python scripts/swan_analyzer.py --date-from ... --date-to ...")
+    logger.info("Next step: python analyzer/swan_analyzer.py --date-from ... --date-to ...")
 
 
 if __name__ == "__main__":

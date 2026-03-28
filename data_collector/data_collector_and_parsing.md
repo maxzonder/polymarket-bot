@@ -18,7 +18,7 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 
 Логи: `/home/polybot/.polybot/logs/data_collector_and_parsing.log`
 
-После запуска: `python scripts/swan_analyzer.py --date-from ... --date-to ...` для построения `swans_v2`.
+После запуска: `python analyzer/swan_analyzer.py --date-from ... --date-to ...` для построения `swans_v2`.
 
 ---
 

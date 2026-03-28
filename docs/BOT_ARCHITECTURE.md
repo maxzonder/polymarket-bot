@@ -275,7 +275,7 @@ python3 -m data_collector.trades_collector --start 2026-02-01 --end 2026-03-15
 python3 -m data_collector.parser --start 2026-02-01 --end 2026-03-15
 
 # 4. Построить swans_v2 (resolution-aware анализ)
-python3 scripts/swan_analyzer.py --recompute
+python3 analyzer/swan_analyzer.py --recompute
 
 # 5. Построить feature_mart (для скоринга)
 python3 scripts/build_feature_mart.py --recompute

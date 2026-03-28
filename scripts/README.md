@@ -33,13 +33,7 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 2026-03-27 --skip-trades
 ```
 
-После: запустить `swan_analyzer.py` для построения `swans_v2`.
-
-### `swan_analyzer.py`
-Находит black swan события в закрытых рынках. Читает сырые трейды из JSON-файлов
-в `database/`, строит таблицу `swans_v2` в `polymarket_dataset.db` с метриками entry/exit
-и метками победителей. Обрабатывает все токены с trade-файлами (UPSERT по `token_id, date`).
-Без `--recompute` таблица не очищается, но уже обработанные токены перезаписываются.
+После: запустить `analyzer/swan_analyzer.py` для построения `swans_v2`.
 
 ### `backfill_new_fields.py`
 Одноразовый legacy-скрипт: дозаполняет поля `restricted` и `volume_1wk` в таблице `markets`

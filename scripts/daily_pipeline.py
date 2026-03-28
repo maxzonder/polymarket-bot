@@ -52,6 +52,7 @@ POSITIONS_DB  = DATA_DIR / "positions.db"
 OUTPUT_CONFIG = DATA_DIR / "recommended_config.json"
 
 SCRIPTS_DIR = Path(__file__).parent
+ANALYZER_DIR = SCRIPTS_DIR.parent / "analyzer"
 
 
 # ─── Step runner ─────────────────────────────────────────────────────────────
@@ -94,7 +95,7 @@ def step_analyzer(dataset_db: str) -> bool:
     """Run swan_analyzer incrementally (new closed markets only)."""
     return _run("analyzer", [
         sys.executable,
-        str(SCRIPTS_DIR / "swan_analyzer.py"),
+        str(ANALYZER_DIR / "swan_analyzer.py"),
         # incremental: no --recompute flag; analyzer skips already-processed markets
     ])
 
