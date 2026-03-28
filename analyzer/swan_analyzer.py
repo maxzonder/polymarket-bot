@@ -36,11 +36,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
+from config import SWAN_ENTRY_THRESHOLD, check_swan_threshold
 
 logger = setup_logger("swan_analyzer")
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-DEFAULT_ENTRY_THRESHOLD = 0.02   # цена дна: < $0.02 = зона входа
+DEFAULT_ENTRY_THRESHOLD = SWAN_ENTRY_THRESHOLD  # derived from max(entry_price_levels) across all modes
 DEFAULT_MIN_ENTRY_USDC  = 1.0    # мин. ликвидность на дне (объём сделок < threshold)
 DEFAULT_MIN_EXIT_USDC   = 5.0    # мин. ликвидность на выходе (объём сделок >= exit_price)
 DEFAULT_TARGET_EXIT_X   = 5.0    # целевой выход для проверки exit_liquidity
@@ -421,6 +422,10 @@ def main() -> None:
                     help=f"Целевой икс для проверки exit liquidity (default: {DEFAULT_TARGET_EXIT_X}x)")
     ap.add_argument("--min-real-x", type=float, default=DEFAULT_MIN_REAL_X)
     args = ap.parse_args()
+
+    for w in check_swan_threshold(args.entry_threshold):
+        logger.warning(w)
+
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")

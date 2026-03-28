@@ -243,6 +243,32 @@ MODES: dict[str, ModeConfig] = {
     "dip_mode": DIP_MODE,
 }
 
+# ── Swan analyzer global threshold ────────────────────────────────────────────
+# Must cover ALL entry_price_levels across ALL modes.
+# swan_analyzer.py uses this as --entry-threshold default.
+# If a mode has entry levels above this value, swans_v2 will be missing data
+# for those levels and scorer/feature_mart will have blind spots.
+SWAN_ENTRY_THRESHOLD: float = max(
+    max(m.entry_price_levels) for m in MODES.values()
+)
+
+
+def check_swan_threshold(threshold: float) -> list[str]:
+    """
+    Returns a list of warning strings if threshold doesn't cover all mode entry levels.
+    Empty list = OK.
+    """
+    warnings = []
+    for mode in MODES.values():
+        uncovered = [p for p in mode.entry_price_levels if p > threshold]
+        if uncovered:
+            warnings.append(
+                f"WARNING: swan_analyzer threshold ${threshold} < "
+                f"{mode.name} entry levels {uncovered} — "
+                f"swans_v2 will miss these price zones"
+            )
+    return warnings
+
 
 @dataclass
 class BotConfig:
