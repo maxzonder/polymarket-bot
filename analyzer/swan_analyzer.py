@@ -3,23 +3,23 @@ swan_analyzer.py — Improved Swan Detector (v2)
 
 Отличия от analyzer.py (Zigzag):
 1. Учитывает финальную выплату $1 при разрешении рынка (is_winner=1).
-   real_x = 1.0 / entry_min_price для победителей (не просто max_price / entry_min_price).
+   max_traded_x = 1.0 / buy_min_price для победителей (не просто max_price / buy_min_price).
 2. Не пропускает "удержанные" победы — токен вырос и остался наверху до закрытия.
 3. Одно событие на один вход в зону дна (не множество зигзагов на один рынок).
 4. Нет фильтра по времени — стратегия рестинг-лимиток не зависит от длительности.
    Нам важна только ликвидность: сколько можно купить на дне и сколько можно продать на выходе.
 
 Фильтры:
-    - entry_volume_usdc >= min_entry_usdc  (ликвидность на дне — можно войти)
-    - exit_volume_usdc >= min_exit_usdc    (ликвидность на выходе — можно продать)
-      Для победителей (is_winner=1) выход = выплата $1 от Polymarket, exit_volume не требуется.
-    - real_x >= min_real_x
+    - buy_volume >= min_buy_volume  (ликвидность на дне — можно войти)
+    - sell_volume >= min_sell_volume    (ликвидность на выходе — можно продать)
+      Для победителей (is_winner=1) выход = выплата $1 от Polymarket, sell_volume не требуется.
+    - max_traded_x >= min_real_x
 
 Использование:
     python scripts/swan_analyzer.py --recompute
     python scripts/swan_analyzer.py --date 2026-02-28
     python scripts/swan_analyzer.py --date-from 2026-02-01 --date-to 2026-02-28
-    python scripts/swan_analyzer.py --recompute --min-entry-usdc 1.0 --min-exit-usdc 5.0 --target-exit-x 5
+    python scripts/swan_analyzer.py --recompute --min-buy-volume 1.0 --min-sell-volume 5.0
 """
 
 from __future__ import annotations
@@ -36,15 +36,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
-from config import SWAN_ENTRY_THRESHOLD, check_swan_threshold
+from config import SWAN_BUY_PRICE_THRESHOLD, check_swan_buy_price_threshold
 
 logger = setup_logger("swan_analyzer")
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-DEFAULT_ENTRY_THRESHOLD = SWAN_ENTRY_THRESHOLD  # derived from max(entry_price_levels) across all modes
-DEFAULT_MIN_ENTRY_USDC  = 1.0    # мин. ликвидность на дне (объём сделок < threshold)
-DEFAULT_MIN_EXIT_USDC   = 5.0    # мин. ликвидность на выходе (объём сделок >= exit_price)
-DEFAULT_TARGET_EXIT_X   = 5.0    # целевой выход для проверки exit_liquidity
+DEFAULT_BUY_PRICE_THRESHOLD = SWAN_BUY_PRICE_THRESHOLD  # derived from max(entry_price_levels) across all modes
+DEFAULT_MIN_BUY_VOLUME  = 1.0    # мин. ликвидность на дне (объём сделок < threshold)
+DEFAULT_MIN_SELL_VOLUME = 5.0    # мин. ликвидность на выходе (объём сделок >= exit_price)
 DEFAULT_MIN_REAL_X      = 5.0    # минимальный реальный икс
 
 CREATE_TABLE = """
@@ -55,27 +54,25 @@ CREATE TABLE IF NOT EXISTS swans_v2 (
     date                    TEXT NOT NULL,
 
     -- Параметры запуска анализа
-    entry_threshold         REAL NOT NULL,
-    min_entry_liquidity     REAL NOT NULL,
-    min_exit_liquidity      REAL NOT NULL,
-    target_exit_x           REAL NOT NULL,
+    buy_price_threshold     REAL NOT NULL,
+    min_buy_volume          REAL NOT NULL,
+    min_sell_volume         REAL NOT NULL,
     min_real_x              REAL NOT NULL,
 
     -- Зона входа (дно)
-    entry_min_price         REAL NOT NULL,
-    entry_volume_usdc       REAL NOT NULL,
-    entry_trade_count       INTEGER NOT NULL,
-    entry_ts_first          INTEGER NOT NULL,
-    entry_ts_last           INTEGER NOT NULL,
+    buy_min_price           REAL NOT NULL,
+    buy_volume              REAL NOT NULL,
+    buy_trade_count         INTEGER NOT NULL,
+    buy_ts_first            INTEGER NOT NULL,
+    buy_ts_last             INTEGER NOT NULL,
 
     -- Выход / результат
-    target_exit_price       REAL NOT NULL,
-    exit_volume_usdc        REAL NOT NULL,   -- объём сделок >= target_exit_price (0 для победителей)
+    sell_volume             REAL NOT NULL,   -- объём сделок >= buy_min_price * min_real_x (0 для победителей)
     max_price_in_history    REAL NOT NULL,
     last_price_in_history   REAL NOT NULL,
     is_winner               INTEGER NOT NULL DEFAULT 0,
-    real_x                  REAL NOT NULL,   -- итоговый икс (с учётом выплаты $1 для победителей)
-    resolution_x            REAL NOT NULL,   -- 1/entry если winner, иначе = real_x
+    max_traded_x            REAL NOT NULL,   -- итоговый икс (с учётом выплаты $1 для победителей)
+    payout_x                REAL NOT NULL,   -- 1/entry если winner, иначе = max_traded_x
 
     UNIQUE(token_id, date)
 )
@@ -85,7 +82,7 @@ CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_swans_v2_token ON swans_v2(token_id)",
     "CREATE INDEX IF NOT EXISTS idx_swans_v2_market ON swans_v2(market_id)",
     "CREATE INDEX IF NOT EXISTS idx_swans_v2_date ON swans_v2(date)",
-    "CREATE INDEX IF NOT EXISTS idx_swans_v2_real_x ON swans_v2(real_x)",
+    "CREATE INDEX IF NOT EXISTS idx_swans_v2_max_traded_x ON swans_v2(max_traded_x)",
     "CREATE INDEX IF NOT EXISTS idx_swans_v2_winner ON swans_v2(is_winner)",
 ]
 
@@ -121,10 +118,9 @@ def _sum_usdc(trades: list[dict]) -> float:
 def analyze_token(
     trades: list[dict],
     is_winner: int,
-    entry_threshold: float,
-    min_entry_usdc: float,
-    min_exit_usdc: float,
-    target_exit_x: float,
+    buy_price_threshold: float,
+    min_buy_volume: float,
+    min_sell_volume: float,
     min_real_x: float,
 ) -> Optional[dict]:
     """
@@ -134,14 +130,14 @@ def analyze_token(
     Логика:
     1. Найти глобальный минимум цены по всей истории токена
        (не первый вход в зону — рынок мог несколько раз проваливаться)
-    2. Если min_price >= entry_threshold → не лебедь
+    2. Если min_price >= buy_price_threshold → не лебедь
     3. Построить зону дна вокруг глобального минимума:
-       все трейды в окне ±lookback от минимума с ценой < entry_threshold
-    4. Проверить entry_volume >= min_entry_usdc
-    5. Для не-победителей: проверить exit_volume >= min_exit_usdc
-       exit_volume = объём сделок после зоны дна по цене >= entry_min_price * target_exit_x
-    6. Для победителей (is_winner=1): Polymarket выплачивает $1 → exit не нужен
-    7. real_x = 1/entry_min если winner, иначе max(price_after_floor) / entry_min
+       все трейды в окне ±lookback от минимума с ценой < buy_price_threshold
+    4. Проверить buy_volume >= min_buy_volume
+    5. Для не-победителей: проверить sell_volume >= min_sell_volume
+       sell_volume = объём сделок после зоны дна по цене >= buy_min_price * min_real_x
+    6. Для победителей (is_winner=1): Polymarket выплачивает $1 → sell_volume не нужен
+    7. max_traded_x = 1/buy_min_price если winner, иначе max(price_after_floor) / buy_min_price
     """
     if not trades:
         return None
@@ -150,19 +146,19 @@ def analyze_token(
 
     # --- 1. Глобальный минимум ---
     global_min = min(prices)
-    if global_min >= entry_threshold:
+    if global_min >= buy_price_threshold:
         return None  # цена никогда не падала до порога
 
     global_min_idx = prices.index(global_min)
 
     # --- 2. Зона дна вокруг глобального минимума ---
-    # Расширяем в обе стороны пока цена < entry_threshold
+    # Расширяем в обе стороны пока цена < buy_price_threshold
     floor_start = global_min_idx
-    while floor_start > 0 and prices[floor_start - 1] < entry_threshold:
+    while floor_start > 0 and prices[floor_start - 1] < buy_price_threshold:
         floor_start -= 1
 
     floor_end = global_min_idx
-    while floor_end < len(prices) - 1 and prices[floor_end + 1] < entry_threshold:
+    while floor_end < len(prices) - 1 and prices[floor_end + 1] < buy_price_threshold:
         floor_end += 1
 
     floor_trades = trades[floor_start: floor_end + 1]
@@ -170,62 +166,59 @@ def analyze_token(
         return None
 
     # --- 3. Проверить ликвидность на входе ---
-    entry_volume = _sum_usdc(floor_trades)
-    if entry_volume < min_entry_usdc:
+    buy_volume = _sum_usdc(floor_trades)
+    if buy_volume < min_buy_volume:
         return None
 
-    entry_min_price = global_min
-    entry_ts_first = int(floor_trades[0]["timestamp"])
-    entry_ts_last = int(floor_trades[-1]["timestamp"])
-    target_exit_price = entry_min_price * target_exit_x
+    buy_min_price = global_min
+    buy_ts_first = int(floor_trades[0]["timestamp"])
+    buy_ts_last = int(floor_trades[-1]["timestamp"])
 
     # --- 4. Метрики после зоны дна ---
     after_floor = trades[floor_end + 1:]
-    max_price_after = max((float(t["price"]) for t in after_floor), default=entry_min_price)
+    max_price_after = max((float(t["price"]) for t in after_floor), default=buy_min_price)
     max_price_overall = max(prices)
     last_price = prices[-1]
 
     # --- 5. Ликвидность на выходе (только для не-победителей) ---
-    exit_volume = 0.0
+    sell_volume = 0.0
     if is_winner == 1:
-        # Polymarket выплачивает $1 — exit ликвидность не нужна
-        exit_volume = 0.0
+        # Polymarket выплачивает $1 — sell ликвидность не нужна
+        sell_volume = 0.0
     else:
-        # Считаем объём сделок по цене >= target_exit_price (после зоны дна)
-        exit_trades = [t for t in after_floor if float(t["price"]) >= target_exit_price]
-        exit_volume = _sum_usdc(exit_trades)
-        if exit_volume < min_exit_usdc:
+        # Считаем объём сделок по цене >= buy_min_price * min_real_x (после зоны дна)
+        sell_trades = [t for t in after_floor if float(t["price"]) >= buy_min_price * min_real_x]
+        sell_volume = _sum_usdc(sell_trades)
+        if sell_volume < min_sell_volume:
             return None
 
-    # --- 6. Считаем real_x ---
+    # --- 6. Считаем max_traded_x ---
     if is_winner == 1:
-        real_x = 1.0 / entry_min_price
+        max_traded_x = 1.0 / buy_min_price
     else:
-        real_x = max_price_after / entry_min_price if max_price_after > entry_min_price else 1.0
+        max_traded_x = max_price_after / buy_min_price if max_price_after > buy_min_price else 1.0
 
-    resolution_x = (1.0 / entry_min_price) if is_winner == 1 else real_x
+    payout_x = (1.0 / buy_min_price) if is_winner == 1 else max_traded_x
 
-    if real_x < min_real_x:
+    if max_traded_x < min_real_x:
         return None
 
     return {
-        "entry_threshold": entry_threshold,
-        "min_entry_liquidity": min_entry_usdc,
-        "min_exit_liquidity": min_exit_usdc,
-        "target_exit_x": target_exit_x,
+        "buy_price_threshold": buy_price_threshold,
+        "min_buy_volume": min_buy_volume,
+        "min_sell_volume": min_sell_volume,
         "min_real_x": min_real_x,
-        "entry_min_price": entry_min_price,
-        "entry_volume_usdc": entry_volume,
-        "entry_trade_count": len(floor_trades),
-        "entry_ts_first": entry_ts_first,
-        "entry_ts_last": entry_ts_last,
-        "target_exit_price": target_exit_price,
-        "exit_volume_usdc": exit_volume,
+        "buy_min_price": buy_min_price,
+        "buy_volume": buy_volume,
+        "buy_trade_count": len(floor_trades),
+        "buy_ts_first": buy_ts_first,
+        "buy_ts_last": buy_ts_last,
+        "sell_volume": sell_volume,
         "max_price_in_history": max_price_overall,
         "last_price_in_history": last_price,
         "is_winner": is_winner,
-        "real_x": real_x,
-        "resolution_x": resolution_x,
+        "max_traded_x": max_traded_x,
+        "payout_x": payout_x,
     }
 
 
@@ -235,10 +228,9 @@ def run(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     recompute: bool = False,
-    entry_threshold: float = DEFAULT_ENTRY_THRESHOLD,
-    min_entry_usdc: float = DEFAULT_MIN_ENTRY_USDC,
-    min_exit_usdc: float = DEFAULT_MIN_EXIT_USDC,
-    target_exit_x: float = DEFAULT_TARGET_EXIT_X,
+    buy_price_threshold: float = DEFAULT_BUY_PRICE_THRESHOLD,
+    min_buy_volume: float = DEFAULT_MIN_BUY_VOLUME,
+    min_sell_volume: float = DEFAULT_MIN_SELL_VOLUME,
     min_real_x: float = DEFAULT_MIN_REAL_X,
 ) -> None:
     ensure_runtime_dirs()
@@ -289,8 +281,8 @@ def run(
     total = len(tokens)
     logger.info(
         f"Processing {total} tokens | "
-        f"threshold=${entry_threshold}, min_entry=${min_entry_usdc}, "
-        f"min_exit=${min_exit_usdc}, target_exit={target_exit_x}x, min_real_x={min_real_x}x"
+        f"threshold=${buy_price_threshold}, min_buy=${min_buy_volume}, "
+        f"min_sell=${min_sell_volume}, min_real_x={min_real_x}x"
     )
 
     ok = no_trades = no_swan = rejected = errors = 0
@@ -321,10 +313,9 @@ def run(
             result = analyze_token(
                 trades,
                 is_winner=is_winner or 0,
-                entry_threshold=entry_threshold,
-                min_entry_usdc=min_entry_usdc,
-                min_exit_usdc=min_exit_usdc,
-                target_exit_x=target_exit_x,
+                buy_price_threshold=buy_price_threshold,
+                min_buy_volume=min_buy_volume,
+                min_sell_volume=min_sell_volume,
                 min_real_x=min_real_x,
             )
         except Exception as e:
@@ -341,27 +332,27 @@ def run(
                 """
                 INSERT INTO swans_v2 (
                     token_id, market_id, date,
-                    entry_threshold, min_entry_liquidity, min_exit_liquidity,
-                    target_exit_x, min_real_x,
-                    entry_min_price, entry_volume_usdc, entry_trade_count,
-                    entry_ts_first, entry_ts_last,
-                    target_exit_price, exit_volume_usdc,
+                    buy_price_threshold, min_buy_volume, min_sell_volume,
+                    min_real_x,
+                    buy_min_price, buy_volume, buy_trade_count,
+                    buy_ts_first, buy_ts_last,
+                    sell_volume,
                     max_price_in_history, last_price_in_history,
-                    is_winner, real_x, resolution_x
+                    is_winner, max_traded_x, payout_x
                 ) VALUES (
                     :token_id, :market_id, :date,
-                    :entry_threshold, :min_entry_liquidity, :min_exit_liquidity,
-                    :target_exit_x, :min_real_x,
-                    :entry_min_price, :entry_volume_usdc, :entry_trade_count,
-                    :entry_ts_first, :entry_ts_last,
-                    :target_exit_price, :exit_volume_usdc,
+                    :buy_price_threshold, :min_buy_volume, :min_sell_volume,
+                    :min_real_x,
+                    :buy_min_price, :buy_volume, :buy_trade_count,
+                    :buy_ts_first, :buy_ts_last,
+                    :sell_volume,
                     :max_price_in_history, :last_price_in_history,
-                    :is_winner, :real_x, :resolution_x
+                    :is_winner, :max_traded_x, :payout_x
                 ) ON CONFLICT(token_id, date) DO UPDATE SET
-                    real_x=excluded.real_x,
+                    max_traded_x=excluded.max_traded_x,
                     is_winner=excluded.is_winner,
-                    resolution_x=excluded.resolution_x,
-                    exit_volume_usdc=excluded.exit_volume_usdc
+                    payout_x=excluded.payout_x,
+                    sell_volume=excluded.sell_volume
                 """,
                 {
                     "token_id": token_id,
@@ -389,7 +380,7 @@ def run(
 
     elapsed = int(time.monotonic() - t0)
     row = conn.execute(
-        "SELECT COUNT(*), AVG(real_x), MAX(real_x), SUM(is_winner), AVG(entry_volume_usdc) FROM swans_v2"
+        "SELECT COUNT(*), AVG(max_traded_x), MAX(max_traded_x), SUM(is_winner), AVG(buy_volume) FROM swans_v2"
     ).fetchone()
 
     logger.info(
@@ -412,18 +403,16 @@ def main() -> None:
     ap.add_argument("--date-from", metavar="YYYY-MM-DD")
     ap.add_argument("--date-to", metavar="YYYY-MM-DD")
     ap.add_argument("--recompute", action="store_true", help="Очистить swans_v2 и пересчитать")
-    ap.add_argument("--entry-threshold", type=float, default=DEFAULT_ENTRY_THRESHOLD,
-                    help=f"Порог цены дна (default: ${DEFAULT_ENTRY_THRESHOLD})")
-    ap.add_argument("--min-entry-usdc", type=float, default=DEFAULT_MIN_ENTRY_USDC,
-                    help=f"Мин. ликвидность на входе (default: ${DEFAULT_MIN_ENTRY_USDC})")
-    ap.add_argument("--min-exit-usdc", type=float, default=DEFAULT_MIN_EXIT_USDC,
-                    help=f"Мин. ликвидность на выходе (default: ${DEFAULT_MIN_EXIT_USDC})")
-    ap.add_argument("--target-exit-x", type=float, default=DEFAULT_TARGET_EXIT_X,
-                    help=f"Целевой икс для проверки exit liquidity (default: {DEFAULT_TARGET_EXIT_X}x)")
+    ap.add_argument("--buy-price-threshold", type=float, default=DEFAULT_BUY_PRICE_THRESHOLD,
+                    help=f"Порог цены дна (default: ${DEFAULT_BUY_PRICE_THRESHOLD})")
+    ap.add_argument("--min-buy-volume", type=float, default=DEFAULT_MIN_BUY_VOLUME,
+                    help=f"Мин. ликвидность на входе (default: ${DEFAULT_MIN_BUY_VOLUME})")
+    ap.add_argument("--min-sell-volume", type=float, default=DEFAULT_MIN_SELL_VOLUME,
+                    help=f"Мин. ликвидность на выходе (default: ${DEFAULT_MIN_SELL_VOLUME})")
     ap.add_argument("--min-real-x", type=float, default=DEFAULT_MIN_REAL_X)
     args = ap.parse_args()
 
-    for w in check_swan_threshold(args.entry_threshold):
+    for w in check_swan_buy_price_threshold(args.buy_price_threshold):
         logger.warning(w)
 
 
@@ -441,10 +430,9 @@ def main() -> None:
         date_from=args.date_from,
         date_to=args.date_to,
         recompute=False,  # уже очищено выше если recompute
-        entry_threshold=args.entry_threshold,
-        min_entry_usdc=args.min_entry_usdc,
-        min_exit_usdc=args.min_exit_usdc,
-        target_exit_x=args.target_exit_x,
+        buy_price_threshold=args.buy_price_threshold,
+        min_buy_volume=args.min_buy_volume,
+        min_sell_volume=args.min_sell_volume,
         min_real_x=args.min_real_x,
     )
     conn.close()
