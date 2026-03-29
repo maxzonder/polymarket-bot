@@ -19,8 +19,9 @@ import sys
 
 from config import load_config
 from bot.main_loop import BotRunner
-from utils.logger import setup_logger
+from utils.logger import setup_logger, add_bot_log_file
 
+add_bot_log_file("v1_1_paper.log")
 logger = setup_logger("main")
 
 
