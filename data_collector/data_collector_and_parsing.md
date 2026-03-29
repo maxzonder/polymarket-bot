@@ -20,6 +20,8 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 
 После запуска: `python analyzer/swan_analyzer.py --date-from ... --date-to ...` для построения `swans_v2`.
 
+**Автоматический запуск:** `scripts/daily_pipeline.py` вызывает этот скрипт первым шагом каждый день — определяет последнюю дату в `database/` и дозагружает до вчера.
+
 ---
 
 ## Шаг 1 — Скачивание рынков

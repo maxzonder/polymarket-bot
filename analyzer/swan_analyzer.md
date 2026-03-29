@@ -6,13 +6,13 @@
 
 ```bash
 # Полный пересчёт всей истории
-python3 analyzer/swan_analyzer.py --recompute --date-from 2025-08-01 --date-to 2026-03-18
+python3 analyzer/swan_analyzer.py --recompute --date-from 2025-08-01 --date-to 2026-03-28
 
-# Один день (инкрементальный запуск из daily_pipeline)
-python3 analyzer/swan_analyzer.py --date 2026-03-18
+# Диапазон (UPSERT по token_id + date) — так вызывает daily_pipeline
+python3 analyzer/swan_analyzer.py --date-from 2026-03-19 --date-to 2026-03-28
 
-# Диапазон без очистки (UPSERT по token_id + date)
-python3 analyzer/swan_analyzer.py --date-from 2026-03-01 --date-to 2026-03-18
+# Один день
+python3 analyzer/swan_analyzer.py --date 2026-03-28
 ```
 
 ## Параметры
@@ -107,8 +107,10 @@ python3 analyzer/swan_analyzer.py --date-from 2026-03-01 --date-to 2026-03-18
 
 | Компонент | Как |
 |-----------|-----|
-| `strategy/scorer.py` | `EntryFillScorer` и `ResolutionScorer` (fallback, основной — `token_swans`) |
-| `scripts/daily_pipeline.py` | Инкрементальный запуск без `--recompute` |
+| `strategy/scorer.py` | `EntryFillScorer` и `ResolutionScorer` — `swans_v2` единственный источник |
+| `analyzer/market_level_features_v1_1.py` | Источник позитивов для `feature_mart_v1_1` |
+| `scripts/build_rejected_outcomes.py` | Ground truth для пропущенных возможностей |
+| `scripts/daily_pipeline.py` | `--date-from {start} --date-to {end}` для новых дат |
 
 ---
 
@@ -128,8 +130,7 @@ SWAN_BUY_PRICE_THRESHOLD = max(max(m.entry_price_levels) for m in MODES.values()
 
 ## Текущее состояние
 
-После запуска `--recompute --date-from 2025-08-01 --date-to 2026-03-18` с `threshold=0.20` (Mar 29 2026):
-- **33,092 событий** в `swans_v2` (было 3,943 при threshold=0.02)
-- avg max_traded_x = 14.44x, max = 1000x
-- winners = 24,503 (74%)
-- avg buy_volume = $495.46
+После миграции с `token_swans` → `swans_v2` и пересчёта с `threshold=0.20` (Mar 29 2026):
+- **32,056 событий** в `swans_v2` (Aug 2025 – Mar 2026)
+- Было 3,943 при старом threshold=0.02
+- `token_swans` (88k строк) сохранена в БД как архив, ни один активный скрипт её не читает
