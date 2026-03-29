@@ -107,37 +107,53 @@ def _find_last_collected_date() -> Optional[date]:
     return max(candidates) if candidates else None
 
 
-def step_ingest(dataset_db: str) -> bool:
-    """Download and parse market data from last collected date up to yesterday."""
+def _compute_ingest_range() -> Optional[tuple[date, date]]:
+    """
+    Return (start, end) of dates to ingest, or None if already up to date / no data.
+    start = last date dir + 1 day, end = yesterday.
+    """
     yesterday = date.today() - timedelta(days=1)
     last_date = _find_last_collected_date()
 
     if last_date is None:
-        logger.warning("[ingest] No existing date directories found in database/ — skipping auto-ingest. "
-                       "Run data_collector_and_parsing.py manually with --start/--end first.")
-        return True
+        return None
 
     start = last_date + timedelta(days=1)
     if start > yesterday:
-        logger.info(f"[ingest] Already up to date (last={last_date}, yesterday={yesterday}) — nothing to fetch")
+        return None
+
+    return start, yesterday
+
+
+def step_ingest(dataset_db: str, ingest_range: Optional[tuple[date, date]] = None) -> bool:
+    """Download and parse market data from last collected date up to yesterday."""
+    if ingest_range is None:
+        ingest_range = _compute_ingest_range()
+
+    if ingest_range is None:
+        if _find_last_collected_date() is None:
+            logger.warning("[ingest] No existing date directories found in database/ — skipping auto-ingest. "
+                           "Run data_collector_and_parsing.py manually with --start/--end first.")
+        else:
+            logger.info(f"[ingest] Already up to date (yesterday={date.today() - timedelta(days=1)}) — nothing to fetch")
         return True
 
-    logger.info(f"[ingest] Catching up: {start} → {yesterday}")
+    start, end = ingest_range
+    logger.info(f"[ingest] Catching up: {start} → {end}")
     return _run("ingest", [
         sys.executable,
         str(DATA_COLLECTOR),
         "--start", start.isoformat(),
-        "--end",   yesterday.isoformat(),
+        "--end",   end.isoformat(),
     ], timeout=None)
 
 
-def step_analyzer(dataset_db: str) -> bool:
-    """Run swan_analyzer incrementally (new closed markets only)."""
-    return _run("analyzer", [
-        sys.executable,
-        str(ANALYZER_DIR / "swan_analyzer.py"),
-        # incremental: no --recompute flag; analyzer skips already-processed markets
-    ])
+def step_analyzer(dataset_db: str, date_from: Optional[str] = None, date_to: Optional[str] = None) -> bool:
+    """Run swan_analyzer for the given date range (or all dates if unspecified)."""
+    cmd = [sys.executable, str(ANALYZER_DIR / "swan_analyzer.py")]
+    if date_from and date_to:
+        cmd += ["--date-from", date_from, "--date-to", date_to]
+    return _run("analyzer", cmd)
 
 
 def step_feature_mart_v1_1(dataset_db: str) -> bool:
@@ -273,8 +289,12 @@ def run_pipeline(
         results[only_step] = ok
     else:
         # Full pipeline — order matters
-        results["ingest"]            = step_ingest(dataset_db)
-        results["analyzer"]          = step_analyzer(dataset_db)
+        # Compute ingest range once so analyzer uses the exact same window
+        ingest_range = _compute_ingest_range()
+        results["ingest"]            = step_ingest(dataset_db, ingest_range)
+        date_from = ingest_range[0].isoformat() if ingest_range else None
+        date_to   = ingest_range[1].isoformat() if ingest_range else None
+        results["analyzer"]          = step_analyzer(dataset_db, date_from, date_to)
         results["feature_mart_v1_1"] = step_feature_mart_v1_1(dataset_db)
         results["ml_outcomes"]       = step_ml_outcomes(positions_db)
         results["rejected_outcomes"] = step_rejected_outcomes(positions_db, dataset_db)
