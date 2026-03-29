@@ -211,3 +211,11 @@ logs/
 v2/*.db
 v2/*.db-shm
 v2/*.db-wal
+
+# SQLite databases (runtime data, not source)
+*.db
+*.db-shm
+*.db-wal
+
+# Claude worktrees
+.claude/worktrees/
