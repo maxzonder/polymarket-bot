@@ -6,21 +6,21 @@ and target labels for the black-swan strategy.
 
 Key differences from feature_mart (v1):
 - Unit of analysis: per market_id (not per token_id event)
-- Positives: markets where ANY token hit the entry zone (entry_min_price <= ENTRY_MAX)
+- Positives: markets where ANY token hit the entry zone (buy_min_price <= ENTRY_MAX)
 - Negatives: markets that passed volume gate but had NO swan event
 - Adds niche_score_raw = volume / log(max(volume, e)) as attention-adjusted proxy
 - Adds token_count column (always 2 for current dataset; future-proof for multi-outcome)
-- Uses token_swans (full Dec+Jan+Feb window) as the positive source
+- Uses swans_v2 (full Aug 2025 – Mar 2026 window) as the positive source
 
 Cohort analysis:
 - Runs automatically after build; shows which features separate good swans
-  (best_possible_x >= 20) from bad (< 20) and from negatives (no swan)
+  (best_max_traded_x >= 20) from bad (< 20) and from negatives (no swan)
 - Prints suggested initial weights for market_score formula
 
 Usage:
-    python scripts/market_level_features.py
-    python scripts/market_level_features.py --recompute
-    python scripts/market_level_features.py --analysis-only
+    python analyzer/market_level_features_v1_1.py
+    python analyzer/market_level_features_v1_1.py --recompute
+    python analyzer/market_level_features_v1_1.py --analysis-only
 """
 
 from __future__ import annotations
@@ -40,9 +40,9 @@ from utils.paths import DB_PATH
 logger = setup_logger("market_level_features")
 
 # ── Gates (must match live screener for honest negatives) ────────────────────
-ENTRY_MAX = 0.02          # entry_min_price threshold that defines a "swan event"
+ENTRY_MAX = 0.20          # buy_min_price threshold that defines a "swan event"
 MIN_VOLUME = 50.0         # screener min volume gate
-WINDOW_MONTHS = ("2025-12", "2026-01", "2026-02")
+DATE_FROM = "2025-08-01"   # start of swans_v2 history
 
 # ── Table DDL ────────────────────────────────────────────────────────────────
 CREATE_TABLE = """
@@ -68,16 +68,16 @@ CREATE TABLE IF NOT EXISTS feature_mart_v1_1 (
 
     -- ── Swan features (NULL if no swan event) ────────────────────────────────
     was_swan                INTEGER NOT NULL DEFAULT 0,
-    best_entry_min_price    REAL,            -- min price across swan tokens
-    best_possible_x         REAL,            -- max possible_x across swan tokens
-    best_entry_volume_usdc  REAL,
-    best_entry_trade_count  INTEGER,
+    best_buy_min_price      REAL,            -- min price across swan tokens
+    best_max_traded_x       REAL,            -- max max_traded_x across swan tokens
+    best_buy_volume         REAL,
+    best_buy_trade_count    INTEGER,
     best_floor_duration_s   REAL,
     best_time_to_res_hours  REAL,            -- from first swan entry to close
 
     -- ── Labels ───────────────────────────────────────────────────────────────
     swan_is_winner          INTEGER,         -- 1 if best-x swan token also won
-    label_20x               INTEGER,         -- 1 if best_possible_x >= 20
+    label_20x               INTEGER,         -- 1 if best_max_traded_x >= 20
     label_tail              INTEGER          -- 0:<5x 1:5-20x 2:20-50x 3:50-100x 4:100x+
 )
 """
@@ -115,11 +115,11 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
 
     logger.info(
         f"Loading candidate universe "
-        f"(vol >= {MIN_VOLUME}, window {WINDOW_MONTHS}, entry_max <= {ENTRY_MAX}) ..."
+        f"(vol >= {MIN_VOLUME}, date_from={DATE_FROM}, entry_max <= {ENTRY_MAX}) ..."
     )
 
     # One row per market. Swan features aggregated across all swan tokens in that market.
-    # We use token_swans (which has entry_ts_first for time-to-resolution calc).
+    # We use swans_v2 (which has buy_ts_first/buy_ts_last for time-to-resolution calc).
     rows = conn.execute("""
         SELECT
             m.id                AS market_id,
@@ -134,28 +134,28 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             COUNT(DISTINCT t.token_id)   AS token_count,
 
             -- Swan aggregates (NULL if no swan below ENTRY_MAX threshold)
-            MIN(CASE WHEN s.entry_min_price <= :entry_max THEN s.entry_min_price END)
-                AS best_entry_min_price,
-            MAX(CASE WHEN s.entry_min_price <= :entry_max THEN s.possible_x END)
-                AS best_possible_x,
-            MAX(CASE WHEN s.entry_min_price <= :entry_max THEN s.entry_volume_usdc END)
-                AS best_entry_volume_usdc,
-            MAX(CASE WHEN s.entry_min_price <= :entry_max THEN s.entry_trade_count END)
-                AS best_entry_trade_count,
-            MAX(CASE WHEN s.entry_min_price <= :entry_max
-                     THEN s.duration_entry_zone_seconds END)
+            MIN(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_min_price END)
+                AS best_buy_min_price,
+            MAX(CASE WHEN s.buy_min_price <= :entry_max THEN s.max_traded_x END)
+                AS best_max_traded_x,
+            MAX(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_volume END)
+                AS best_buy_volume,
+            MAX(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_trade_count END)
+                AS best_buy_trade_count,
+            MAX(CASE WHEN s.buy_min_price <= :entry_max
+                     THEN (s.buy_ts_last - s.buy_ts_first) END)
                 AS best_floor_duration_s,
-            MIN(CASE WHEN s.entry_min_price <= :entry_max THEN s.entry_ts_first END)
-                AS best_entry_ts_first,
+            MIN(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_ts_first END)
+                AS best_buy_ts_first,
 
             -- is the best-x swan token a winner?
             MAX(CASE
-                WHEN s.entry_min_price <= :entry_max
-                     AND s.possible_x = (
-                         SELECT MAX(s2.possible_x) FROM token_swans s2
+                WHEN s.buy_min_price <= :entry_max
+                     AND s.max_traded_x = (
+                         SELECT MAX(s2.max_traded_x) FROM swans_v2 s2
                          JOIN tokens t2 ON t2.token_id = s2.token_id
                          WHERE t2.market_id = m.id
-                           AND s2.entry_min_price <= :entry_max
+                           AND s2.buy_min_price <= :entry_max
                      )
                 THEN t.is_winner
                 ELSE NULL
@@ -163,14 +163,13 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
 
         FROM markets m
         JOIN tokens t ON t.market_id = m.id
-        LEFT JOIN token_swans s ON s.token_id = t.token_id
+        LEFT JOIN swans_v2 s ON s.token_id = t.token_id
         WHERE m.closed_time > 0
           AND m.volume >= :min_vol
           AND m.duration_hours > 0
-          AND substr(DATE(m.closed_time, 'unixepoch'), 1, 7) IN
-              ('2025-12', '2026-01', '2026-02')
+          AND DATE(m.closed_time, 'unixepoch') >= :date_from
         GROUP BY m.id
-    """, {"entry_max": ENTRY_MAX, "min_vol": MIN_VOLUME}).fetchall()
+    """, {"entry_max": ENTRY_MAX, "min_vol": MIN_VOLUME, "date_from": DATE_FROM}).fetchall()
 
     total = len(rows)
     t0 = time.monotonic()
@@ -189,15 +188,15 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             closed_time      = int(row[8] or 0)
             token_count      = int(row[9] or 2)
 
-            best_entry_min_price   = row[10]
-            best_possible_x        = row[11]
-            best_entry_volume_usdc = row[12]
-            best_entry_trade_count = row[13]
+            best_buy_min_price   = row[10]
+            best_max_traded_x    = row[11]
+            best_buy_volume      = row[12]
+            best_buy_trade_count = row[13]
             best_floor_duration_s  = row[14]
-            best_entry_ts_first    = row[15]
+            best_buy_ts_first    = row[15]
             swan_is_winner         = row[16]
 
-            was_swan = 1 if best_entry_min_price is not None else 0
+            was_swan = 1 if best_buy_min_price is not None else 0
 
             log_volume    = math.log1p(volume)
             log_liquidity = math.log1p(liquidity)
@@ -209,14 +208,14 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
 
             # time from first entry to resolution
             best_time_to_res = (
-                (closed_time - int(best_entry_ts_first)) / 3600.0
-                if was_swan and best_entry_ts_first and closed_time > int(best_entry_ts_first)
+                (closed_time - int(best_buy_ts_first)) / 3600.0
+                if was_swan and best_buy_ts_first and closed_time > int(best_buy_ts_first)
                 else None
             )
 
             # labels
-            if was_swan and best_possible_x is not None:
-                px = float(best_possible_x)
+            if was_swan and best_max_traded_x is not None:
+                px = float(best_max_traded_x)
                 label_20x  = 1 if px >= 20 else 0
                 label_tail = _tail_label(px)
             else:
@@ -230,8 +229,8 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     volume_usdc, log_volume, liquidity_usdc, log_liquidity,
                     duration_hours, comment_count, neg_risk, token_count,
                     niche_score_raw,
-                    was_swan, best_entry_min_price, best_possible_x,
-                    best_entry_volume_usdc, best_entry_trade_count,
+                    was_swan, best_buy_min_price, best_max_traded_x,
+                    best_buy_volume, best_buy_trade_count,
                     best_floor_duration_s, best_time_to_res_hours,
                     swan_is_winner, label_20x, label_tail
                 ) VALUES (
@@ -245,8 +244,8 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     ?, ?, ?
                 ) ON CONFLICT(market_id) DO UPDATE SET
                     was_swan             = excluded.was_swan,
-                    best_entry_min_price = excluded.best_entry_min_price,
-                    best_possible_x      = excluded.best_possible_x,
+                    best_buy_min_price   = excluded.best_buy_min_price,
+                    best_max_traded_x    = excluded.best_max_traded_x,
                     swan_is_winner       = excluded.swan_is_winner,
                     label_20x            = excluded.label_20x,
                     label_tail           = excluded.label_tail
@@ -256,10 +255,10 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                 duration_hours, comment_count, neg_risk, token_count,
                 niche_score_raw,
                 was_swan,
-                float(best_entry_min_price) if best_entry_min_price is not None else None,
-                float(best_possible_x) if best_possible_x is not None else None,
-                float(best_entry_volume_usdc) if best_entry_volume_usdc is not None else None,
-                int(best_entry_trade_count) if best_entry_trade_count is not None else None,
+                float(best_buy_min_price) if best_buy_min_price is not None else None,
+                float(best_max_traded_x) if best_max_traded_x is not None else None,
+                float(best_buy_volume) if best_buy_volume is not None else None,
+                int(best_buy_trade_count) if best_buy_trade_count is not None else None,
                 float(best_floor_duration_s) if best_floor_duration_s is not None else None,
                 best_time_to_res,
                 int(swan_is_winner) if swan_is_winner is not None else None,
@@ -339,7 +338,7 @@ def cohort_analysis(conn: sqlite3.Connection) -> None:
             COUNT(*) AS total,
             SUM(was_swan) AS swans,
             SUM(CASE WHEN was_swan=1 AND label_20x=1 THEN 1 ELSE 0 END) AS good,
-            AVG(CASE WHEN was_swan=1 THEN best_possible_x END) AS avg_x,
+            AVG(CASE WHEN was_swan=1 THEN best_max_traded_x END) AS avg_x,
             SUM(CASE WHEN was_swan=1 AND swan_is_winner=1 THEN 1 ELSE 0 END) AS wins
         FROM feature_mart_v1_1
         GROUP BY bucket
@@ -359,7 +358,7 @@ def cohort_analysis(conn: sqlite3.Connection) -> None:
             COUNT(*) AS total,
             SUM(was_swan) AS swans,
             SUM(CASE WHEN was_swan=1 AND label_20x=1 THEN 1 ELSE 0 END) AS good,
-            AVG(CASE WHEN was_swan=1 THEN best_possible_x END) AS avg_x,
+            AVG(CASE WHEN was_swan=1 THEN best_max_traded_x END) AS avg_x,
             SUM(CASE WHEN was_swan=1 AND swan_is_winner=1 THEN 1 ELSE 0 END) AS wins
         FROM feature_mart_v1_1
         GROUP BY cat
@@ -387,7 +386,7 @@ def cohort_analysis(conn: sqlite3.Connection) -> None:
             COUNT(*) AS total,
             SUM(was_swan) AS swans,
             SUM(CASE WHEN was_swan=1 AND label_20x=1 THEN 1 ELSE 0 END) AS good,
-            AVG(CASE WHEN was_swan=1 THEN best_possible_x END) AS avg_x
+            AVG(CASE WHEN was_swan=1 THEN best_max_traded_x END) AS avg_x
         FROM feature_mart_v1_1
         GROUP BY bucket
         ORDER BY MIN(duration_hours)
@@ -405,7 +404,7 @@ def cohort_analysis(conn: sqlite3.Connection) -> None:
             COUNT(*) AS total,
             SUM(was_swan) AS swans,
             SUM(CASE WHEN was_swan=1 AND label_20x=1 THEN 1 ELSE 0 END) AS good,
-            AVG(CASE WHEN was_swan=1 THEN best_possible_x END) AS avg_x
+            AVG(CASE WHEN was_swan=1 THEN best_max_traded_x END) AS avg_x
         FROM feature_mart_v1_1
         GROUP BY neg_risk
     """).fetchall()
@@ -429,7 +428,7 @@ def cohort_analysis(conn: sqlite3.Connection) -> None:
             COUNT(*) AS total,
             SUM(was_swan) AS swans,
             SUM(CASE WHEN was_swan=1 AND label_20x=1 THEN 1 ELSE 0 END) AS good,
-            AVG(CASE WHEN was_swan=1 THEN best_possible_x END) AS avg_x
+            AVG(CASE WHEN was_swan=1 THEN best_max_traded_x END) AS avg_x
         FROM feature_mart_v1_1
         GROUP BY cat, vol_bucket
         HAVING total >= 30
@@ -461,7 +460,7 @@ def cohort_analysis(conn: sqlite3.Connection) -> None:
             SELECT COUNT(*) AS n,
                    SUM(was_swan) AS sw,
                    SUM(CASE WHEN was_swan=1 AND label_20x=1 THEN 1 ELSE 0 END) AS gd,
-                   AVG(CASE WHEN was_swan=1 THEN best_possible_x END) AS avg_x
+                   AVG(CASE WHEN was_swan=1 THEN best_max_traded_x END) AS avg_x
             FROM feature_mart_v1_1
             WHERE volume_usdc >= ?
         """, (p90[0],)).fetchone()
@@ -490,8 +489,8 @@ Based on the cohort data above:
   niche_score      (w2 = 0.25):
     Captures "traded but not saturated." Markets with high volume/liquidity
     ratio have real activity but also more efficient pricing.
-    Proxy: 1 / (1 + log1p(entry_trade_count)) — fewer trades at floor = more neglected.
-    NOTE: needs entry_trade_count from screener, not available pre-entry.
+    Proxy: 1 / (1 + log1p(buy_trade_count)) — fewer trades at floor = more neglected.
+    NOTE: needs buy_trade_count from screener, not available pre-entry.
     At screener stage: use comment_count as attention proxy (lower = more niche).
 
   context_score    (w3 = 0.10):

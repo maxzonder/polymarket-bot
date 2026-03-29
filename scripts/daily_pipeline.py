@@ -3,7 +3,7 @@ Daily ML Pipeline v1.1 — orchestrates all data collection and labeling steps.
 
 Run this once per day (e.g. via cron at 04:00 UTC) to:
   1. Run swan_analyzer on any newly closed markets
-  2. Rebuild feature_mart_v1_1 (market-level features for MarketScorer)  ← NEW v1.1
+  2. Rebuild feature_mart_v1_1 (market-level features for MarketScorer, via analyzer/)  ← NEW v1.1
   3. Rebuild feature_mart legacy (token-level, for EntryFillScorer/ResolutionScorer denominators)
   4. Materialize ml_outcomes (accepted candidates → fill/resolution labels)
   5. Materialize ml_rejected_outcomes (rejected markets → missed opportunity labels)
@@ -104,7 +104,7 @@ def step_feature_mart_v1_1(dataset_db: str) -> bool:
     """Rebuild feature_mart_v1_1 (market-level features for MarketScorer — v1.1)."""
     return _run("feature_mart_v1_1", [
         sys.executable,
-        str(SCRIPTS_DIR / "market_level_features_v1_1.py"),
+        str(ANALYZER_DIR / "market_level_features_v1_1.py"),
         "--recompute",
     ])
 
