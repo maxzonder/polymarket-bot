@@ -4,11 +4,10 @@ Daily ML Pipeline v1.1 — orchestrates all data collection and labeling steps.
 Run this once per day (e.g. via cron at 04:00 UTC) to:
   1. Run swan_analyzer on any newly closed markets
   2. Rebuild feature_mart_v1_1 (market-level features for MarketScorer, via analyzer/)  ← NEW v1.1
-  3. Rebuild feature_mart legacy (token-level, for EntryFillScorer/ResolutionScorer denominators)
-  4. Materialize ml_outcomes (accepted candidates → fill/resolution labels)
-  5. Materialize ml_rejected_outcomes (rejected markets → missed opportunity labels)
-  6. Recalibrate scorer thresholds → recommended_config.json
-  7. Print unified summary report
+  3. Materialize ml_outcomes (accepted candidates → fill/resolution labels)
+  4. Materialize ml_rejected_outcomes (rejected markets → missed opportunity labels)
+  5. Recalibrate scorer thresholds → recommended_config.json
+  6. Print unified summary report
 
 The trading bot runs independently and is NOT touched by this pipeline.
 
@@ -17,7 +16,6 @@ Usage:
     python scripts/daily_pipeline.py --summary
     python scripts/daily_pipeline.py --step analyzer            # single step
     python scripts/daily_pipeline.py --step feature_mart_v1_1
-    python scripts/daily_pipeline.py --step feature_mart
     python scripts/daily_pipeline.py --step ml_outcomes
     python scripts/daily_pipeline.py --step rejected_outcomes
     python scripts/daily_pipeline.py --step recalibrate
@@ -105,15 +103,6 @@ def step_feature_mart_v1_1(dataset_db: str) -> bool:
     return _run("feature_mart_v1_1", [
         sys.executable,
         str(ANALYZER_DIR / "market_level_features_v1_1.py"),
-        "--recompute",
-    ])
-
-
-def step_feature_mart(dataset_db: str) -> bool:
-    """Rebuild feature_mart legacy (token-level, for EntryFillScorer/ResolutionScorer)."""
-    return _run("feature_mart", [
-        sys.executable,
-        str(SCRIPTS_DIR / "build_feature_mart.py"),
         "--recompute",
     ])
 
@@ -208,7 +197,6 @@ def print_pipeline_summary(positions_db: str, dataset_db: str) -> None:
 STEPS = {
     "analyzer":            step_analyzer,
     "feature_mart_v1_1":   step_feature_mart_v1_1,
-    "feature_mart":        step_feature_mart,
     "ml_outcomes":         step_ml_outcomes,
     "rejected_outcomes":   step_rejected_outcomes,
     "recalibrate":         step_recalibrate,
@@ -233,7 +221,7 @@ def run_pipeline(
             logger.error(f"Unknown step: {only_step!r}. Choose from: {list(STEPS)}")
             return 1
         fn = STEPS[only_step]
-        if only_step in ("analyzer", "feature_mart_v1_1", "feature_mart"):
+        if only_step in ("analyzer", "feature_mart_v1_1"):
             ok = fn(dataset_db)
         elif only_step == "ml_outcomes":
             ok = fn(positions_db)
@@ -244,7 +232,6 @@ def run_pipeline(
         # Full pipeline — order matters
         results["analyzer"]          = step_analyzer(dataset_db)
         results["feature_mart_v1_1"] = step_feature_mart_v1_1(dataset_db)
-        results["feature_mart"]      = step_feature_mart(dataset_db)
         results["ml_outcomes"]       = step_ml_outcomes(positions_db)
         results["rejected_outcomes"] = step_rejected_outcomes(positions_db, dataset_db)
         results["recalibrate"]       = step_recalibrate(positions_db, dataset_db)
