@@ -291,11 +291,17 @@ def run_pipeline(
         # Full pipeline — order matters
         # Compute ingest range once so analyzer uses the exact same window
         ingest_range = _compute_ingest_range()
-        results["ingest"]            = step_ingest(dataset_db, ingest_range)
-        date_from = ingest_range[0].isoformat() if ingest_range else None
-        date_to   = ingest_range[1].isoformat() if ingest_range else None
-        results["analyzer"]          = step_analyzer(dataset_db, date_from, date_to)
-        results["feature_mart_v1_1"] = step_feature_mart_v1_1(dataset_db)
+        results["ingest"] = step_ingest(dataset_db, ingest_range)
+
+        if ingest_range is None:
+            # Nothing new — skip data-dependent steps to avoid redundant work
+            logger.info("No new data ingested — skipping analyzer, feature_mart_v1_1")
+        else:
+            date_from = ingest_range[0].isoformat()
+            date_to   = ingest_range[1].isoformat()
+            results["analyzer"]          = step_analyzer(dataset_db, date_from, date_to)
+            results["feature_mart_v1_1"] = step_feature_mart_v1_1(dataset_db)
+
         results["ml_outcomes"]       = step_ml_outcomes(positions_db)
         results["rejected_outcomes"] = step_rejected_outcomes(positions_db, dataset_db)
         results["recalibrate"]       = step_recalibrate(positions_db, dataset_db)
