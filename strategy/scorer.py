@@ -105,17 +105,17 @@ class EntryFillScorer:
                     m.category,
                     COUNT(DISTINCT s.market_id) AS markets_with_swan,
                     COUNT(*) AS swan_count,
-                    AVG(s.entry_volume_usdc) AS avg_entry_vol,
-                    AVG(CASE WHEN s.entry_ts_last IS NOT NULL AND s.entry_ts_first IS NOT NULL
-                             THEN s.entry_ts_last - s.entry_ts_first ELSE 0 END) AS avg_floor_dur
+                    AVG(s.buy_volume) AS avg_entry_vol,
+                    AVG(CASE WHEN s.buy_ts_last IS NOT NULL AND s.buy_ts_first IS NOT NULL
+                             THEN s.buy_ts_last - s.buy_ts_first ELSE 0 END) AS avg_floor_dur
                 FROM swans_v2 s
                 JOIN markets m ON s.market_id = m.id
-                WHERE s.entry_min_price <= ?
+                WHERE s.buy_min_price <= ?
                   AND (
                     m.closed_time IS NULL
-                    OR s.entry_ts_first IS NULL
+                    OR s.buy_ts_first IS NULL
                     OR m.duration_hours IS NULL
-                    OR s.entry_ts_first < m.closed_time - m.duration_hours * 3600 * 0.02
+                    OR s.buy_ts_first < m.closed_time - m.duration_hours * 3600 * 0.02
                   )
                 GROUP BY m.category
             """, (self.entry_price_max,)).fetchall()
@@ -221,12 +221,12 @@ class ResolutionScorer:
                 m.category,
                 COUNT(*) AS total,
                 SUM(s.is_winner) AS winners,
-                AVG(s.real_x) AS avg_real_x,
-                AVG(s.resolution_x) AS avg_res_x,
-                SUM(CASE WHEN s.real_x >= 20 THEN 1 ELSE 0 END) AS cnt_20x,
-                SUM(CASE WHEN s.real_x >= 50 THEN 1 ELSE 0 END) AS cnt_50x,
-                SUM(CASE WHEN s.real_x >= 100 THEN 1 ELSE 0 END) AS cnt_100x,
-                AVG(CASE WHEN s.real_x >= 20 THEN s.real_x ELSE NULL END) AS avg_tail_x
+                AVG(s.max_traded_x) AS avg_real_x,
+                AVG(s.payout_x) AS avg_res_x,
+                SUM(CASE WHEN s.max_traded_x >= 20 THEN 1 ELSE 0 END) AS cnt_20x,
+                SUM(CASE WHEN s.max_traded_x >= 50 THEN 1 ELSE 0 END) AS cnt_50x,
+                SUM(CASE WHEN s.max_traded_x >= 100 THEN 1 ELSE 0 END) AS cnt_100x,
+                AVG(CASE WHEN s.max_traded_x >= 20 THEN s.max_traded_x ELSE NULL END) AS avg_tail_x
             FROM swans_v2 s
             JOIN markets m ON s.market_id = m.id
             GROUP BY m.category

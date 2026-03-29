@@ -245,15 +245,15 @@ MODES: dict[str, ModeConfig] = {
 
 # ── Swan analyzer global threshold ────────────────────────────────────────────
 # Must cover ALL entry_price_levels across ALL modes.
-# swan_analyzer.py uses this as --entry-threshold default.
+# swan_analyzer.py uses this as --buy-price-threshold default.
 # If a mode has entry levels above this value, swans_v2 will be missing data
 # for those levels and scorer/feature_mart will have blind spots.
-SWAN_ENTRY_THRESHOLD: float = max(
+SWAN_BUY_PRICE_THRESHOLD: float = max(
     max(m.entry_price_levels) for m in MODES.values()
 )
 
 
-def check_swan_threshold(threshold: float) -> list[str]:
+def check_swan_buy_price_threshold(threshold: float) -> list[str]:
     """
     Returns a list of warning strings if threshold doesn't cover all mode entry levels.
     Empty list = OK.
