@@ -9,7 +9,7 @@
 ### `daily_pipeline.py`
 Оркестратор всех ML-шагов. **Запускается автоматически ботом каждый день в 04:00 UTC**
 через `_daily_pipeline_loop` в `bot/main_loop.py` — cron не нужен.
-Порядок шагов: `analyzer` → `feature_mart_v1_1` → `feature_mart` → `ml_outcomes` → `rejected_outcomes` → `recalibrate`.
+Порядок шагов: `analyzer` → `feature_mart_v1_1` → `ml_outcomes` → `rejected_outcomes` → `recalibrate`.
 После успешного прогона бот автоматически рефрешит `MarketScorer`.
 
 Ручной запуск (отладка / разовый прогон):
@@ -39,7 +39,7 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 Одноразовый legacy-скрипт: дозаполняет поля `restricted` и `volume_1wk` в таблице `markets`
 для исторических записей, читая сырые JSON-файлы.
 
-### `report_analyzer_stats.py`
+### `report_analyzer_stats.py`  *(moved to `_legacy/`)*
 Статистика по таблице `token_swans`: покрытие дат, количество лебедей, распределение
 x-мультипликаторов, топ категорий и рынков. Read-only, только для анализа.
 
@@ -58,11 +58,10 @@ python analyzer/market_level_features_v1_1.py
 python analyzer/market_level_features_v1_1.py --recompute
 ```
 
-### `build_feature_mart.py`  *(legacy v1)*
-Строит token-level `feature_mart` в `polymarket_dataset.db`. Используется `EntryFillScorer`
+### `build_feature_mart.py`  *(moved to `_legacy/`)*
+Строит token-level `feature_mart` в `polymarket_dataset.db`. Использовался `EntryFillScorer`
 и `ResolutionScorer` для знаменателей скоринга (общий счётчик рынков по категориям).
-В v1.1 заменён `market_level_features_v1_1.py` для `MarketScorer`, но продолжает работать
-параллельно для legacy-скореров.
+Заменён `market_level_features_v1_1.py` в v1.1. Перенесён в `_legacy/`.
 
 ---
 
@@ -109,27 +108,21 @@ python scripts/run_honest_replay.py --start 2025-12-01 --end 2026-02-28
 python scripts/run_honest_replay.py --start 2025-12-01 --end 2026-02-28 --summary
 ```
 
-### `run_dry_run_replay.py`
+### `run_dry_run_replay.py`  *(moved to `_legacy/`)*
 Упрощённый бэктест: реплеит только известные события из `swans_v2` через `OrderManager`.
-Быстрее, но оптимистичнее — видит только рынки где лебедь уже случился.
+Быстрее, но оптимистичнее — видит только рынки где лебедь уже случился. Перенесён в `_legacy/`.
 
-```bash
-python scripts/run_dry_run_replay.py --months dec jan feb --summary
-python scripts/run_dry_run_replay.py --pessimistic          # delay=300s, fill_fraction=0.3
-python scripts/run_dry_run_replay.py --activation-delay 300 --fill-fraction 0.3
-```
-
-### `replay_cohort_report.py`
+### `replay_cohort_report.py`  *(moved to `_legacy/`)*
 Запускает реплей по когортам `swan_score` (high/mid/low) и сравнивает результаты.
-Отчёт: candidates, fill_rate, winner_rate, stake, PnL, ROI по когорте.
+Отчёт: candidates, fill_rate, winner_rate, stake, PnL, ROI по когорте. Перенесён в `_legacy/`.
 
-### `entry_stack_comparison.py`
+### `entry_stack_comparison.py`  *(moved to `_legacy/`)*
 Анализ вклада отдельных ценовых уровней в ROI. Помогает решить — стоит ли оставлять
-самый глубокий уровень (0.002) в стеке, или он только снижает ROI.
+самый глубокий уровень (0.002) в стеке, или он только снижает ROI. Перенесён в `_legacy/`.
 
-### `optimize_profit_take_strategy.py`
+### `optimize_profit_take_strategy.py`  *(moved to `_legacy/`)*
 Оптимизация схем выхода (full_exit_single, ascending_ladder, fixed_tail_500).
-Тестирует разные комбинации TP-целей и весов на данных `token_swans`. Legacy-исследование.
+Тестирует разные комбинации TP-целей и весов на данных `token_swans`. Перенесён в `_legacy/`.
 
 ---
 
@@ -149,9 +142,9 @@ python scripts/validate_clob_pricing_v1_1.py --samples 100
 TP/PnL учёт, проигрыш на resolution). Проверяет корректность схемы `positions.db`
 и логику `OrderManager`.
 
-### `validate_content_signal.py`
+### `validate_content_signal.py`  *(moved to `_legacy/`)*
 Исследование: проверяет семантический сигнал из ChromaDB (похожие прошлые рынки).
-Тест монотонности Q1 vs Q4 по win_rate. Не интегрирован в бот.
+Тест монотонности Q1 vs Q4 по win_rate. Не интегрирован в бот. Перенесён в `_legacy/`.
 
 ---
 
@@ -185,7 +178,7 @@ python scripts/paper_balance.py history --limit 20
 
 ## Исследования (не интегрированы в бот)
 
-### `build_chroma.py`
-Строит ChromaDB векторное хранилище из таблицы `markets`. Используется
+### `build_chroma.py`  *(moved to `_legacy/`)*
+Строит ChromaDB векторное хранилище из таблицы `markets`. Использовалось
 `validate_content_signal.py` для семантического поиска похожих рынков.
-Модель: `all-MiniLM-L6-v2` (ONNX).
+Модель: `all-MiniLM-L6-v2` (ONNX). Перенесён в `_legacy/`.
