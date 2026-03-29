@@ -43,7 +43,7 @@ logger = setup_logger("swan_analyzer")
 # ── Defaults ─────────────────────────────────────────────────────────────────
 DEFAULT_BUY_PRICE_THRESHOLD = SWAN_BUY_PRICE_THRESHOLD  # derived from max(entry_price_levels) across all modes
 DEFAULT_MIN_BUY_VOLUME  = 1.0    # мин. ликвидность на дне (объём сделок < threshold)
-DEFAULT_MIN_SELL_VOLUME = 5.0    # мин. ликвидность на выходе (объём сделок >= exit_price)
+DEFAULT_MIN_SELL_VOLUME = 30.0   # мин. ликвидность на выходе (объём сделок >= exit_price)
 DEFAULT_MIN_REAL_X      = 5.0    # минимальный реальный икс
 
 CREATE_TABLE = """

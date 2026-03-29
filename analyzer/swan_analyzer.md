@@ -21,7 +21,7 @@ python3 analyzer/swan_analyzer.py --date-from 2026-03-01 --date-to 2026-03-18
 |------|-------------|----------|
 | `--buy-price-threshold` | `SWAN_BUY_PRICE_THRESHOLD` из `config.py` (сейчас 0.20) | Порог цены дна — токен должен торговаться ниже этого значения |
 | `--min-buy-volume` | 1.0 | Мин. объём сделок в зоне дна (можно войти) |
-| `--min-sell-volume` | 5.0 | Мин. объём сделок на выходе >= buy_min_price * min_real_x (можно продать) |
+| `--min-sell-volume` | 30.0 | Мин. объём сделок на выходе >= buy_min_price * min_real_x (можно продать) |
 | `--min-real-x` | 5.0 | Минимальный реальный икс для записи в таблицу |
 | `--recompute` | — | Дропнуть и пересоздать `swans_v2`, затем заполнить |
 
