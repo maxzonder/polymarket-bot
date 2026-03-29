@@ -6,13 +6,13 @@
 
 ```bash
 # Полный пересчёт всей истории
-python scripts/swan_analyzer.py --recompute --date-from 2025-08-01 --date-to 2026-03-15
+python3 analyzer/swan_analyzer.py --recompute --date-from 2025-08-01 --date-to 2026-03-18
 
 # Один день (инкрементальный запуск из daily_pipeline)
-python scripts/swan_analyzer.py --date 2026-03-28
+python3 analyzer/swan_analyzer.py --date 2026-03-18
 
 # Диапазон без очистки (UPSERT по token_id + date)
-python scripts/swan_analyzer.py --date-from 2026-03-01 --date-to 2026-03-28
+python3 analyzer/swan_analyzer.py --date-from 2026-03-01 --date-to 2026-03-18
 ```
 
 ## Параметры
@@ -29,20 +29,40 @@ python scripts/swan_analyzer.py --date-from 2026-03-01 --date-to 2026-03-28
 
 ## Алгоритм (на один токен)
 
-1. **Загрузить трейды** из `database/{date}/{market_id}_trades/{token_id}.json`, отсортировать по timestamp
-2. **Найти глобальный минимум** цены по всей истории токена
-3. Если `min_price >= entry_threshold` → не лебедь, пропустить
-4. **Построить зону дна**: расширить от глобального минимума в обе стороны пока цена < entry_threshold
-5. Проверить `entry_volume_usdc >= min_entry_usdc` — иначе пропустить
-6. **Проверить ликвидность выхода** (только для не-победителей):
-   - собрать трейды после зоны дна с ценой >= `buy_min_price × min_real_x`
-   - если `sell_volume < min_sell_volume` → пропустить
-   - для победителей (`is_winner=1`) пропуск не нужен — Polymarket выплачивает $1 за токен
-7. **Рассчитать max_traded_x**:
-   - победитель: `max_traded_x = 1.0 / buy_min_price`
-   - не победитель: `max_traded_x = max_price_after_floor / buy_min_price`
-8. Если `max_traded_x < min_real_x` → пропустить
-9. Записать UPSERT в `swans_v2`
+1. **Загрузить трейды** из `database/{date}/{market_id}_trades/{token_id}.json`, отсортировать по timestamp.
+   Каждый трейд: `{price, size, side, timestamp}`. Объём в USDC = `price × size`.
+
+2. **Найти глобальный минимум цены** — самую низкую цену за всю историю токена среди всех трейдов.
+
+3. **Проверить порог**: если `buy_min_price >= buy_price_threshold` (сейчас 0.20) → не лебедь, пропустить.
+   Смысл: нас интересуют только токены, которые в какой-то момент торговались очень дёшево.
+
+4. **Построить зону дна** (buy zone): от трейда с глобальным минимумом расширяем в обе стороны по времени,
+   захватывая все соседние трейды пока их цена < `buy_price_threshold`.
+   Это непрерывный временной отрезок, когда токен был "на полу".
+   Записываем: `buy_ts_first`, `buy_ts_last`, `buy_volume` (сумма USDC в зоне), `buy_trade_count`.
+
+5. **Проверить ликвидность покупки**: если `buy_volume < min_buy_volume` (1.0 USDC) → пропустить.
+   Смысл: убедиться что на уровне дна реально были сделки, а не единичная аномалия.
+
+6. **Проверить ликвидность продажи** (только для не-победителей):
+   - берём все трейды *после* зоны дна с ценой >= `buy_min_price × min_real_x` (целевой уровень выхода)
+   - суммируем объём → `sell_volume`
+   - если `sell_volume < min_sell_volume` (5.0 USDC) → пропустить
+   - для победителей (`is_winner=1`) этот шаг пропускается: Polymarket выплачивает $1 за каждый токен
+     при резолюции через смарт-контракт, контрагент не нужен.
+
+7. **Рассчитать max_traded_x** — фактический максимальный икс относительно цены входа:
+   - победитель: `max_traded_x = 1.0 / buy_min_price` (гарантированная выплата $1)
+   - не победитель: `max_traded_x = max_price_after_floor / buy_min_price` (максимум цены после зоны дна)
+
+   Пример: купил на дне по 0.01 → max_traded_x = 100x для победителя, или цена поднялась до 0.50 → max_traded_x = 50x для не-победителя.
+
+8. **Проверить минимальный икс**: если `max_traded_x < min_real_x` (5.0) → пропустить.
+   Отсекаем незначительные отскоки.
+
+9. **Записать UPSERT в `swans_v2`** по ключу `(token_id, date)`.
+   При повторном прогоне того же диапазона обновляет `max_traded_x`, `is_winner`, `payout_x`, `sell_volume`.
 
 ### Ключевые отличия от старого `analyzer.py` (zigzag)
 
@@ -108,8 +128,8 @@ SWAN_BUY_PRICE_THRESHOLD = max(max(m.entry_price_levels) for m in MODES.values()
 
 ## Текущее состояние
 
-После запуска `--recompute --date-from 2025-08-01 --date-to 2026-03-15` с `threshold=0.20` (Mar 28 2026):
-- **32,980 событий** в `swans_v2` (было 3,943 при threshold=0.02)
-- avg real_x = 14.45x, max = 1000x
-- winners = 24,424 (74%)
-- avg entry liquidity = $496.51
+После запуска `--recompute --date-from 2025-08-01 --date-to 2026-03-18` с `threshold=0.20` (Mar 29 2026):
+- **33,092 событий** в `swans_v2` (было 3,943 при threshold=0.02)
+- avg max_traded_x = 14.44x, max = 1000x
+- winners = 24,503 (74%)
+- avg buy_volume = $495.46
