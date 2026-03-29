@@ -47,14 +47,15 @@ x-мультипликаторов, топ категорий и рынков. R
 
 ## Feature Engineering
 
-### `market_level_features_v1_1.py`  *(новый в v1.1)*
+### `../analyzer/market_level_features_v1_1.py`  *(новый в v1.1)*
 Строит `feature_mart_v1_1` в `polymarket_dataset.db` — market-level фичи для `MarketScorer`.
-Одна строка на рынок (не на событие-лебедь). Позитивы: любой токен с `entry_min_price <= 0.02`.
+Одна строка на рынок (не на событие-лебедь). Позитивы: любой токен с `buy_min_price <= 0.20`.
+Источник данных: `swans_v2` (история Aug 2025 – Mar 2026).
 После сборки автоматически запускает когортный анализ сепарабельности признаков.
 
 ```bash
-python scripts/market_level_features_v1_1.py
-python scripts/market_level_features_v1_1.py --recompute
+python analyzer/market_level_features_v1_1.py
+python analyzer/market_level_features_v1_1.py --recompute
 ```
 
 ### `build_feature_mart.py`  *(legacy v1)*
