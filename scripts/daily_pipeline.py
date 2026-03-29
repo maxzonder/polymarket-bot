@@ -2,19 +2,21 @@
 Daily ML Pipeline v1.1 — orchestrates all data collection and labeling steps.
 
 Run this once per day (e.g. via cron at 04:00 UTC) to:
-  1. Run swan_analyzer on any newly closed markets
-  2. Rebuild feature_mart_v1_1 (market-level features for MarketScorer, via analyzer/)  ← NEW v1.1
-  3. Materialize ml_outcomes (accepted candidates → fill/resolution labels)
-  4. Materialize ml_rejected_outcomes (rejected markets → missed opportunity labels)
-  5. Recalibrate scorer thresholds → recommended_config.json
-  6. Print unified summary report
+  1. Ingest new market data (download + parse) from last collected date up to yesterday
+  2. Run swan_analyzer on any newly closed markets
+  3. Rebuild feature_mart_v1_1 (market-level features for MarketScorer, via analyzer/)
+  4. Materialize ml_outcomes (accepted candidates → fill/resolution labels)
+  5. Materialize ml_rejected_outcomes (rejected markets → missed opportunity labels)
+  6. Recalibrate scorer thresholds → recommended_config.json
+  7. Print unified summary report
 
 The trading bot runs independently and is NOT touched by this pipeline.
 
 Usage:
     python scripts/daily_pipeline.py
     python scripts/daily_pipeline.py --summary
-    python scripts/daily_pipeline.py --step analyzer            # single step
+    python scripts/daily_pipeline.py --step ingest               # single step
+    python scripts/daily_pipeline.py --step analyzer
     python scripts/daily_pipeline.py --step feature_mart_v1_1
     python scripts/daily_pipeline.py --step ml_outcomes
     python scripts/daily_pipeline.py --step rejected_outcomes
@@ -36,26 +38,28 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from utils.logger import setup_logger
-from utils.paths import DATA_DIR, DB_PATH
+from utils.paths import DATA_DIR, DATABASE_DIR, DB_PATH
 
 logger = setup_logger("daily_pipeline")
 
 POSITIONS_DB  = DATA_DIR / "positions.db"
 OUTPUT_CONFIG = DATA_DIR / "recommended_config.json"
 
-SCRIPTS_DIR = Path(__file__).parent
-ANALYZER_DIR = SCRIPTS_DIR.parent / "analyzer"
+SCRIPTS_DIR       = Path(__file__).parent
+ANALYZER_DIR      = SCRIPTS_DIR.parent / "analyzer"
+DATA_COLLECTOR    = SCRIPTS_DIR.parent / "data_collector" / "data_collector_and_parsing.py"
 
 
 # ─── Step runner ─────────────────────────────────────────────────────────────
 
-def _run(label: str, cmd: list[str]) -> bool:
+def _run(label: str, cmd: list[str], timeout: Optional[int] = 600) -> bool:
     """Run a subprocess step. Returns True on success."""
     logger.info(f"[{label}] starting: {' '.join(cmd)}")
     t0 = time.time()
@@ -64,7 +68,7 @@ def _run(label: str, cmd: list[str]) -> bool:
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=timeout,
         )
         elapsed = time.time() - t0
         if result.returncode == 0:
@@ -88,6 +92,44 @@ def _run(label: str, cmd: list[str]) -> bool:
 
 
 # ─── Individual steps ─────────────────────────────────────────────────────────
+
+def _find_last_collected_date() -> Optional[date]:
+    """Return the most recent date directory in DATABASE_DIR, or None if empty."""
+    if not DATABASE_DIR.exists():
+        return None
+    candidates = []
+    for entry in DATABASE_DIR.iterdir():
+        if entry.is_dir():
+            try:
+                candidates.append(date.fromisoformat(entry.name))
+            except ValueError:
+                pass
+    return max(candidates) if candidates else None
+
+
+def step_ingest(dataset_db: str) -> bool:
+    """Download and parse market data from last collected date up to yesterday."""
+    yesterday = date.today() - timedelta(days=1)
+    last_date = _find_last_collected_date()
+
+    if last_date is None:
+        logger.warning("[ingest] No existing date directories found in database/ — skipping auto-ingest. "
+                       "Run data_collector_and_parsing.py manually with --start/--end first.")
+        return True
+
+    start = last_date + timedelta(days=1)
+    if start > yesterday:
+        logger.info(f"[ingest] Already up to date (last={last_date}, yesterday={yesterday}) — nothing to fetch")
+        return True
+
+    logger.info(f"[ingest] Catching up: {start} → {yesterday}")
+    return _run("ingest", [
+        sys.executable,
+        str(DATA_COLLECTOR),
+        "--start", start.isoformat(),
+        "--end",   yesterday.isoformat(),
+    ], timeout=None)
+
 
 def step_analyzer(dataset_db: str) -> bool:
     """Run swan_analyzer incrementally (new closed markets only)."""
@@ -195,6 +237,7 @@ def print_pipeline_summary(positions_db: str, dataset_db: str) -> None:
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 STEPS = {
+    "ingest":              step_ingest,
     "analyzer":            step_analyzer,
     "feature_mart_v1_1":   step_feature_mart_v1_1,
     "ml_outcomes":         step_ml_outcomes,
@@ -221,7 +264,7 @@ def run_pipeline(
             logger.error(f"Unknown step: {only_step!r}. Choose from: {list(STEPS)}")
             return 1
         fn = STEPS[only_step]
-        if only_step in ("analyzer", "feature_mart_v1_1"):
+        if only_step in ("ingest", "analyzer", "feature_mart_v1_1"):
             ok = fn(dataset_db)
         elif only_step == "ml_outcomes":
             ok = fn(positions_db)
@@ -230,6 +273,7 @@ def run_pipeline(
         results[only_step] = ok
     else:
         # Full pipeline — order matters
+        results["ingest"]            = step_ingest(dataset_db)
         results["analyzer"]          = step_analyzer(dataset_db)
         results["feature_mart_v1_1"] = step_feature_mart_v1_1(dataset_db)
         results["ml_outcomes"]       = step_ml_outcomes(positions_db)
