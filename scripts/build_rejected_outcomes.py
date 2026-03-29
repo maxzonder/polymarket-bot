@@ -3,7 +3,7 @@ Build Rejected Outcomes — post-hoc labels for markets the screener rejected.
 
 Joins:
   screener_log (positions.db)  — features and rejection reason at scan time
-  token_swans  (dataset DB)    — post-hoc ground truth: did a floor event happen?
+  swans_v2     (dataset DB)    — post-hoc ground truth: did a floor event happen?
   tokens       (dataset DB)    — is_winner
 
 Output: ml_rejected_outcomes table in dataset DB.
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS ml_rejected_outcomes (
     is_winner            INTEGER,
 
     -- Derived label
-    -- 1 if had_swan_event AND entry_min_price <= 0.02 (deep floor we target)
+    -- 1 if had_swan_event AND entry_min_price <= 0.20 (covers all bot entry levels)
     was_missed_opportunity INTEGER NOT NULL DEFAULT 0,
 
     UNIQUE(market_id, token_id)
@@ -133,12 +133,12 @@ def build(
         ds_conn.commit()
         logger.info("ml_rejected_outcomes cleared for full rebuild")
 
-    # Load token_swans into memory (11–12k rows at entry<=0.05, manageable)
+    # Load swans_v2 into memory for post-hoc labeling
     ts_rows = ds_conn.execute(
-        "SELECT token_id, entry_min_price, possible_x FROM token_swans"
+        "SELECT token_id, buy_min_price, max_traded_x FROM swans_v2"
     ).fetchall()
     ts_map: dict[str, dict] = {r["token_id"]: dict(r) for r in ts_rows}
-    logger.info(f"Loaded {len(ts_map)} token_swans rows for labeling")
+    logger.info(f"Loaded {len(ts_map)} swans_v2 rows for labeling")
 
     # Load is_winner from tokens table
     tk_rows = ds_conn.execute("SELECT token_id, is_winner FROM tokens").fetchall()
@@ -202,12 +202,12 @@ def build(
         # Post-hoc truth — present only if analyzer has processed this market
         ts = ts_map.get(token_id) if token_id else None
         had_swan     = 1 if ts else 0
-        entry_min_p  = ts["entry_min_price"] if ts else None
-        possible_x   = ts["possible_x"]      if ts else None
-        is_winner    = tk_map.get(token_id)  if token_id else None
+        entry_min_p  = ts["buy_min_price"]  if ts else None
+        possible_x   = ts["max_traded_x"]   if ts else None
+        is_winner    = tk_map.get(token_id) if token_id else None
 
-        # Missed opportunity = had swan AND floor was deep enough to be our target
-        was_missed = 1 if (had_swan and entry_min_p is not None and entry_min_p <= 0.02) else 0
+        # Missed opportunity = had swan AND floor was within our entry range
+        was_missed = 1 if (had_swan and entry_min_p is not None and entry_min_p <= 0.20) else 0
 
         params.append((
             now,
