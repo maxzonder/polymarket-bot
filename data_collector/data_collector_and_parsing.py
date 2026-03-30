@@ -398,12 +398,16 @@ _CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
         "bnb", "hyperliquid", "hype", "ethena", "ena", "chainlink", "link", "avax", "avalanche",
         "polygon", "matic", "arbitrum", "arb", "optimism", "op ", "sui ", "aptos", "apt ",
         "pepe", "shib", "floki", "wif ", "bonk", "meme", "airdrop", "nft",
+        "litecoin", "ltc", "cardano", "ada", "polkadot", "dot ", "uniswap", "uni ",
+        "near ", "injective", "inj ", "sei ", "mantle", "mnt ",
         # stock indices
         "nikkei", "dow jones", "dji", "ftse", "dax", "hang seng", "hsi", "russell", "rut ",
         "nya ", "nyk ",
         # individual stocks
         "palantir", "pltr", "airbnb", "abnb", "rocket lab", "rklb", "opendoor",
         "coinbase", "coin ", "robinhood", "hood ", "rivian", "lucid", "rivn",
+        # commodities
+        "uranium", "natural gas", "copper", "platinum", "wheat", "corn ", "soybean",
         "up or down",
     )),
     ("sports", (
@@ -413,27 +417,95 @@ _CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
         "sailgp", "sailing", "golf", "pga", "masters", "nascar", "indycar", "mls", "wnba",
         "olympics", "wimbledon", "tour de france", "cycling", "swimming", "athletics",
         "boxing", "wrestling", "esports", "league of legends", "dota", "cs2",
+        # chess
+        "chess", "fide", "world chess", "grand chess tour", "sinquefield cup", "candidates tournament",
+        # darts
+        "darts", "pdc", "bdo darts",
+        # motorsport
+        "motogp", "moto2", "moto3", "superbike", "wsbk",
+        # pickleball
+        "pickleball", "ppa",
+        # volleyball
+        "volleyball", "beach volleyball",
+        # basketball (non-NBA)
+        "basketball", "eurobasket", "fiba", "ncaa", "march madness",
+        # college sports
+        "college football", "college basketball", "cfp", "heisman", "big 10", "big ten", "sec ", "acc ",
+        "pac-12", "big 12", "carabao cup", "fa cup", "copa del rey", "dfb pokal",
+        # transfer windows / specific sports terms
+        "transfer window", "sign with", "sign for",
+        # esports (additional)
+        "valorant", "overwatch", "rocket league", "lck", "lpl", "cblol", "fncs", "fortnite championship",
+        "hltv", "blast", "iem ", "esl pro",
+        # other sports
+        "rugby", "handball", "snooker", "badminton", "table tennis", "archery", "equestrian",
+        "marathon", "triathlon", "ironman", "motocross",
+        # tennis tours (ATP/WTA often appear without the word "tennis")
+        "atp ", "wta ",
+        # horse racing
+        "horse racing", "ladbrokes", "jockey", "racecourse", "epsom", "kentucky derby",
+        "melbourne cup", "ascot", "cheltenham",
+        # additional leagues
+        "ligue 1", "ligue 2", "eredivisie", "a-league", "j-league", "k-league",
+        "super lig", "primeira liga",
     )),
     ("politics", (
         "trump", "biden", "election", "senate", "house", "republican", "democrat", "white house",
         "prime minister", "president", "governor", "mayor", "parliament", "minister",
         "elon musk", "doge ", "department of",
-        "unemployment rate", "gdp", "inflation", "interest rate", "jobs report",
+        "unemployment rate", "gdp", "inflation", "interest rate", "interest rates", "jobs report",
+        "nonfarm payroll", "add jobs", "bps after",
+        # specific politicians likely to appear in markets
+        "zelenskyy", "zelensky", "maduro", "macron", "scholz", "modi ", "erdogan", "netanyahu",
+        "sanders", "aoc ", "ocasio-cortez", "pelosi", "mcconnell", "schumer",
+        "south korea", "yoon ",
+        # policy topics
+        "tariff", "sanctions", "veto", "impeach", "resign", "cabinet",
+        "supreme court", "federal reserve", "powell", "yellen",
+        "bank of england", "european central bank", "ecb ", "bank of japan",
+        "redistrict", "border encounter", "border crossing",
     )),
     ("geopolitics", (
         "iran", "iraq", "israel", "gaza", "hamas", "hezbollah", "ukraine", "russia", "china", "taiwan",
         "strike", "missile", "nuclear", "military", "ceasefire", "war", "attack",
+        "venezuela", "north korea", "kim jong", "nato", "un security council",
+        "coup", "invasion", "occupation", "sanction", "airstrike",
     )),
     ("weather", (
         "temperature", "°c", "°f", "highest temperature", "rain", "snow", "storm", "hurricane",
+        "tornado", "typhoon", "earthquake", "magnitude", "flood", "wildfire", "drought",
+        "tsa passengers",
     )),
     ("entertainment", (
         "oscar", "grammy", "emmy", "sag awards", "box office", "movie", "album", "netflix", "actor", "actress",
         "rotten tomatoes", "tomatometer", "box office", "spotify", "billboard",
         "casino", "poker", "hustler",
+        # awards
+        "bafta", "golden globe", "tony award", "cma awards", "ama awards", "mtv awards",
+        "dga award", "directors guild", "film independent", "spirit award",
+        "goodreads", "book award", "literary award",
+        # events
+        "eurovision",
+        # artists / creators
+        "taylor swift", "beyonce", "drake ", "kanye", "rihanna",
+        "mrbeast", "youtube views", "tiktok views",
+        # tv shows (general patterns)
+        "season finale", "box office",
     )),
     ("tech", (
         "openai", "chatgpt", "apple", "google", "microsoft", "nvidia", "tesla", "meta", "amazon",
+        "spacex", "starship", "falcon 9",
+        "tiktok", "bytedance",
+        "anthropic", "gemini", "grok", "deepseek", "claude",
+        "alphabet", "waymo", "x.com",
+        "ipo", "spac",
+        "earnings call", "quarterly earnings",
+    )),
+    ("health", (
+        "measles", "flu ", "influenza", "covid", "coronavirus", "pandemic", "epidemic",
+        "vaccine", "vaccination", "cdc ", "who ", "fda approval", "drug approval",
+        "hospitalization rate", "infection rate", "outbreak", "ebola", "mpox", "monkeypox",
+        "cancer", "clinical trial",
     )),
 ]
 

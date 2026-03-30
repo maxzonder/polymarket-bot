@@ -330,6 +330,7 @@ class BotConfig:
         "politics":     1.5,
         "crypto":       1.0,
         "weather":      1.0,
+        "health":       1.0,
         "esports":      1.0,
         "sports":       0.8,
         "tech":         0.6,
