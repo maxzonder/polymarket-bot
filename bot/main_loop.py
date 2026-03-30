@@ -119,7 +119,14 @@ class BotRunner:
         loop = asyncio.get_event_loop()
 
         def _handle_signal():
-            logger.info("Shutdown signal received, stopping after current cycle...")
+            worst_case = max(
+                self.config.screener_interval,
+                self.config.monitor_interval,
+            )
+            logger.info(
+                f"Shutdown signal received — waiting for current cycle to finish "
+                f"(up to {worst_case}s). Send again to force-kill."
+            )
             self._shutdown = True
 
         for sig in (signal.SIGINT, signal.SIGTERM):
