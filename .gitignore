@@ -219,3 +219,6 @@ v2/*.db-wal
 
 # Claude worktrees
 .claude/worktrees/
+
+# Generated runtime config recommendations (output of recalibrate_scorers.py)
+recommended_config.json
