@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from utils.logger import setup_logger
 from utils.paths import DATA_DIR, DB_PATH
+from config import SWAN_ENTRY_MAX
 
 logger = setup_logger("build_rejected_outcomes")
 
@@ -66,7 +67,7 @@ CREATE TABLE IF NOT EXISTS ml_rejected_outcomes (
     is_winner            INTEGER,
 
     -- Derived label
-    -- 1 if had_swan_event AND entry_min_price <= 0.20 (covers all bot entry levels)
+    -- 1 if had_swan_event AND entry_min_price <= SWAN_ENTRY_MAX (covers all bot entry levels)
     was_missed_opportunity INTEGER NOT NULL DEFAULT 0,
 
     UNIQUE(market_id, token_id)
@@ -207,7 +208,7 @@ def build(
         is_winner    = tk_map.get(token_id) if token_id else None
 
         # Missed opportunity = had swan AND floor was within our entry range
-        was_missed = 1 if (had_swan and entry_min_p is not None and entry_min_p <= 0.20) else 0
+        was_missed = 1 if (had_swan and entry_min_p is not None and entry_min_p <= SWAN_ENTRY_MAX) else 0
 
         params.append((
             now,

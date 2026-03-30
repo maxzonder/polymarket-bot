@@ -35,14 +35,31 @@ import time
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from utils.logger import setup_logger
-from utils.paths import DB_PATH
+from utils.paths import DATABASE_DIR, DB_PATH
+from config import SWAN_ENTRY_MAX, BotConfig
 
 logger = setup_logger("market_level_features")
 
 # ── Gates (must match live screener for honest negatives) ────────────────────
-ENTRY_MAX = 0.20          # buy_min_price threshold that defines a "swan event"
-MIN_VOLUME = 50.0         # screener min volume gate
-DATE_FROM = "2025-08-01"   # start of swans_v2 history
+ENTRY_MAX = SWAN_ENTRY_MAX               # buy_min_price threshold that defines a "swan event"
+MIN_VOLUME = BotConfig().min_volume_usdc  # screener min volume gate
+
+
+def _find_oldest_data_date() -> str:
+    """Return the oldest YYYY-MM-DD date dir found in DATABASE_DIR, or '2000-01-01'."""
+    if not DATABASE_DIR.exists():
+        return "2000-01-01"
+    dates = []
+    for p in DATABASE_DIR.iterdir():
+        if p.is_dir() and len(p.name) == 10 and p.name[4] == "-" and p.name[7] == "-":
+            try:
+                dates.append(p.name)
+            except Exception:
+                pass
+    return min(dates) if dates else "2000-01-01"
+
+
+DATE_FROM = _find_oldest_data_date()   # derived from oldest date folder in DATABASE_DIR
 
 # ── Table DDL ────────────────────────────────────────────────────────────────
 CREATE_TABLE = """

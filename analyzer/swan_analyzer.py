@@ -36,15 +36,21 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
-from config import SWAN_BUY_PRICE_THRESHOLD, check_swan_buy_price_threshold
+from config import (
+    SWAN_BUY_PRICE_THRESHOLD,
+    SWAN_MIN_BUY_VOLUME,
+    SWAN_MIN_SELL_VOLUME,
+    SWAN_MIN_REAL_X,
+    check_swan_buy_price_threshold,
+)
 
 logger = setup_logger("swan_analyzer")
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 DEFAULT_BUY_PRICE_THRESHOLD = SWAN_BUY_PRICE_THRESHOLD  # derived from max(entry_price_levels) across all modes
-DEFAULT_MIN_BUY_VOLUME  = 1.0    # мин. ликвидность на дне (объём сделок < threshold)
-DEFAULT_MIN_SELL_VOLUME = 30.0   # мин. ликвидность на выходе (объём сделок >= exit_price)
-DEFAULT_MIN_REAL_X      = 5.0    # минимальный реальный икс
+DEFAULT_MIN_BUY_VOLUME  = SWAN_MIN_BUY_VOLUME    # мин. ликвидность на дне (объём сделок < threshold)
+DEFAULT_MIN_SELL_VOLUME = SWAN_MIN_SELL_VOLUME   # мин. ликвидность на выходе (объём сделок >= exit_price)
+DEFAULT_MIN_REAL_X      = SWAN_MIN_REAL_X        # минимальный реальный икс
 
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS swans_v2 (
