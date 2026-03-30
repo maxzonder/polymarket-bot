@@ -60,18 +60,21 @@ polymarket-bot/
 ├── bot/
 │   └── main_loop.py            # asyncio: три параллельных цикла
 │
-├── data_collector/             # Существующий пайплайн сбора данных
-│   ├── collector.py            # Скачивает JSON рынков (Gamma API)
-│   ├── trades_collector.py     # Скачивает raw trades (Data API)
-│   ├── parser.py               # Парсит в SQLite (markets, tokens)
-│   ├── analyzer.py             # Строит token_swans (zigzag)
+├── data_collector/             # Пайплайн сбора данных
+│   ├── data_collector_and_parsing.py  # Скачивает рынки + трейды + парсит в SQLite
 │   └── state_db.py             # Журнал состояния пайплайна
 │
-├── scripts/
+├── analyzer/                   # Оффлайн аналитика
 │   ├── swan_analyzer.py        # Строит swans_v2 (resolution-aware)
-│   ├── build_feature_mart.py   # Строит feature_mart для обучения
-│   ├── optimize_profit_take_strategy.py  # Оптимизатор схем выхода
-│   └── report_analyzer_stats.py
+│   └── market_level_features_v1_1.py  # Строит feature_mart_v1_1 для MarketScorer
+│
+├── scripts/
+│   ├── daily_pipeline.py       # Оркестратор: ingest→analyzer→feature_mart→ml→recalibrate
+│   ├── build_ml_outcomes.py    # ML-метки по реальным сделкам бота
+│   ├── build_rejected_outcomes.py  # ML-метки по отклонённым рынкам
+│   └── recalibrate_scorers.py  # Пересчёт порогов → recommended_config.json
+│
+├── _legacy/                    # Устаревшие скрипты (не используются)
 │
 ├── utils/
 │   ├── logger.py               # RotatingFileHandler логгер
@@ -95,11 +98,12 @@ polymarket-bot/
 
 | Таблица | Что хранит | Откуда берётся |
 |---|---|---|
-| `markets` | Метаданные рынков | `parser.py` ← Gamma API |
-| `tokens` | YES/NO токены, `is_winner` | `parser.py` ← Gamma API |
-| `token_swans` | Zigzag-лебеди (v1) | `analyzer.py` ← raw trades |
-| `swans_v2` | Resolution-aware лебеди | `swan_analyzer.py` ← raw trades |
-| `feature_mart` | Денормализованная таблица для ML | `build_feature_mart.py` ← swans_v2 |
+| `markets` | Метаданные рынков | `data_collector_and_parsing.py` ← Gamma API |
+| `tokens` | YES/NO токены, `is_winner` | `data_collector_and_parsing.py` ← Gamma API |
+| `swans_v2` | Resolution-aware лебеди | `analyzer/swan_analyzer.py` ← raw trades |
+| `feature_mart_v1_1` | Market-level фичи для MarketScorer | `analyzer/market_level_features_v1_1.py` ← swans_v2 |
+| `ml_rejected_outcomes` | Метки пропущенных возможностей | `scripts/build_rejected_outcomes.py` |
+| `token_swans` | **Архив** zigzag-анализатора (legacy) | не обновляется |
 
 ### Операционные БД (создаются ботом в рантайме)
 
@@ -262,23 +266,23 @@ BOT_MODE=balanced_mode python3 main.py
 DRY_RUN=false python3 main.py
 ```
 
-### Пайплайн сбора данных (запускать перед ботом)
+### Пайплайн сбора данных (первоначальный запуск)
 
 ```bash
-# 1. Скачать рынки
-python3 -m data_collector.collector --start 2026-02-01 --end 2026-03-15
+# 1. Скачать рынки + трейды + распарсить в SQLite
+python3 data_collector/data_collector_and_parsing.py --start 2025-08-01 --end 2026-03-28
 
-# 2. Скачать raw trades
-python3 -m data_collector.trades_collector --start 2026-02-01 --end 2026-03-15
+# 2. Построить swans_v2
+python3 analyzer/swan_analyzer.py --recompute --date-from 2025-08-01 --date-to 2026-03-28
 
-# 3. Парсить в SQLite
-python3 -m data_collector.parser --start 2026-02-01 --end 2026-03-15
+# 3. Построить feature_mart_v1_1 (для MarketScorer)
+python3 analyzer/market_level_features_v1_1.py --recompute
+```
 
-# 4. Построить swans_v2 (resolution-aware анализ)
-python3 analyzer/swan_analyzer.py --recompute
-
-# 5. Построить feature_mart (для скоринга)
-python3 scripts/build_feature_mart.py --recompute
+После первоначального запуска ежедневный пайплайн автоматизирован:
+```bash
+# Каждый день (04:00 UTC): ingest → analyzer → feature_mart_v1_1 → ml → recalibrate
+python3 scripts/daily_pipeline.py
 ```
 
 ---
@@ -392,23 +396,20 @@ REST polling каждые 90 секунд. Без WebSocket (позиции жи
 - `clob.get_all_orders()` → ищет `status=matched` → вызывает `on_entry_filled` / `on_tp_filled`
 - Для resolution: проверяет `outcomePrices` из Gamma API
 
-### `scripts/build_feature_mart.py`
+### `analyzer/market_level_features_v1_1.py`
 
 Оффлайн скрипт. Запускать после `swan_analyzer.py`.
 
-Строит таблицу `feature_mart` — JOIN'ит `swans_v2 + markets + tokens` и добавляет:
-- `log_volume`, `log_liquidity` — log-трансформации для ML
-- `floor_duration_seconds` — как долго цена сидела на дне
-- `time_to_resolution_hours` — от дна до закрытия рынка
-- `entry_dow`, `entry_hour_utc` — темпоральные фичи
-- `is_sports`, `is_crypto`, и т.д. — бинарные флаги категорий
-- `tp_5x_hit`, `tp_10x_hit`, `tp_20x_hit` — лейблы для классификации
-- `tail_bucket` — 0=`<5x`, 1=`5-20x`, 2=`20-50x`, 3=`50-100x`, 4=`100x+`
+Строит таблицу `feature_mart_v1_1` — агрегирует `swans_v2 + markets + tokens` на уровне рынка.
+Одна строка = один рынок. Источник позитивов: рынки с `buy_min_price <= ENTRY_MAX (0.20)`.
 
-**Лейблы по типу задачи:**
-- Классификация: `is_winner`, `tp_5x_hit`, `tp_10x_hit`, `tp_20x_hit`, `tail_bucket`
-- Регрессия: `real_x`, `resolution_x`, `time_to_resolution_hours`
-- Ранжирование: `tail_bucket` (ординальный), `real_x`
+Ключевые поля:
+- `has_swan`, `n_swans` — наличие и количество swan events
+- `best_buy_min_price`, `best_max_traded_x` — лучшая сделка на рынке
+- `best_floor_duration_s`, `best_time_to_res_h` — временные характеристики
+- `log_volume`, `log_duration_h` — log-трансформации
+
+Используется `MarketScorer` для обучения и инференса.
 
 ---
 

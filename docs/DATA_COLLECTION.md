@@ -1,5 +1,5 @@
 *Входит в состав документации [ROADMAP.md](./ROADMAP.md).*
-*Связано с: [DATABASE_SCHEMA.md](./DATABASE_SCHEMA.md), [API_LIMITS.md](./API_LIMITS.md), [ANALYZER.md](./ANALYZER.md)*
+*Связано с: [DATABASE_SCHEMA.md](./DATABASE_SCHEMA.md), [API_LIMITS.md](./API_LIMITS.md)*
 
 # Сбор исторических данных
 
@@ -22,97 +22,51 @@
 
 ## Текущий pipeline
 
-### 1. Collector markets
-Источник:
-- `GET /markets`
+Все три шага объединены в единый скрипт `data_collector/data_collector_and_parsing.py`.
+Ежедневно запускается автоматически через `scripts/daily_pipeline.py` (шаг `ingest`).
 
-Что делает:
-- скачивает закрытые рынки по диапазону дат;
-- использует пагинацию `limit/offset`;
-- передаёт `include_tag=true`, чтобы сохранить tags и category-related metadata;
-- сохраняет сырой market JSON в:
-  - `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}.json`
+### 1. Download markets
+Источник: `GET /markets` (Gamma API)
 
-Текущий мягкий операционный фильтр:
-- `volume_num_min=50`
+- Скачивает закрытые рынки по диапазону дат (`end_date_min`/`end_date_max`)
+- `include_tag=true` — сохраняет tags и category metadata
+- Мягкий фильтр: `volume_num_min=50`
+- Сохраняет: `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}.json`
+- Идемпотентный: файл уже существует → пропускается
 
-Это не стратегический фильтр, а просто отсев совсем пустого мусора.
+### 2. Download raw trades
+Источник: `data-api.polymarket.com/trades`
 
-### 2. Collector raw trades
-Источник:
-- `data-api.polymarket.com/trades`
+- Для каждого рынка скачивает историю сделок по `conditionId`
+- Фильтр: `filterType=CASH`, `filterAmount=10`
+- Разбивает по токенам: `{market_id}_trades/{token_id}.json`
+- Идемпотентный: папка `{market_id}_trades/` непустая → пропускается
 
-Что делает:
-- для каждого рынка скачивает сырые сделки;
-- использует:
-  - `filterType=CASH`
-  - `filterAmount=10`
-- сохраняет данные в:
-  - `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}_trades/{token_id}.json`
+Почему `CASH >= 10`: без фильтра история забивается микросделками и ботошумом за лимит пагинации (max offset 3000). Фильтры по времени (`startTs`/`endTs`) работают ненадёжно.
 
-Почему нужен фильтр `CASH >= 10`:
-- публичный `/trades` жёстко ограничен пагинацией;
-- без фильтра история быстро забивается микросделками и ботошумом;
-- `CASH >= 10` — технический фильтр, который позволяет видеть более полезную часть истории.
+### 3. Parse into SQLite
+Читает JSON из `database/`, нормализует в `polymarket_dataset.db`:
+- **`markets`** — метаданные рынков, UPSERT по `id`
+- **`tokens`** — YES/NO токены + `is_winner`, UPSERT по `token_id`
 
-Важное ограничение API:
-- фильтры по времени (`startTs` / `endTs`) работают ненадёжно;
-- нельзя строить на них точный исторический сбор;
-- поэтому рабочая практика — скачивать доступную релевантную историю через `CASH >= 10`.
+Категория: из явных полей API → тегов → best-effort inference по keywords в question/description/slug.
 
-### 3. Parser
-Что делает:
-- читает market JSON из `$POLYMARKET_DATA_DIR/database/`;
-- нормализует метаданные в SQLite `$POLYMARKET_DATA_DIR/polymarket_dataset.db`;
-- обновляет только:
-  - `markets`
-  - `tokens`
+### 4. Swan Analyzer (`analyzer/swan_analyzer.py`)
+Читает raw trades с диска → строит таблицу `swans_v2`.
 
-Что parser больше **не** делает:
-- не пишет `price_history`;
-- не считает `token_analytics`;
-- не хранит hourly-свечи.
+- Находит глобальный минимум цены токена (зону дна)
+- Проверяет `buy_min_price < buy_price_threshold` (0.20)
+- Считает `max_traded_x`: `1/buy_min_price` для победителей, `max_price/buy_min_price` для остальных
+- UPSERT по `(token_id, date)`
 
-Категории:
-- сначала берутся из явных полей market/event/tag;
-- если API не дал категорию, parser делает best-effort inference по:
-  - `question`
-  - `description`
-  - `slug`
-  - `event title`
-  - `groupItemTitle`
+Запускается через `daily_pipeline.py` с `--date-from`/`--date-to` для новых дат.
 
-Parser использует upsert, а не `INSERT OR IGNORE`, поэтому метаданные рынка могут обновляться при повторном прогоне.
+### 5. Feature Mart (`analyzer/market_level_features_v1_1.py`)
+Читает `swans_v2 + markets + tokens` → строит `feature_mart_v1_1`.
 
-### 4. Analyzer
-Что делает:
-- читает:
-  - `markets` / `tokens` из SQLite;
-  - raw trades с диска;
-- строит таблицу:
-  - `token_swans`
-
-Одна строка `token_swans` = одно реальное swan-событие.
-
-Analyzer:
-- ищет zigzag-пары `локальный минимум -> локальный максимум`;
-- проверяет `possible_x >= min_recovery`;
-- считает входную ликвидность в low-zone;
-- считает выходную ликвидность на `target_exit_x`;
-- фильтрует по минимальной длительности события.
-
-Подробнее логика описана в [ANALYZER.md](./ANALYZER.md).
-
-### 5. Reports / backtests
-Работают уже по:
-- `token_swans`
-- и при необходимости `markets`
-
-Сюда входят:
-- обзорные отчёты по базе;
-- распределения по дням, иксам и ликвидности;
-- оптимизация схемы выхода;
-- последующий profit analysis.
+Одна строка = один рынок. Агрегирует swan-события на уровень рынка.
+Используется `MarketScorer` для принятия решений о входе.
+Запускается с `--recompute` (полный пересчёт из всего `swans_v2`).
 
 ---
 
@@ -124,11 +78,17 @@ Analyzer:
 - `$POLYMARKET_DATA_DIR/database/YYYY-MM-DD/{market_id}_trades/{token_id}.json`
   - сырые сделки по токену
 
-### SQLite
+### SQLite (`polymarket_dataset.db`)
 Актуальные рабочие таблицы:
 - `markets`
 - `tokens`
-- `token_swans`
+- `swans_v2`
+- `feature_mart_v1_1`
+- `ml_rejected_outcomes`
+
+Архивные (не обновляются):
+- `token_swans` — legacy zigzag-анализатор, сохранён как архив
+- `feature_mart` — legacy token-level mart
 
 Legacy-слои убраны из runtime:
 - `price_history`

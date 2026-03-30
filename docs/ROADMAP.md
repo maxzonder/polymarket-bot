@@ -110,17 +110,21 @@
 *Используемые библиотеки и готовые решения: [BEST_PRACTICES.md](./BEST_PRACTICES.md). API-справочник: [API_REFERENCE.md](./API_REFERENCE.md).*
 
 - `config.py` — настройки стратегии и пороги.
-- `data_collector/` — скачивание рынков, трейдов, парсинг и аналитика.
-  - `collector.py` — сбор закрытых рынков и связанных файлов.
-  - `parser.py` — нормализация и загрузка данных в SQLite.
-  - `analyzer.py` — построение `token_swans` из сырых трейдов.
-  - `state_db.py` — журнал состояния пайплайна.
+- `data_collector/`
+  - `data_collector_and_parsing.py` — скачивание рынков + трейдов + парсинг в SQLite (3 шага в одном).
+- `analyzer/`
+  - `swan_analyzer.py` — построение `swans_v2` из сырых трейдов (resolution-aware).
+  - `market_level_features_v1_1.py` — построение `feature_mart_v1_1` для MarketScorer.
+- `scripts/`
+  - `daily_pipeline.py` — ежедневный оркестратор: ingest → analyzer → feature_mart → ml → recalibrate.
+  - `build_ml_outcomes.py`, `build_rejected_outcomes.py` — ML-метки по сделкам и пропущенным рынкам.
+  - `recalibrate_scorers.py` — пересчёт порогов скоринга.
 - `api/`
   - `gamma_client.py` — работа с публичным API рынков.
   - `clob_client.py` — работа с книгой заявок и биржевой частью.
 - `strategy/`
   - `screener.py` — поиск рынков в зоне потенциального входа.
-  - `niche_ranker.py` — ранжирование категорий и ниш.
+  - `scorer.py` — `EntryFillScorer` и `ResolutionScorer` на основе `swans_v2`.
   - `risk_manager.py` — сайзинг позиций и логика TP.
 - `execution/`
   - `order_manager.py` — формирование и отправка ордеров.
@@ -128,3 +132,4 @@
   - `logger.py` — логи.
   - `notifier.py` — алерты.
 - `main.py` — точка входа боевого контура.
+- `_legacy/` — устаревшие скрипты (zigzag analyzer, old feature mart и др.).

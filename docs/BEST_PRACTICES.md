@@ -140,22 +140,25 @@ ssh polybot@135.181.134.96 'cd ~/polymarket-bot && \
 - Если нужна ручная синхронизация файлов — `scp` или `rsync` **без** `--delete`.
 
 ### Запуск пайплайна на сервере (через tmux)
+
+**Важно:** всегда используй `bash -l -c '...'` чтобы загрузить `.bash_profile` и получить `POLYMARKET_DATA_DIR`.
+
 ```bash
-# Markets
-tmux new-session -d -s collector \
-  ".venv/bin/python -m data_collector.collector --start 2026-02-01 --end 2026-02-28 > /home/polybot/.polybot/logs/collector.log 2>&1"
+# Ручной запуск инgest за диапазон (первоначальная загрузка)
+tmux new-session -d -s ingest \
+  "bash -l -c 'python3 data_collector/data_collector_and_parsing.py --start 2025-08-01 --end 2026-03-28'"
 
-# Raw trades (после завершения collector)
-tmux new-session -d -s trades \
-  ".venv/bin/python -m data_collector.trades_collector --start 2026-02-01 --end 2026-02-28 >> /home/polybot/.polybot/logs/collector.log 2>&1"
-
-# Parser (после trades)
-tmux new-session -d -s parser \
-  ".venv/bin/python -m data_collector.parser --start 2026-02-01 --end 2026-02-28 > /home/polybot/.polybot/logs/parser.log 2>&1"
-
-# Analyzer (после parser)
+# Swan analyzer (после ingest)
 tmux new-session -d -s analyzer \
-  ".venv/bin/python -m data_collector.analyzer --recompute > /home/polybot/.polybot/logs/analyzer.log 2>&1"
+  "bash -l -c 'python3 analyzer/swan_analyzer.py --recompute --date-from 2025-08-01 --date-to 2026-03-28'"
+
+# Feature mart (после analyzer)
+tmux new-session -d -s feature_mart \
+  "bash -l -c 'python3 analyzer/market_level_features_v1_1.py --recompute'"
+
+# Ежедневный пайплайн (автоматизирует всё выше + ml + recalibrate)
+tmux new-session -d -s daily_pipeline \
+  "bash -l -c 'python3 scripts/daily_pipeline.py'"
 ```
 
 ### Правило логов

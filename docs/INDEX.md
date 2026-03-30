@@ -15,10 +15,7 @@
   Описывает исторический пайплайн: как и откуда скачиваются рынки (JSON) и сырые трейды (Raw Trades), как они нормализуются в SQLite, и почему агрегированные цены (`prices-history`) исключены.
 
 - **[DATABASE_SCHEMA.md](./DATABASE_SCHEMA.md)**
-  Схема локальных баз данных (SQLite), включая `markets`, `tokens`, `token_swans` (события-лебеди) и системный лог `collector_state.db`.
-
-- **[ANALYZER.md](./ANALYZER.md)**
-  Подробное описание алгоритма `analyzer.py` (Zigzag-подход): как именно сырые сделки превращаются в "реальных лебедей" с учётом фильтров ликвидности, целевого выхода (target-x) и длительности.
+  Схема локальных баз данных: `markets`, `tokens`, `swans_v2`, `feature_mart_v1_1`, `ml_rejected_outcomes` (`polymarket_dataset.db`) и операционные таблицы `positions.db`.
 
 - **[BEST_PRACTICES.md](./BEST_PRACTICES.md)**
   Набор лучших практик и рабочих процессов, включая использование `py-clob-client`, правила деплоя (local → git → server), разделение кода и данных (`POLYMARKET_DATA_DIR`), а также логирование.
@@ -31,6 +28,12 @@
 
 - **[LOGGING_AND_ALERTS.md](./LOGGING_AND_ALERTS.md)**
   Правила логирования компонентов (один файл на процесс) и структура запланированной системы Telegram-оповещений.
+
+- **[BOT_ARCHITECTURE.md](./BOT_ARCHITECTURE.md)**
+  Полная архитектура бота: три торговых режима, структура проекта, поток данных, описание модулей.
+
+- **[VALIDATION.md](./VALIDATION.md)**
+  Сценарии тестирования `validate_dry_run.py` и инварианты корректности данных.
 
 - **[POSTPONED_IDEAS.md](./POSTPONED_IDEAS.md)**
   Список отложенных фич (NLP анализ, семантический скоринг, векторные базы данных), которые не вошли в MVP для сохранения простоты и скорости.
