@@ -51,6 +51,24 @@
 
 Категория: из явных полей API → тегов → best-effort inference по keywords в question/description/slug.
 
+Поддерживаемые категории и их веса в скоринге (`config.py: BotConfig.category_weights`):
+
+| Категория      | Вес  | Что туда попадает |
+|----------------|------|-------------------|
+| `geopolitics`  | 1.5  | Иран, Израиль, Украина, Россия, Китай, Тайвань, НАТО, Венесуэла, Северная Корея, военные события |
+| `politics`     | 1.5  | Выборы, Трамп, Байден, ЕЦБ, Банк Англии, Fed/Powell, тарифы, санкции, ВВП, безработица |
+| `crypto`       | 1.0  | BTC/ETH/SOL и 50+ токенов, биржевые индексы, акции, сырьё (нефть, уран, пшеница) |
+| `weather`      | 1.0  | Температура, осадки, ураганы, землетрясения, наводнения, TSA-пассажиры |
+| `health`       | 1.0  | Грипп, корь, COVID, CDC, FDA, вакцины, вспышки инфекций, клинические испытания |
+| `esports`      | 1.0  | (legacy — теперь входит в `sports`) |
+| `sports`       | 0.8  | НБА/НФЛ/НХЛ, футбол (все лиги), теннис/АТП/WTA, шахматы/FIDE, дартс/PDC, MotoGP, пиклбол/PPA, конный спорт, Ladbrokes и др. |
+| `tech`         | 0.6  | OpenAI, Apple, Google, SpaceX, TikTok, Anthropic/Gemini/Grok, IPO, earnings calls |
+| `entertainment`| 0.5  | Оскар, Грэмми, Эмми, BAFTA, Золотой глобус, Goodreads, Eurovision, Taylor Swift, MrBeast |
+| *(null)*       | 1.0  | Рынки без категории — нейтральный вес (`.get(None, 1.0)`) |
+
+Кодовое покрытие: `data_collector_and_parsing.py → _CATEGORY_KEYWORDS`, `_infer_category()`.
+Приоритет уровней: явный API-field → event category → event tags → keyword matching → None.
+
 ### 4. Swan Analyzer (`analyzer/swan_analyzer.py`)
 Читает raw trades с диска → строит таблицу `swans_v2`.
 
