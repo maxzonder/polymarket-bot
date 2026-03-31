@@ -1,0 +1,216 @@
+# config.py
+
+## Обзор
+
+`config.py` определяет все параметры торговой стратегии. Два класса конфигурации:
+
+- **`ModeConfig`** — неизменяемая конфигурация стратегии для одного режима (вход, выход, sizing, фильтры)
+- **`BotConfig`** — runtime-конфигурация из `.env` / переменных окружения
+
+Активный режим выбирается через переменную `BOT_MODE` (по умолчанию: `big_swan_mode`).
+
+---
+
+## Торговые режимы
+
+| Режим | Стратегия | Вход | Moonbag |
+|---|---|---|---|
+| `big_swan_mode` | Resting bids на глубоких уровнях | только resting | 60% |
+| `dip_mode` | Resting bids на умеренных дипах | только resting | 40% |
+| `balanced_mode` | Resting bids + scanner | оба | 20% |
+| `fast_tp_mode` | Scanner-вход, быстрый TP | только scanner | 0% |
+
+---
+
+## Поля ModeConfig
+
+### Вход
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `entry_price_levels` | `tuple[float, ...]` | Ценовые уровни для resting-заявок (по возрастанию). Screener выставляет только уровни **ниже** текущей цены рынка. |
+| `entry_price_max` | `float` | Максимальная текущая цена для скрининга. Рынки выше этого порога пропускаются. |
+| `use_resting_bids` | `bool` | Выставлять ли ордера заранее, до падения цены к уровню. |
+| `scanner_entry` | `bool` | Входить ли, если scanner видит цену уже в зоне входа. |
+
+### Выход
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `tp_levels` | `tuple[TPLevel, ...]` | Лестница тейк-профита. Каждый `TPLevel(x, fraction)` продаёт `fraction` позиции при достижении `entry_price * x`. |
+| `moonbag_fraction` | `float` | Доля позиции, удерживаемая до резолюции рынка. Сумма `tp_levels` фракций + `moonbag_fraction` должна быть ≤ 1.0. |
+
+### Фильтры scoring
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `min_entry_fill_score` | `float` | Мин. историческая P(рынок когда-либо достигнет зоны входа). Отсекает рынки, которые скорее всего никогда не зафиллятся. |
+| `min_resolution_score` | `float` | Мин. resolution score (сигнал P(winner) × avg_x) для принятия кандидата. |
+| `min_real_x_historical` | `float` | Мин. наблюдаемый множитель цены в исторических данных (без шумовых отскоков). |
+| `min_market_score` | `float` | v1.1: мин. композитный `market_score`. `0.0` = отключено. |
+
+### Размер позиции
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `stake_usdc` | `float` | Fallback-стейк (USDC токенов при филе). Используется если ни один тир не совпал. |
+| `max_open_positions` | `int` | Жёсткий лимит одновременно открытых позиций. |
+| `max_resting_markets` | `int` | Макс. число рынков с живыми resting-заявками. |
+| `max_resting_per_cluster` | `int` | Макс. рынков на кластер (`market_id // 1000`), защита от концентрации. |
+| `max_capital_deployed_pct` | `float` | Макс. доля баланса в открытых позициях (0.0–1.0). |
+| `max_exposure_per_market` | `float` | v1.1: макс. суммарный USDC по всем филам на одном `(market_id, token_id)`. `0.0` = отключено. |
+
+### Стейк-тиры
+
+Два взаимоисключающих расписания — `market_score_tiers` имеет приоритет над `stake_tiers`:
+
+#### `stake_tiers` (по цене, v1 legacy)
+
+```python
+stake_tiers: tuple[tuple[float, float], ...] = ()
+# формат: ((max_entry_price, stake_usdc), ...)
+# отсортировано по цене по возрастанию
+```
+
+Логика: для каждого фила найти **первый** тир где `fill_price <= max_entry_price` → использовать его стейк. Fallback на `stake_usdc` если ни один тир не подошёл.
+
+Идея: глубже флор = больше стейк (выше потенциальный upside).
+
+Пример (`big_swan_mode`):
+```
+фил @ 0.001 → $0.50   (потенциал 1000x)
+фил @ 0.005 → $0.25
+фил @ 0.010 → $0.10
+```
+
+#### `market_score_tiers` (по score, v1.1)
+
+```python
+market_score_tiers: tuple[tuple[float, float], ...] = ()
+# формат: ((min_score_threshold, stake_usdc), ...)
+# сортируется по убыванию порога в runtime
+```
+
+Логика: для композитного `market_score` рынка найти **наивысший** порог ≤ score → использовать его стейк. Когда задан — **полностью заменяет** `stake_tiers` (не умножает).
+
+Пример (`big_swan_mode`):
+```
+score ≥ 0.60 → $0.50   (топ ~10%)
+score ≥ 0.40 → $0.25   (топ ~25%)
+score ≥ 0.25 → $0.10   (проходной порог)
+```
+
+> **⚠️ Известное расхождение — см. ниже**
+
+### Временное окно
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `min_hours_to_close` | `float` | Отклонять рынки, закрывающиеся раньше этого. |
+| `max_hours_to_close` | `float` | Отклонять рынки, закрывающиеся позже этого. |
+| `hours_to_close_null_default` | `float` | Если Gamma вернул `None` для дедлайна — считать это количество часов. Защита от рынков с неизвестным дедлайном. По умолчанию: 48h. |
+
+### Цель оптимизации
+
+| Значение | Описание |
+|---|---|
+| `"tail_ev"` | `swan_rate × win_rate × avg_x` — оптимизация под редкие высокомультипликаторные исходы |
+| `"ev_total"` | Ожидаемая ценность по всем исходам |
+| `"roi_pct"` | Процент возврата на инвестиции |
+
+---
+
+## Поля BotConfig (Runtime)
+
+Загружается из окружения / `.env`. Запуск: `BOT_MODE=big_swan_mode DRY_RUN=false python main.py`.
+
+| Поле | Env var | По умолчанию | Описание |
+|---|---|---|---|
+| `mode` | `BOT_MODE` | `big_swan_mode` | Активный торговый режим |
+| `dry_run` | `DRY_RUN` | `true` | Бумажная торговля — реальные ордера не отправляются |
+| `private_key` | `POLY_PRIVATE_KEY` | — | Приватный ключ CLOB-кошелька |
+| `api_key` | `POLY_API_KEY` | — | API-ключ Polymarket |
+| `api_secret` | `POLY_API_SECRET` | — | API-секрет Polymarket |
+| `api_passphrase` | `POLY_PASSPHRASE` | — | Passphrase Polymarket |
+| `screener_interval` | — | 300с | Интервал запуска screener |
+| `monitor_interval` | — | 90с | Интервал проверки открытых позиций |
+| `resting_cleanup_interval` | — | 3600с | Интервал очистки устаревших resting-заявок |
+| `min_volume_usdc` | — | 50 | Мин. суммарный объём рынка для скрининга |
+| `max_volume_usdc` | — | 300 000 | Макс. суммарный объём рынка для скрининга |
+| `dead_market_hours` | — | 48h | Отклонять рынки без трейдов за это время |
+| `scorer_entry_price_max` | — | 0.02 | Использовать только строки `swans_v2` с ценой ≤ этого значения для scoring |
+| `scorer_min_samples` | — | 5 | Мин. число сэмплов для надёжного resolution score |
+
+### `category_weights`
+
+Множитель EV на категорию, применяется к market score. Рассчитан по данным `feature_mart_v1_1` (дек–фев 2026), нормализован к crypto = 1.0:
+
+| Категория | Вес | Обоснование |
+|---|---|---|
+| geopolitics | 1.5 | Наивысший tail_ev (swan rate 14.98%) |
+| politics | 1.5 | Сильный tail_ev, ограничен cap 1.5 |
+| crypto | 1.0 | База |
+| weather | 1.0 | Аналогичный tail_ev с crypto |
+| health | 1.0 | Недостаточно данных, нейтральный |
+| esports | 1.0 | Нет данных за дек–фев, нейтральный |
+| sports | 0.8 | Ниже базового tail_ev |
+| tech | 0.6 | Низкий avg_x (23.9) |
+| entertainment | 0.5 | Наименьший tail_ev (swan 1.77% × win 4.3%) |
+
+---
+
+## Глобальные константы
+
+| Константа | Значение | Описание |
+|---|---|---|
+| `SWAN_BUY_PRICE_THRESHOLD` | авто | `max(entry_price_levels)` по всем режимам — потолок сбора данных в swan_analyzer |
+| `SWAN_ENTRY_MAX` | = выше | Псевдоним для feature_mart и rejected_outcomes |
+| `SWAN_MIN_BUY_VOLUME` | 1.0 USDC | Мин. объём на флоре (проверка ликвидности) |
+| `SWAN_MIN_SELL_VOLUME` | 30.0 USDC | Мин. объём на выходе (качество фила) |
+| `SWAN_MIN_REAL_X` | 5.0× | Мин. множитель для учёта события как настоящего swan |
+
+`SWAN_BUY_PRICE_THRESHOLD` вычисляется динамически — добавление нового режима с более высокими уровнями входа автоматически поднимает потолок сбора.
+
+---
+
+## ⚠️ Расхождение: `stake_tiers` vs `market_score_tiers`
+
+### Проблема
+
+В `BIG_SWAN_MODE` заданы оба поля — `stake_tiers` и `market_score_tiers`. Комментарий в `config.py` гласит:
+
+> *"Applied as a multiplier on top of stake_tiers"*
+
+Но `risk_manager.py` использует `elif`:
+
+```python
+if self.mc.market_score_tiers and market_score is not None:
+    # market_score_tiers выигрывает → stake_tiers НИКОГДА не вычисляется
+    ...
+elif self.mc.stake_tiers:
+    ...
+```
+
+**`market_score_tiers` полностью заменяет `stake_tiers`, а не умножает его.**
+
+Два следствия:
+
+1. **`stake_tiers` в `BIG_SWAN_MODE` — мёртвый код**, значения никогда не используются.
+
+2. **Глубина флора больше не влияет на sizing.** С `stake_tiers` фил на 0.001 давал в 5× больший стейк, чем фил на 0.010. С `market_score_tiers` все `entry_price_levels` одного рынка получают **одинаковый** стейк — важен только score рынка, не цена входа.
+
+### Текущее поведение (что реально происходит)
+
+Для `BIG_SWAN_MODE` при score рынка 0.62:
+- Resting bid на 0.001 → стейк **$0.50**
+- Resting bid на 0.005 → стейк **$0.50** ← одинаково
+- Resting bid на 0.010 → стейк **$0.50** ← одинаково
+- Суммарная потенциальная экспозиция: $1.50 (ограничена `max_exposure_per_market=2.0`)
+
+### Варианты решения
+
+**Вариант A** — Оставить текущее поведение, исправить комментарий. Score-based sizing — это v1.1 intent; price tiers — v1 legacy. Удалить `stake_tiers` из `BIG_SWAN_MODE` чтобы не вводить в заблуждение.
+
+**Вариант B** — Комбинировать оба. Score выбирает множитель (0.5×/1.0×/1.5×), цена выбирает базовый стейк. Требует изменения `risk_manager.py`: умножение вместо `elif`.
+
+**Вариант C** — Вернуть учёт глубины флора внутри score-тиров. Определить `market_score_tiers` как `(min_score, dict[price → stake])`, чтобы оба параметра влияли на sizing. Сложнее.
