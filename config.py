@@ -69,7 +69,7 @@ class ModeConfig:
     stake_usdc: float          # default stake per trade (USDC tokens bought at entry)
     max_open_positions: int
     max_resting_markets: int        # max distinct markets with live resting bids
-    max_resting_per_cluster: int    # max markets per cluster (market_id // 1000)
+    max_resting_per_cluster: int    # max markets per neg-risk group
     max_capital_deployed_pct: float  # max % of balance in open positions
 
     # ── Time window ───────────────────────────────────────────────────────────

@@ -146,7 +146,6 @@ class MarketScorer:
                 GROUP BY cat, vol_bucket
                 HAVING total >= 20
             """).fetchall()
-            conn.close()
 
             raw: dict[tuple[str, str], float] = {}
             raw_loser: dict[tuple[str, str], float] = {}
@@ -175,6 +174,8 @@ class MarketScorer:
                 }
             except Exception:
                 self._feedback_penalties = {}
+
+            conn.close()
 
         except Exception:
             # feature_mart_v1_1 not yet built — use fallback (zero analogy scores)
