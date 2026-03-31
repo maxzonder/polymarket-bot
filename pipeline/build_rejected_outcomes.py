@@ -13,10 +13,10 @@ Labels are populated once the analyzer has processed the closed market.
 Until then, had_swan_event=0 (NULL token_id rows) — re-run daily to fill them in.
 
 Usage:
-    python scripts/build_rejected_outcomes.py
-    python scripts/build_rejected_outcomes.py --rebuild
-    python scripts/build_rejected_outcomes.py --summary
-    python scripts/build_rejected_outcomes.py \\
+    python pipeline/build_rejected_outcomes.py
+    python pipeline/build_rejected_outcomes.py --rebuild
+    python pipeline/build_rejected_outcomes.py --summary
+    python pipeline/build_rejected_outcomes.py \\
         --positions-db /path/to/positions.db \\
         --dataset-db   /path/to/polymarket_dataset.db
 """

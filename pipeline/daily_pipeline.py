@@ -13,15 +13,15 @@ Run this once per day (e.g. via cron at 04:00 UTC) to:
 The trading bot runs independently and is NOT touched by this pipeline.
 
 Usage:
-    python scripts/daily_pipeline.py
-    python scripts/daily_pipeline.py --summary
-    python scripts/daily_pipeline.py --step ingest               # single step
-    python scripts/daily_pipeline.py --step analyzer
-    python scripts/daily_pipeline.py --step feature_mart_v1_1
-    python scripts/daily_pipeline.py --step ml_outcomes
-    python scripts/daily_pipeline.py --step rejected_outcomes
-    python scripts/daily_pipeline.py --step recalibrate
-    python scripts/daily_pipeline.py \\
+    python pipeline/daily_pipeline.py
+    python pipeline/daily_pipeline.py --summary
+    python pipeline/daily_pipeline.py --step ingest               # single step
+    python pipeline/daily_pipeline.py --step analyzer
+    python pipeline/daily_pipeline.py --step feature_mart_v1_1
+    python pipeline/daily_pipeline.py --step ml_outcomes
+    python pipeline/daily_pipeline.py --step rejected_outcomes
+    python pipeline/daily_pipeline.py --step recalibrate
+    python pipeline/daily_pipeline.py \\
         --positions-db /path/to/positions.db \\
         --dataset-db   /path/to/polymarket_dataset.db
 

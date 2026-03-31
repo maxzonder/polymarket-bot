@@ -10,16 +10,16 @@ Output: ml_outcomes table in positions.db  (UPSERT — safe to re-run any time).
 
 Usage:
     # Full rebuild (drop + recreate)
-    python scripts/build_ml_outcomes.py --rebuild
+    python pipeline/build_ml_outcomes.py --rebuild
 
     # Incremental update (default, adds/updates rows)
-    python scripts/build_ml_outcomes.py
+    python pipeline/build_ml_outcomes.py
 
     # Print summary after build
-    python scripts/build_ml_outcomes.py --summary
+    python pipeline/build_ml_outcomes.py --summary
 
     # Use a custom DB path
-    python scripts/build_ml_outcomes.py --db /path/to/positions.db
+    python pipeline/build_ml_outcomes.py --db /path/to/positions.db
 
 Only candidates that reached resting_orders are included (got a placement attempt).
 Candidates rejected upstream (no entry_level) are not included — use screener_log for those.

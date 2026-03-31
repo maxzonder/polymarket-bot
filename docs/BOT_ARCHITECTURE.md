@@ -104,7 +104,7 @@ polymarket-bot/
 | `tokens` | YES/NO токены, `is_winner` | `data_collector_and_parsing.py` ← Gamma API |
 | `swans_v2` | Resolution-aware лебеди | `analyzer/swan_analyzer.py` ← raw trades |
 | `feature_mart_v1_1` | Market-level фичи для MarketScorer | `analyzer/market_level_features_v1_1.py` ← swans_v2 |
-| `ml_rejected_outcomes` | Метки пропущенных возможностей | `scripts/build_rejected_outcomes.py` |
+| `ml_rejected_outcomes` | Метки пропущенных возможностей | `pipeline/build_rejected_outcomes.py` |
 | `token_swans` | **Архив** zigzag-анализатора (legacy) | не обновляется |
 
 ### Операционные БД (создаются ботом в рантайме)
@@ -284,7 +284,7 @@ python3 analyzer/market_level_features_v1_1.py --recompute
 После первоначального запуска ежедневный пайплайн автоматизирован:
 ```bash
 # Каждый день (04:00 UTC): ingest → analyzer → feature_mart_v1_1 → ml → recalibrate
-python3 scripts/daily_pipeline.py
+python3 pipeline/daily_pipeline.py
 ```
 
 ---

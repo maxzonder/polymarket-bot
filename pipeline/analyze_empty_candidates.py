@@ -15,8 +15,8 @@ of paper trading the table will be mostly empty — that is expected. The scorer
 falls back to penalty=1.0 for unseen cohorts.
 
 Usage:
-    python scripts/analyze_empty_candidates.py
-    python scripts/analyze_empty_candidates.py \\
+    python pipeline/analyze_empty_candidates.py
+    python pipeline/analyze_empty_candidates.py \\
         --positions-db /path/to/positions.db \\
         --dataset-db   /path/to/polymarket_dataset.db
 """

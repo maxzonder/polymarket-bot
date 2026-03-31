@@ -11,10 +11,10 @@ Outputs recommended_config.json — a diff against current config thresholds:
   - category_weights update (boost categories with high tail_ev, penalize low ones)
 
 Usage:
-    python scripts/recalibrate_scorers.py
-    python scripts/recalibrate_scorers.py --summary
-    python scripts/recalibrate_scorers.py --output /path/to/recommended_config.json
-    python scripts/recalibrate_scorers.py \\
+    python pipeline/recalibrate_scorers.py
+    python pipeline/recalibrate_scorers.py --summary
+    python pipeline/recalibrate_scorers.py --output /path/to/recommended_config.json
+    python pipeline/recalibrate_scorers.py \\
         --positions-db /path/to/positions.db \\
         --dataset-db   /path/to/polymarket_dataset.db
 
