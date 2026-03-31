@@ -38,6 +38,7 @@ class MarketInfo:
     end_date_ts: Optional[int]   # unix timestamp
     hours_to_close: Optional[float]
     neg_risk: bool = False         # negRisk flag from Gamma (4.5x higher swan_rate)
+    neg_risk_group_id: Optional[str] = None  # negRiskMarketID — parent group for cluster cap
 
 
 def _parse_float(val) -> Optional[float]:
@@ -188,6 +189,9 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
 
     fees_enabled = bool(raw.get("feesEnabled"))
     neg_risk = bool(raw.get("negRisk", False))
+    neg_risk_group_id = raw.get("negRiskMarketID") or raw.get("negRiskRequestID") or None
+    if neg_risk_group_id is not None:
+        neg_risk_group_id = str(neg_risk_group_id)
 
     return MarketInfo(
         market_id=str(market_id),
@@ -206,6 +210,7 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
         end_date_ts=end_date_ts,
         hours_to_close=hours_to_close,
         neg_risk=neg_risk,
+        neg_risk_group_id=neg_risk_group_id,
     )
 
 

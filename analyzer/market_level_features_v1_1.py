@@ -135,9 +135,29 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         f"(vol >= {MIN_VOLUME}, date_from={DATE_FROM}, entry_max <= {ENTRY_MAX}) ..."
     )
 
-    # One row per market. Swan features aggregated across all swan tokens in that market.
-    # We use swans_v2 (which has buy_ts_first/buy_ts_last for time-to-resolution calc).
+    # One row per market. Swan features from the single best token (max max_traded_x).
+    # CTE picks one token per market via ROW_NUMBER to avoid mixing features across tokens
+    # (critical for neg-risk markets where MIN/MAX aggregates would create frankenstein rows).
     rows = conn.execute("""
+        WITH best_swan AS (
+            SELECT
+                t.market_id,
+                s.token_id,
+                s.buy_min_price,
+                s.max_traded_x,
+                s.buy_volume,
+                s.buy_trade_count,
+                s.buy_ts_first,
+                s.buy_ts_last,
+                s.is_winner,
+                ROW_NUMBER() OVER (
+                    PARTITION BY t.market_id
+                    ORDER BY s.max_traded_x DESC
+                ) AS rn
+            FROM swans_v2 s
+            JOIN tokens t ON s.token_id = t.token_id
+            WHERE s.buy_min_price <= :entry_max
+        )
         SELECT
             m.id                AS market_id,
             DATE(m.closed_time, 'unixepoch') AS close_date,
@@ -150,37 +170,18 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             m.closed_time,
             COUNT(DISTINCT t.token_id)   AS token_count,
 
-            -- Swan aggregates (NULL if no swan below ENTRY_MAX threshold)
-            MIN(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_min_price END)
-                AS best_buy_min_price,
-            MAX(CASE WHEN s.buy_min_price <= :entry_max THEN s.max_traded_x END)
-                AS best_max_traded_x,
-            MAX(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_volume END)
-                AS best_buy_volume,
-            MAX(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_trade_count END)
-                AS best_buy_trade_count,
-            MAX(CASE WHEN s.buy_min_price <= :entry_max
-                     THEN (s.buy_ts_last - s.buy_ts_first) END)
-                AS best_floor_duration_s,
-            MIN(CASE WHEN s.buy_min_price <= :entry_max THEN s.buy_ts_first END)
-                AS best_buy_ts_first,
-
-            -- is the best-x swan token a winner?
-            MAX(CASE
-                WHEN s.buy_min_price <= :entry_max
-                     AND s.max_traded_x = (
-                         SELECT MAX(s2.max_traded_x) FROM swans_v2 s2
-                         JOIN tokens t2 ON t2.token_id = s2.token_id
-                         WHERE t2.market_id = m.id
-                           AND s2.buy_min_price <= :entry_max
-                     )
-                THEN t.is_winner
-                ELSE NULL
-            END) AS swan_is_winner
+            -- Swan features from ONE token (the best by max_traded_x)
+            bs.buy_min_price         AS best_buy_min_price,
+            bs.max_traded_x          AS best_max_traded_x,
+            bs.buy_volume            AS best_buy_volume,
+            bs.buy_trade_count       AS best_buy_trade_count,
+            (bs.buy_ts_last - bs.buy_ts_first) AS best_floor_duration_s,
+            bs.buy_ts_first          AS best_buy_ts_first,
+            bs.is_winner             AS swan_is_winner
 
         FROM markets m
         JOIN tokens t ON t.market_id = m.id
-        LEFT JOIN swans_v2 s ON s.token_id = t.token_id
+        LEFT JOIN best_swan bs ON bs.market_id = m.id AND bs.rn = 1
         WHERE m.closed_time > 0
           AND m.volume >= :min_vol
           AND m.duration_hours > 0

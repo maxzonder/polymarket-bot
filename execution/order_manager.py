@@ -59,11 +59,13 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             expires_at     INTEGER NOT NULL,
             label          TEXT,
             mode           TEXT,
-            candidate_id   TEXT
+            candidate_id   TEXT,
+            neg_risk_group_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_resting_token ON resting_orders(token_id);
         CREATE INDEX IF NOT EXISTS idx_resting_status ON resting_orders(status);
         CREATE INDEX IF NOT EXISTS idx_resting_candidate ON resting_orders(candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_resting_group ON resting_orders(neg_risk_group_id);
 
         CREATE TABLE IF NOT EXISTS positions (
             position_id      TEXT PRIMARY KEY,
@@ -229,6 +231,7 @@ class OrderManager:
             "ALTER TABLE ml_outcomes    ADD COLUMN tp_moonbag_hit INTEGER",
             "ALTER TABLE ml_outcomes    ADD COLUMN peak_price REAL",
             "ALTER TABLE ml_outcomes    ADD COLUMN peak_x REAL",
+            "ALTER TABLE resting_orders ADD COLUMN neg_risk_group_id TEXT",
         ]
         for sql in migrations:
             try:
@@ -357,23 +360,17 @@ class OrderManager:
 
             # ── Cluster cap ────────────────────────────────────────────────
             if self.mc.max_resting_per_cluster > 0:
-                try:
-                    cluster_key = int(candidate.market_info.market_id) // 1000
-                except (ValueError, TypeError):
-                    cluster_key = None
+                cluster_key = candidate.market_info.neg_risk_group_id
                 if cluster_key is not None:
-                    all_live = conn.execute(
-                        "SELECT market_id FROM resting_orders WHERE status='live' GROUP BY market_id"
-                    ).fetchall()
-                    cluster_count = sum(
-                        1 for r in all_live
-                        if int(r["market_id"]) // 1000 == cluster_key
-                        and r["market_id"] != candidate.market_info.market_id
-                    )
+                    cluster_count = conn.execute(
+                        "SELECT COUNT(DISTINCT market_id) FROM resting_orders "
+                        "WHERE status='live' AND neg_risk_group_id=?",
+                        (cluster_key,),
+                    ).fetchone()[0]
                     if cluster_count >= self.mc.max_resting_per_cluster:
                         logger.debug(
                             f"Cluster cap: market {candidate.market_info.market_id} "
-                            f"cluster={cluster_key} already has {cluster_count} markets"
+                            f"group={cluster_key} already has {cluster_count} markets"
                         )
                         self._log_scan(conn, candidate, price_level, "cluster_cap")
                         continue
@@ -440,6 +437,7 @@ class OrderManager:
                     mode=self.mc.name,
                     candidate_id=candidate.candidate_id or None,
                     outcome_name=candidate.outcome_name or "",
+                    neg_risk_group_id=candidate.market_info.neg_risk_group_id,
                 )
                 self._log_scan(conn, candidate, price_level, "placed", order_id=result.order_id)
                 logger.info(
@@ -548,6 +546,7 @@ class OrderManager:
                 mode=self.mc.name,
                 candidate_id=candidate.candidate_id or None,
                 outcome_name=candidate.outcome_name or "",
+                neg_risk_group_id=candidate.market_info.neg_risk_group_id,
             )
             logger.info(
                 f"Scanner BUY: {candidate.market_info.question[:50]!r} "
@@ -608,13 +607,14 @@ class OrderManager:
         mode: str,
         candidate_id: Optional[str] = None,
         outcome_name: str = "",
+        neg_risk_group_id: Optional[str] = None,
     ) -> None:
         now = int(time.time())
         conn.execute(
             "INSERT OR REPLACE INTO resting_orders "
-            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode, candidate_id, outcome_name) "
-            "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?, ?, ?)",
-            (order_id, token_id, market_id, price, size, now, expires_at, mode, candidate_id, outcome_name),
+            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode, candidate_id, outcome_name, neg_risk_group_id) "
+            "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?, ?, ?, ?)",
+            (order_id, token_id, market_id, price, size, now, expires_at, mode, candidate_id, outcome_name, neg_risk_group_id),
         )
 
     # ── On fill ───────────────────────────────────────────────────────────────
