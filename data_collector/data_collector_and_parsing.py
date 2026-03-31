@@ -324,6 +324,7 @@ CREATE TABLE IF NOT EXISTS markets (
     comment_count       INTEGER,
     fees_enabled        INTEGER,
     neg_risk            INTEGER,
+    neg_risk_market_id  TEXT,
     group_item_title    TEXT,
     cyom                INTEGER,
     restricted          INTEGER,
@@ -347,13 +348,13 @@ INSERT INTO markets (
     event_title, event_slug, event_description, tags, ticker,
     resolution_source, start_date, end_date, closed_time, duration_hours,
     volume, liquidity, comment_count, fees_enabled,
-    neg_risk, group_item_title, cyom, restricted, volume_1wk
+    neg_risk, neg_risk_market_id, group_item_title, cyom, restricted, volume_1wk
 ) VALUES (
     :id, :question, :description, :category, :slug,
     :event_title, :event_slug, :event_description, :tags, :ticker,
     :resolution_source, :start_date, :end_date, :closed_time, :duration_hours,
     :volume, :liquidity, :comment_count, :fees_enabled,
-    :neg_risk, :group_item_title, :cyom, :restricted, :volume_1wk
+    :neg_risk, :neg_risk_market_id, :group_item_title, :cyom, :restricted, :volume_1wk
 )
 ON CONFLICT(id) DO UPDATE SET
     question=excluded.question,
@@ -375,6 +376,7 @@ ON CONFLICT(id) DO UPDATE SET
     comment_count=excluded.comment_count,
     fees_enabled=excluded.fees_enabled,
     neg_risk=excluded.neg_risk,
+    neg_risk_market_id=excluded.neg_risk_market_id,
     group_item_title=excluded.group_item_title,
     cyom=excluded.cyom,
     restricted=excluded.restricted,
@@ -603,6 +605,7 @@ def _parse_market_row(data: dict) -> Optional[dict]:
         "comment_count":     ev.get("commentCount"),
         "fees_enabled":      1 if data.get("feesEnabled") else 0,
         "neg_risk":          1 if data.get("negRisk") else 0,
+        "neg_risk_market_id": data.get("negRiskMarketID") or data.get("negRiskRequestID") or None,
         "group_item_title":  data.get("groupItemTitle") or None,
         "cyom":              1 if data.get("cyom") else 0,
         "restricted":        1 if data.get("restricted") else 0,
@@ -651,6 +654,7 @@ def _init_db(conn: sqlite3.Connection):
         ("event_description", "TEXT"),
         ("tags", "TEXT"),
         ("ticker", "TEXT"),
+        ("neg_risk_market_id", "TEXT"),
     ]:
         rows = conn.execute(f"PRAGMA table_info(markets)").fetchall()
         if not any(r[1] == col for r in rows):
