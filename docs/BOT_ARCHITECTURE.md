@@ -46,7 +46,8 @@ polymarket-bot/
 │
 ├── api/
 │   ├── gamma_client.py         # Gamma API — сканирование открытых рынков
-│   └── clob_client.py          # CLOB API — стакан, ордера, dry-run
+│   ├── clob_client.py          # CLOB API — стакан, ордера, dry-run
+│   └── data_api.py             # Polymarket Data API — последние трейды, timestamp активности
 │
 ├── strategy/
 │   ├── scorer.py               # Два независимых скора: fill + resolution
@@ -69,9 +70,10 @@ polymarket-bot/
 │   └── market_level_features_v1_1.py  # Строит feature_mart_v1_1 для MarketScorer
 │
 ├── scripts/
-│   ├── daily_pipeline.py       # Оркестратор: ingest→analyzer→feature_mart→ml→recalibrate
+│   ├── daily_pipeline.py       # Оркестратор: ingest→analyzer→feature_mart→ml→feedback→recalibrate
 │   ├── build_ml_outcomes.py    # ML-метки по реальным сделкам бота
 │   ├── build_rejected_outcomes.py  # ML-метки по отклонённым рынкам
+│   ├── analyze_empty_candidates.py  # Feedback penalties: штрафы по (category, vol_bucket)
 │   └── recalibrate_scorers.py  # Пересчёт порогов → recommended_config.json
 │
 ├── _legacy/                    # Устаревшие скрипты (не используются)
@@ -304,7 +306,18 @@ python3 scripts/daily_pipeline.py
 
 Публичный клиент Gamma API. Функция `fetch_open_markets(price_max, volume_min, volume_max)` возвращает список `MarketInfo` — лёгких объектов с ценой, объёмом, token_ids и т.д.
 
+`MarketInfo` содержит поле `neg_risk_group_id: Optional[str]` — заполняется из `negRiskMarketID` или `negRiskRequestID`.
+
 **Важно:** комментарии рынка (`comment_count`) живут в `market["events"][0]["commentCount"]`, не на верхнем уровне.
+
+### `api/data_api.py`
+
+Клиент Polymarket Data API (`https://data-api.polymarket.com`).
+
+- `get_last_trade_ts(condition_id) → Optional[int]` — timestamp последней сделки по рынку
+- `get_recent_trades(condition_id, limit=50) → list[dict]` — последние N сделок
+
+Используется `screener.py` для фильтрации мёртвых рынков.
 
 ### `api/clob_client.py`
 
@@ -333,6 +346,15 @@ python3 scripts/daily_pipeline.py
 
 Оба класса кэшируют результаты в памяти. Метод `.refresh()` перечитывает из БД (вызывается в cleanup loop раз в час).
 
+### `strategy/market_scorer.py`
+
+`MarketScorer` читает `feature_mart_v1_1` при инициализации и применяет два дополнительных штрафа в `_score_raw()`:
+
+- **`loser_penalty`** — вычисляется из `loser_rate` по (category, vol_bucket): rate≤0.70 → 1.0, rate=0.85 → 0.70, rate=1.0 → 0.40 (floor 0.3). Загружается методом `_load_analogy_table()` из `was_swan` + `swan_is_winner` в `feature_mart_v1_1`.
+- **`feedback_penalty`** — читается из таблицы `feedback_penalties` в dataset DB (генерирует `analyze_empty_candidates.py`). Default = 1.0 для незнакомых сегментов.
+
+`total_score *= loser_penalty * feedback_penalty`
+
 ### `strategy/screener.py`
 
 Hard фильтры (до скоринга, дёшево):
@@ -341,6 +363,7 @@ Hard фильтры (до скоринга, дёшево):
 - Есть token_ids
 - `entry_fill_score >= min_entry_fill_score` (из режима)
 - `resolution_score >= min_resolution_score` (из режима)
+- **Dead market filter:** `get_last_trade_ts()` — рынок отклоняется если >48ч без сделок (логируется как `rejected_dead_market`; порог задаётся `BotConfig.dead_market_hours`)
 
 Для каждого токена (YES / NO) отдельно вычисляется `current_price`:
 - YES = `market.best_ask`
@@ -349,6 +372,15 @@ Hard фильтры (до скоринга, дёшево):
 Отбираются только токены с `price <= entry_price_max` и `price > 0`.
 
 `total_score` = взвешенная сумма `(ef_score, res_score, duration_score, liquidity_score, category_weight)` — веса зависят от `optimize_metric` режима.
+
+**Neg-risk группировка:** `scan()` разделяет рынки на два потока:
+- Бинарные рынки (neg_risk_group_id=None) → `_evaluate_market()` как прежде
+- Neg-risk группы → `_evaluate_neg_risk_group(group_id, markets)`:
+  - Определяет фаворита (токен с наибольшей YES-ценой)
+  - `group_boost`: фав≥0.80 → 1.5, ≥0.60 → 1.2, ≥0.40 → 1.0, иначе 0.7
+  - Если фаворит упал ≥20% за 24ч → `group_boost *= 1.5` (структурный катализатор)
+  - Фильтрует underdog-токены (price ≤ entry_price_max), топ N по объёму
+  - Каждый underdog оценивается через `_evaluate_market(group_boost=...)`
 
 ### `strategy/risk_manager.py`
 
@@ -383,6 +415,10 @@ Hard фильтры (до скоринга, дёшево):
 **`cancel_stale_orders()`:**
 - Отменяет биды старше `resting_order_ttl` (24ч по умолчанию)
 - Также проверяет через Gamma API, живы ли ещё рынки
+
+**Таблица `resting_orders`** содержит поле `neg_risk_group_id TEXT` (индекс `idx_resting_group`). Кластерный cap считается по группам neg-risk; бинарные рынки (neg_risk_group_id=NULL) кластерный cap не применяют.
+
+**Spread gate:** после проверки thin-book применяется адаптивный spread gate — логируется как `spread_gate`. Максимальный spread: 30% для mid≥0.05, 80% для low-price токенов.
 
 ### `execution/position_monitor.py`
 

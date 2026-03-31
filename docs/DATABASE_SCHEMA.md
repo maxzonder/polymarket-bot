@@ -41,6 +41,7 @@
 | `cyom` | INTEGER | 1 если custom outcome market |
 | `restricted` | INTEGER | 1 если доступ ограничен |
 | `volume_1wk` | REAL | Объём за последнюю неделю |
+| `neg_risk_market_id` | TEXT | ID neg-risk группы (`negRiskMarketID` / `negRiskRequestID`) |
 
 ---
 
@@ -110,6 +111,28 @@
 | `n_swans` | INTEGER | Количество swan events на рынке |
 | `log_volume` | REAL | `log1p(volume)` |
 | `log_duration_h` | REAL | `log1p(duration_hours)` |
+| `neg_risk_group_id` | TEXT | ID neg-risk группы (из `markets.neg_risk_market_id`) |
+| `group_token_count` | INTEGER | Кол-во токенов в neg-risk группе |
+| `group_max_price` | REAL | Максимальная цена токена в группе (фаворит) |
+| `group_underdog_count` | INTEGER | Кол-во underdog-токенов в группе (`buy_min_price <= ENTRY_MAX`) |
+| `group_underdog_winner` | INTEGER | 1 если хотя бы один underdog в группе выиграл |
+
+---
+
+### Таблица: `feedback_penalties`
+Штрафные коэффициенты по сегментам рынка. Строится `scripts/analyze_empty_candidates.py`.
+
+| Поле | Тип | Описание |
+|------|-----|---------|
+| `category` | TEXT | Категория рынка |
+| `vol_bucket` | TEXT | Бакет объёма |
+| `penalty` | REAL | Мультипликатор скора (0.50 / 0.60 / 1.00) |
+| `empty_rate` | REAL | Доля кандидатов без исполнения |
+| `avg_roi` | REAL | Средний ROI по сегменту |
+| `filled_loser_rate` | REAL | Доля заполненных позиций, ставших лузерами |
+
+Логика: `empty_rate > 95%` и `avg_roi < 0` → penalty=0.50; `filled_loser_rate > 80%` → penalty=0.60; иначе 1.00.
+Нужно 2+ недель paper trading — при пустом `ml_outcomes` скрипт завершается без ошибок.
 
 ---
 
@@ -143,8 +166,11 @@
 | `stake_usdc` | REAL | Размер ставки (USDC) |
 | `status` | TEXT | `live` / `matched` / `cancelled` / `expired` |
 | `clob_order_id` | TEXT | ID ордера в CLOB API |
+| `neg_risk_group_id` | TEXT | ID neg-risk группы (для кластерного cap; NULL для бинарных рынков) |
 | `created_at` | INTEGER | Timestamp создания |
 | `filled_at` | INTEGER | Timestamp исполнения (NULL пока не исполнен) |
+
+Индекс: `idx_resting_group` по `neg_risk_group_id`.
 
 ### Таблица: `positions`
 Открытые позиции (исполненные BUY ордера).

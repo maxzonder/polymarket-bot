@@ -137,6 +137,7 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 | `cyom` | INTEGER (0/1) | `cyom` |
 | `restricted` | INTEGER (0/1) | `restricted` |
 | `volume_1wk` | REAL | `volume1wk` или `volume1wkClob` |
+| `neg_risk_market_id` | TEXT | `negRiskMarketID` или `negRiskRequestID` — ID neg-risk группы |
 
 Запись: UPSERT по `id`. При конфликте обновляет все поля, кроме `category` — для неё берётся `COALESCE(new, existing)` (сохраняет старое если новое NULL).
 
