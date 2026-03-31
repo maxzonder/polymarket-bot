@@ -22,6 +22,7 @@ from typing import Optional
 
 from api.gamma_client import MarketInfo, fetch_open_markets
 from api.clob_client import get_orderbook
+from api.data_api import get_last_trade_ts
 from config import BotConfig
 from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.market_scorer import MarketScore, MarketScorer
@@ -199,6 +200,15 @@ class Screener:
             ms_obj = self.market_scorer.score(m)
             if ms_obj.tier == "reject":
                 _log("rejected_market_score", ms=ms_obj.total)
+                return []
+
+        # Dead market filter: reject if no trades in the last dead_market_hours.
+        # Checked after market_score gate to avoid hitting Data API for bad markets.
+        last_trade = get_last_trade_ts(m.market_id)
+        if last_trade is not None:
+            hours_since_trade = (time.time() - last_trade) / 3600.0
+            if hours_since_trade > self.config.dead_market_hours:
+                _log("rejected_dead_market", ms=ms_obj.total if ms_obj else None)
                 return []
 
         ef_score_obj  = self.ef_scorer.get(m.category)

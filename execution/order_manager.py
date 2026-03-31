@@ -411,6 +411,20 @@ class OrderManager:
                     )
                     self._log_scan(conn, candidate, price_level, "depth_gate_thin")
                     continue
+
+                # Spread gate: reject if bid-ask spread is too wide.
+                # Adaptive threshold: low-price tokens always have wide spreads
+                # due to tick constraints, so we allow up to 80% below $0.05.
+                mid = (book.best_bid + book.best_ask) / 2.0
+                max_spread = 0.30 if mid >= 0.05 else 0.80
+                spread_pct = (book.best_ask - book.best_bid) / mid if mid > 0 else 1.0
+                if spread_pct > max_spread:
+                    logger.debug(
+                        f"Spread gate: {candidate.token_id[:16]} spread={spread_pct:.2%} "
+                        f"> {max_spread:.0%} (mid={mid:.4f})"
+                    )
+                    self._log_scan(conn, candidate, price_level, "spread_gate")
+                    continue
             except Exception as e:
                 logger.debug(f"Orderbook check failed for {candidate.token_id[:16]}: {e}")
                 self._log_scan(conn, candidate, price_level, "depth_gate_error")

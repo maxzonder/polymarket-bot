@@ -304,6 +304,7 @@ class BotConfig:
     # ── Screener hard limits ──────────────────────────────────────────────────
     min_volume_usdc: float = 50.0
     max_volume_usdc: float = 300_000.0  # raised from 50k: geopolitics/politics markets often 100k–1M
+    dead_market_hours: float = 48.0    # reject markets with no trades in this many hours
 
     # ── Scorer DB window ─────────────────────────────────────────────────────
     # Only use swans_v2 rows with entry_min_price in this range for scoring
