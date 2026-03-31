@@ -136,6 +136,11 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
     for idx in CREATE_INDEXES:
         conn.execute(idx)
 
+    # Migrate: ensure markets table has neg_risk_market_id (added by data_collector step 6)
+    markets_cols = {r[1] for r in conn.execute("PRAGMA table_info(markets)").fetchall()}
+    if "neg_risk_market_id" not in markets_cols:
+        conn.execute("ALTER TABLE markets ADD COLUMN neg_risk_market_id TEXT")
+
     # Migrate: add neg-risk group columns to existing tables
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(feature_mart_v1_1)").fetchall()}
     for col, col_type in [

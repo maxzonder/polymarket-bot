@@ -107,6 +107,7 @@ class MarketScorer:
         self.min_score = min_score
         self._analogy: dict[tuple[str, str], float] = {}
         self._loser_rates: dict[tuple[str, str], float] = {}
+        self._feedback_penalties: dict[tuple[str, str], float] = {}
         self._max_analogy: float = 1.0
         self._max_log_volume: float = math.log1p(1_000_000)  # fallback if no DB
         self._load_analogy_table()
@@ -162,6 +163,18 @@ class MarketScorer:
             # Normalise to [0, 1]
             self._analogy = {k: v / max_rate for k, v in raw.items()}
             self._loser_rates = raw_loser
+
+            # Load feedback penalties (from analyze_empty_candidates.py)
+            try:
+                fp_rows = conn.execute(
+                    "SELECT category, vol_bucket, penalty FROM feedback_penalties"
+                ).fetchall()
+                self._feedback_penalties = {
+                    (r["category"], r["vol_bucket"]): float(r["penalty"])
+                    for r in fp_rows
+                }
+            except Exception:
+                self._feedback_penalties = {}
 
         except Exception:
             # feature_mart_v1_1 not yet built — use fallback (zero analogy scores)
@@ -246,6 +259,11 @@ class MarketScorer:
         # We give a meaningful boost rather than a symbolic one.
         context_score = 0.6 if neg_risk else 0.2
 
+        # ── Feedback penalty: from observed fill/win rates in ml_outcomes ───────
+        # Populated by scripts/analyze_empty_candidates.py after 2+ weeks paper trading.
+        # Falls back to 1.0 when the table is empty or the cohort has no data yet.
+        feedback_penalty = self._feedback_penalties.get((cat, vbk), 1.0)
+
         # ── Loser penalty: penalise cohorts where swans almost always lose ──────
         # loser_rate > 0.70 means 70%+ of swans in this cohort never paid off.
         # Scaled penalty: loser_rate=0.85 → ×0.7, loser_rate=1.0 → ×0.4 (floor 0.3).
@@ -262,7 +280,7 @@ class MarketScorer:
             + W_TIME     * time_score
             + W_ANALOGY  * analogy_score
             + W_CONTEXT  * context_score
-        ) * loser_penalty
+        ) * loser_penalty * feedback_penalty
         total = round(min(total, 1.0), 4)
 
         if total >= TOP10_THRESHOLD:

@@ -186,6 +186,16 @@ def step_rejected_outcomes(positions_db: str, dataset_db: str) -> bool:
     ])
 
 
+def step_feedback_penalties(positions_db: str, dataset_db: str) -> bool:
+    """Compute feedback_penalties from ml_outcomes → dataset DB (requires 2+ weeks data)."""
+    return _run("feedback_penalties", [
+        sys.executable,
+        str(SCRIPTS_DIR / "analyze_empty_candidates.py"),
+        "--positions-db", positions_db,
+        "--dataset-db",   dataset_db,
+    ])
+
+
 def step_recalibrate(positions_db: str, dataset_db: str) -> bool:
     """Recalibrate scorer thresholds → recommended_config.json."""
     return _run("recalibrate", [
@@ -253,12 +263,13 @@ def print_pipeline_summary(positions_db: str, dataset_db: str) -> None:
 # ─── Orchestrator ─────────────────────────────────────────────────────────────
 
 STEPS = {
-    "ingest":              step_ingest,
-    "analyzer":            step_analyzer,
-    "feature_mart_v1_1":   step_feature_mart_v1_1,
-    "ml_outcomes":         step_ml_outcomes,
-    "rejected_outcomes":   step_rejected_outcomes,
-    "recalibrate":         step_recalibrate,
+    "ingest":               step_ingest,
+    "analyzer":             step_analyzer,
+    "feature_mart_v1_1":    step_feature_mart_v1_1,
+    "ml_outcomes":          step_ml_outcomes,
+    "feedback_penalties":   step_feedback_penalties,
+    "rejected_outcomes":    step_rejected_outcomes,
+    "recalibrate":          step_recalibrate,
 }
 
 
@@ -302,9 +313,10 @@ def run_pipeline(
             results["analyzer"]          = step_analyzer(dataset_db, date_from, date_to)
             results["feature_mart_v1_1"] = step_feature_mart_v1_1(dataset_db)
 
-        results["ml_outcomes"]       = step_ml_outcomes(positions_db)
-        results["rejected_outcomes"] = step_rejected_outcomes(positions_db, dataset_db)
-        results["recalibrate"]       = step_recalibrate(positions_db, dataset_db)
+        results["ml_outcomes"]          = step_ml_outcomes(positions_db)
+        results["feedback_penalties"]   = step_feedback_penalties(positions_db, dataset_db)
+        results["rejected_outcomes"]    = step_rejected_outcomes(positions_db, dataset_db)
+        results["recalibrate"]          = step_recalibrate(positions_db, dataset_db)
 
     elapsed = time.time() - t0
     failed  = [k for k, v in results.items() if not v]
