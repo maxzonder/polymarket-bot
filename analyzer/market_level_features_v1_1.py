@@ -260,12 +260,25 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     ?, ?,
                     ?, ?, ?
                 ) ON CONFLICT(market_id) DO UPDATE SET
-                    was_swan             = excluded.was_swan,
-                    best_buy_min_price   = excluded.best_buy_min_price,
-                    best_max_traded_x    = excluded.best_max_traded_x,
-                    swan_is_winner       = excluded.swan_is_winner,
-                    label_20x            = excluded.label_20x,
-                    label_tail           = excluded.label_tail
+                    volume_usdc              = excluded.volume_usdc,
+                    log_volume               = excluded.log_volume,
+                    liquidity_usdc           = excluded.liquidity_usdc,
+                    log_liquidity            = excluded.log_liquidity,
+                    duration_hours           = excluded.duration_hours,
+                    comment_count            = excluded.comment_count,
+                    neg_risk                 = excluded.neg_risk,
+                    token_count              = excluded.token_count,
+                    niche_score_raw          = excluded.niche_score_raw,
+                    was_swan                 = excluded.was_swan,
+                    best_buy_min_price       = excluded.best_buy_min_price,
+                    best_max_traded_x        = excluded.best_max_traded_x,
+                    best_buy_volume          = excluded.best_buy_volume,
+                    best_buy_trade_count     = excluded.best_buy_trade_count,
+                    best_floor_duration_s    = excluded.best_floor_duration_s,
+                    best_time_to_res_hours   = excluded.best_time_to_res_hours,
+                    swan_is_winner           = excluded.swan_is_winner,
+                    label_20x                = excluded.label_20x,
+                    label_tail               = excluded.label_tail
             """, (
                 market_id, close_date, category,
                 volume, log_volume, liquidity, log_liquidity,

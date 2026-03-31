@@ -254,7 +254,7 @@ SWAN_BUY_PRICE_THRESHOLD: float = max(
 
 # ── Swan analysis thresholds ──────────────────────────────────────────────────
 # Single source of truth — used by swan_analyzer, feature_mart, rejected_outcomes.
-SWAN_ENTRY_MAX: float = 0.20         # buy_min_price ceiling for a valid "swan event"
+SWAN_ENTRY_MAX: float = SWAN_BUY_PRICE_THRESHOLD  # buy_min_price ceiling for a valid "swan event" — must equal collection threshold
 SWAN_MIN_BUY_VOLUME: float = 1.0     # min USDC traded at the floor (liquidity check)
 SWAN_MIN_SELL_VOLUME: float = 30.0   # min USDC traded at the exit (winners exempt)
 SWAN_MIN_REAL_X: float = 5.0         # min price multiplier to count as a real swan

@@ -367,7 +367,6 @@ def run(
                     **result,
                 },
             )
-            conn.commit()
             ok += 1
         except Exception as e:
             logger.warning(f"{token_id}: DB insert error — {e}")
@@ -375,6 +374,7 @@ def run(
             continue
 
         if i % 5000 == 0:
+            conn.commit()
             elapsed = time.monotonic() - t0
             rate = i / elapsed if elapsed > 0 else 0
             eta = int((total - i) / rate) if rate > 0 else 0
@@ -384,6 +384,7 @@ def run(
                 f"rejected={rejected} errors={errors}"
             )
 
+    conn.commit()  # flush final batch
     elapsed = int(time.monotonic() - t0)
     row = conn.execute(
         "SELECT COUNT(*), AVG(max_traded_x), MAX(max_traded_x), SUM(is_winner), AVG(buy_volume) FROM swans_v2"
