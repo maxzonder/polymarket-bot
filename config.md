@@ -170,24 +170,3 @@ score ≥ 0.25 → $0.10   (проходной порог)
 | `SWAN_MIN_REAL_X` | 5.0× | Мин. множитель для учёта события как настоящего swan |
 
 `SWAN_BUY_PRICE_THRESHOLD` вычисляется динамически — добавление нового режима с более высокими уровнями входа автоматически поднимает потолок сбора.
-
----
-
-## Заметки: `stake_tiers` vs `market_score_tiers`
-
-v1.1 ввёл `market_score_tiers` — quality-weighted sizing. Когда задан, `risk_manager.py` использует `elif`:
-
-```python
-if self.mc.market_score_tiers and market_score is not None:
-    # market_score_tiers — все уровни получают одинаковый стейк по score рынка
-    ...
-elif self.mc.stake_tiers:
-    # legacy v1: стейк по глубине флора (0.001 → $0.50, 0.010 → $0.10)
-    ...
-```
-
-**`market_score_tiers` полностью заменяет `stake_tiers`.** В `BIG_SWAN_MODE` `stake_tiers` убран (мёртвый код при наличии `market_score_tiers`).
-
-Все `entry_price_levels` одного рынка получают одинаковый стейк — важен score рынка, а не цена входа. Суммарная экспозиция на рынок ограничена `max_exposure_per_market`.
-
-`stake_tiers` остаётся рабочим механизмом для режимов без `market_score_tiers` (например `dip_mode`).
