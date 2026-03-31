@@ -183,18 +183,12 @@ BIG_SWAN_MODE = ModeConfig(
     max_hours_to_close=720.0,   # raised from 120h: Stage 0 shows >6mo = 10.6% swan_rate
     hours_to_close_null_default=48.0,  # safe fallback for markets without deadline info
     optimize_metric="tail_ev",
-    # Price-tier stakes: deeper floor = bigger bet (higher upside)
-    # 0.001 → $0.50 (1000x potential), 0.005 → $0.25, 0.010 → $0.10
-    stake_tiers=(
-        (0.001, 0.50),
-        (0.005, 0.25),
-        (0.010, 0.10),
-    ),
     # v1.1: market_score gate — reject bottom-half markets
     min_market_score=0.25,
-    # v1.1: quality-weighted stake override (higher score → bigger stake per level)
-    # Applied as a multiplier on top of stake_tiers: top10 gets max, pass gets min.
-    # Set to non-empty to activate (replaces stake_tiers when market_score_tiers active).
+    # v1.1: quality-weighted stake (higher score → bigger stake per fill).
+    # Fully replaces price-based stake_tiers. All entry_price_levels for a market
+    # get the same stake — depth of floor no longer affects sizing directly.
+    # Per-market exposure is capped by max_exposure_per_market instead.
     market_score_tiers=(
         (0.60, 0.50),   # top10:  $0.50 per entry level
         (0.40, 0.25),   # top25:  $0.25 per entry level

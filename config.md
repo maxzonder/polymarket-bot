@@ -56,7 +56,7 @@
 | `stake_usdc` | `float` | Fallback-стейк (USDC токенов при филе). Используется если ни один тир не совпал. |
 | `max_open_positions` | `int` | Жёсткий лимит одновременно открытых позиций. |
 | `max_resting_markets` | `int` | Макс. число рынков с живыми resting-заявками. |
-| `max_resting_per_cluster` | `int` | Макс. рынков на кластер (`market_id // 1000`), защита от концентрации. |
+| `max_resting_per_cluster` | `int` | Макс. рынков на neg-risk группу (`neg_risk_group_id`), защита от концентрации. Бинарные рынки (без группы) обходят этот лимит. |
 | `max_capital_deployed_pct` | `float` | Макс. доля баланса в открытых позициях (0.0–1.0). |
 | `max_exposure_per_market` | `float` | v1.1: макс. суммарный USDC по всем филам на одном `(market_id, token_id)`. `0.0` = отключено. |
 
@@ -173,44 +173,21 @@ score ≥ 0.25 → $0.10   (проходной порог)
 
 ---
 
-## ⚠️ Расхождение: `stake_tiers` vs `market_score_tiers`
+## Заметки: `stake_tiers` vs `market_score_tiers`
 
-### Проблема
-
-В `BIG_SWAN_MODE` заданы оба поля — `stake_tiers` и `market_score_tiers`. Комментарий в `config.py` гласит:
-
-> *"Applied as a multiplier on top of stake_tiers"*
-
-Но `risk_manager.py` использует `elif`:
+v1.1 ввёл `market_score_tiers` — quality-weighted sizing. Когда задан, `risk_manager.py` использует `elif`:
 
 ```python
 if self.mc.market_score_tiers and market_score is not None:
-    # market_score_tiers выигрывает → stake_tiers НИКОГДА не вычисляется
+    # market_score_tiers — все уровни получают одинаковый стейк по score рынка
     ...
 elif self.mc.stake_tiers:
+    # legacy v1: стейк по глубине флора (0.001 → $0.50, 0.010 → $0.10)
     ...
 ```
 
-**`market_score_tiers` полностью заменяет `stake_tiers`, а не умножает его.**
+**`market_score_tiers` полностью заменяет `stake_tiers`.** В `BIG_SWAN_MODE` `stake_tiers` убран (мёртвый код при наличии `market_score_tiers`).
 
-Два следствия:
+Все `entry_price_levels` одного рынка получают одинаковый стейк — важен score рынка, а не цена входа. Суммарная экспозиция на рынок ограничена `max_exposure_per_market`.
 
-1. **`stake_tiers` в `BIG_SWAN_MODE` — мёртвый код**, значения никогда не используются.
-
-2. **Глубина флора больше не влияет на sizing.** С `stake_tiers` фил на 0.001 давал в 5× больший стейк, чем фил на 0.010. С `market_score_tiers` все `entry_price_levels` одного рынка получают **одинаковый** стейк — важен только score рынка, не цена входа.
-
-### Текущее поведение (что реально происходит)
-
-Для `BIG_SWAN_MODE` при score рынка 0.62:
-- Resting bid на 0.001 → стейк **$0.50**
-- Resting bid на 0.005 → стейк **$0.50** ← одинаково
-- Resting bid на 0.010 → стейк **$0.50** ← одинаково
-- Суммарная потенциальная экспозиция: $1.50 (ограничена `max_exposure_per_market=2.0`)
-
-### Варианты решения
-
-**Вариант A** — Оставить текущее поведение, исправить комментарий. Score-based sizing — это v1.1 intent; price tiers — v1 legacy. Удалить `stake_tiers` из `BIG_SWAN_MODE` чтобы не вводить в заблуждение.
-
-**Вариант B** — Комбинировать оба. Score выбирает множитель (0.5×/1.0×/1.5×), цена выбирает базовый стейк. Требует изменения `risk_manager.py`: умножение вместо `elif`.
-
-**Вариант C** — Вернуть учёт глубины флора внутри score-тиров. Определить `market_score_tiers` как `(min_score, dict[price → stake])`, чтобы оба параметра влияли на sizing. Сложнее.
+`stake_tiers` остаётся рабочим механизмом для режимов без `market_score_tiers` (например `dip_mode`).
