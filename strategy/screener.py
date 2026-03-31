@@ -22,7 +22,7 @@ from typing import Optional
 
 from api.gamma_client import MarketInfo, fetch_open_markets
 from api.clob_client import get_orderbook
-from api.data_api import get_last_trade_ts
+from api.data_api import get_last_trade_ts, get_recent_trades
 from config import BotConfig
 from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.market_scorer import MarketScore, MarketScorer
@@ -115,9 +115,20 @@ class Screener:
         candidates: list[EntryCandidate] = []
         log_entries: list[tuple] = []
 
-        for market in markets:
-            cands = self._evaluate_market(market, log_entries)
-            candidates.extend(cands)
+        # Split into binary markets and neg-risk groups for group-aware evaluation.
+        neg_risk_groups: dict[str, list[MarketInfo]] = {}
+        binary_markets: list[MarketInfo] = []
+        for m in markets:
+            if m.neg_risk_group_id:
+                neg_risk_groups.setdefault(m.neg_risk_group_id, []).append(m)
+            else:
+                binary_markets.append(m)
+
+        for m in binary_markets:
+            candidates.extend(self._evaluate_market(m, log_entries))
+
+        for group_id, group_markets in neg_risk_groups.items():
+            candidates.extend(self._evaluate_neg_risk_group(group_id, group_markets, log_entries))
 
         candidates.sort(key=lambda c: c.total_score, reverse=True)
 
@@ -141,6 +152,7 @@ class Screener:
         self,
         m: MarketInfo,
         log_entries: list[tuple],
+        group_boost: float = 1.0,
     ) -> list[EntryCandidate]:
         """
         Evaluate a single market. Returns 0, 1, or 2 candidates (one per token side).
@@ -270,7 +282,7 @@ class Screener:
                 except Exception:
                     pass  # fallback to synthetic — acceptable per issue #45 verdict
 
-            total_score = self._compute_total_score(m, ef_s, res_s, ms_obj)
+            total_score = self._compute_total_score(m, ef_s, res_s, ms_obj) * group_boost
 
             # Determine resting bid levels for this token
             entry_levels = [lvl for lvl in self.mc.entry_price_levels if lvl < price]
@@ -308,6 +320,82 @@ class Screener:
                 rationale=rationale,
                 market_score=ms_obj,
             ))
+
+        return candidates
+
+    def _evaluate_neg_risk_group(
+        self,
+        group_id: str,
+        markets: list[MarketInfo],
+        log_entries: list[tuple],
+    ) -> list[EntryCandidate]:
+        """
+        Group-aware evaluation of a neg-risk market group.
+
+        Determines the favorite (highest YES price), computes a group_boost based
+        on market confidence level, then evaluates only the underdog tokens
+        (price <= entry_price_max) with that boost applied to total_score.
+
+        Also checks if the favorite dropped 20%+ in 24h — structural catalyst
+        that further boosts underdogs.
+        """
+        # Sort descending by YES price → favorite first
+        sorted_markets = sorted(
+            markets,
+            key=lambda m: m.best_ask or m.last_trade_price or 0,
+            reverse=True,
+        )
+
+        if not sorted_markets:
+            return []
+
+        fav_market = sorted_markets[0]
+        favorite_price = fav_market.best_ask or fav_market.last_trade_price or 0.0
+
+        # Base boost: high confidence in favorite → underdogs are structurally cheap
+        if favorite_price >= 0.80:
+            group_boost = 1.5
+        elif favorite_price >= 0.60:
+            group_boost = 1.2
+        elif favorite_price >= 0.40:
+            group_boost = 1.0
+        else:
+            group_boost = 0.7   # no clear favorite — underdogs less interesting
+
+        # Step 5: Check if favorite dropped 20%+ in the last 24h (structural catalyst)
+        try:
+            recent = get_recent_trades(fav_market.market_id, limit=50)
+            if recent:
+                cutoff = time.time() - 86400
+                price_24h_ago = None
+                for t in recent:
+                    if float(t.get("timestamp", 0)) <= cutoff:
+                        price_24h_ago = float(t["price"])
+                        break
+                if price_24h_ago and favorite_price < price_24h_ago * 0.80:
+                    group_boost *= 1.5
+                    logger.info(
+                        f"Neg-risk group {group_id}: favorite dropped "
+                        f"${price_24h_ago:.2f} → ${favorite_price:.2f} — boosting underdogs"
+                    )
+        except Exception:
+            pass  # trades unavailable — continue without catalyst boost
+
+        # Only evaluate underdog tokens (price in our entry zone)
+        underdog_markets = [
+            m for m in sorted_markets
+            if (m.best_ask or m.last_trade_price or 1.0) <= self.mc.entry_price_max
+        ]
+
+        # Cap per group: take top N by volume (most liquid underdogs first)
+        max_underdogs = self.mc.max_resting_per_cluster if self.mc.max_resting_per_cluster > 0 else 10
+        underdog_markets = sorted(underdog_markets, key=lambda m: m.volume_usdc, reverse=True)
+        underdog_markets = underdog_markets[:max_underdogs]
+
+        candidates = []
+        for m in underdog_markets:
+            cands = self._evaluate_market(m, log_entries, group_boost=group_boost)
+            candidates.extend(cands)
 
         return candidates
 
