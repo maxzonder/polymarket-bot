@@ -8,8 +8,9 @@ this script simulates the bot running from day 1 over ALL downloaded markets:
   2. Apply screener static filters (volume, category, duration).
   3. At the "discovery time" for each market (= simulation start or first trade,
      whichever is later), check price-dependent filters (current_price, hours_to_close).
-  4. Place resting bids at configured levels for markets that pass.
-  5. Replay trades chronologically: fill bids, fire TP orders, resolve.
+  4. Score the market with MarketScorer (offline, reads feature_mart_v1_1 from SQLite).
+  5. Place resting bids at configured levels for markets that pass.
+  6. Replay trades chronologically: fill bids, fire TP orders, resolve.
 
 Most resting bids will never fill — the bot scatters bids across hundreds of markets
 and only earns on the fraction that actually dip. That's the honest cost of the strategy.
@@ -20,12 +21,12 @@ DOCUMENTED LIMITATIONS (read before interpreting results):
   2. volume uses final total from DB, not volume-at-discovery.
      → Young markets look as liquid as they'll ever be; filter is slightly generous.
   3. NO-token price: 1 - YES synthetic (no CLOB orderbook for NO side).
-  4. MarketScorer disabled (ChromaDB not feasible offline) → min_market_score ignored.
-     All markets passing static + price filters are considered.
+  4. Spread gate not implemented (no historical orderbook snapshots).
   5. Universe: only markets downloaded in polymarket_dataset.db (~235k of ~300k on Polymarket).
   6. Trade files are full-history snapshots (not daily diffs). We use the latest
      available file per market, which may have been collected after the sim window ends.
      This is fine for fill/TP logic — timestamps are in the trade records.
+  7. Neg-risk group-aware screening not implemented (each token processed independently).
 
 Usage:
     python3 scripts/run_honest_replay.py --start 2026-01-01 --end 2026-01-31
@@ -52,6 +53,7 @@ import execution.order_manager as om_module
 
 from api.clob_client import ClobClient
 from config import BotConfig, ModeConfig
+from strategy.market_scorer import MarketScore, MarketScorer
 from strategy.risk_manager import RiskManager
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, DATA_DIR
@@ -59,25 +61,39 @@ from utils.paths import DATABASE_DIR, DB_PATH, DATA_DIR
 logger = setup_logger("honest_replay")
 
 
+# ── Trade file index ───────────────────────────────────────────────────────────
+
+def _build_trade_file_index() -> dict[tuple[str, str], str]:
+    """
+    Build a {(market_id, token_id): path} index once at startup.
+    Avoids per-token filesystem scans (O(dates) → O(1) lookup).
+    Latest date wins for each key (snapshot is fullest).
+    """
+    index: dict[tuple[str, str], str] = {}
+    try:
+        dates = sorted(
+            [d for d in os.listdir(DATABASE_DIR) if d[:4].isdigit()],
+            reverse=True,
+        )
+        for d in dates:
+            trades_root = os.path.join(DATABASE_DIR, d)
+            if not os.path.isdir(trades_root):
+                continue
+            for entry in os.scandir(trades_root):
+                if not (entry.is_dir() and entry.name.endswith("_trades")):
+                    continue
+                market_id = entry.name[:-7]
+                for tf in os.scandir(entry.path):
+                    if tf.name.endswith(".json"):
+                        key = (market_id, tf.name[:-5])
+                        if key not in index:
+                            index[key] = tf.path
+    except Exception as e:
+        logger.warning(f"_build_trade_file_index error: {e}")
+    return index
+
+
 # ── Trade file helpers ─────────────────────────────────────────────────────────
-
-def _find_latest_trade_file(market_id: str, token_id: str) -> Optional[str]:
-    """
-    Return path to the most-recently-collected trade file for this token.
-    Trade files are complete history snapshots — the latest date gives the
-    fullest picture (more trades = more TP fill opportunities).
-    Returns None if no file found.
-    """
-    dates = sorted(
-        [d for d in os.listdir(DATABASE_DIR) if d[:4].isdigit()],
-        reverse=True,  # newest first
-    )
-    for d in dates:
-        fpath = os.path.join(DATABASE_DIR, d, f"{market_id}_trades", f"{token_id}.json")
-        if os.path.exists(fpath):
-            return fpath
-    return None
-
 
 def _load_trades_sorted(fpath: str) -> list[dict]:
     """Load and sort trades ascending by timestamp. Returns [] on error."""
@@ -132,6 +148,7 @@ def load_all_markets(
             m.start_date,
             m.duration_hours,
             m.neg_risk,
+            COALESCE(m.comment_count, 0) AS comment_count,
             t.token_id,
             t.outcome_name,
             t.is_winner
@@ -185,9 +202,13 @@ def simulate_token(
     om,
     clob: ClobClient,
     mc: ModeConfig,
+    risk: RiskManager,
+    scorer: Optional[MarketScorer],
     positions_db_path: str,
     start_ts: int,
     end_ts: int,
+    dead_market_hours: float,
+    trade_index: dict[tuple[str, str], str],
     activation_delay: int = 0,
     fill_fraction: float = 1.0,
 ) -> dict:
@@ -207,9 +228,12 @@ def simulate_token(
     outcome     = row.get("outcome_name") or ""
     is_winner   = bool(row.get("is_winner", False))
     category    = row.get("category") or ""
+    volume      = float(row.get("volume") or 0.0)
+    comment_count = int(row.get("comment_count") or 0)
+    neg_risk    = bool(row.get("neg_risk", False))
 
-    # ── Load trades ────────────────────────────────────────────────────────────
-    fpath = _find_latest_trade_file(market_id, token_id)
+    # ── Load trades (index lookup — no filesystem scan) ────────────────────────
+    fpath = trade_index.get((market_id, token_id))
     if fpath is None:
         return {"status": "no_trade_file", "token_id": token_id, "market_id": market_id}
 
@@ -224,6 +248,14 @@ def simulate_token(
     # Skip if market already closed before simulation window
     if end_date <= start_ts:
         return {"status": "rejected_closed_before_start", "token_id": token_id, "market_id": market_id}
+
+    # ── Dead market filter: was the market dormant at discovery? ──────────────
+    trades_before = [t for t in trades if t["timestamp"] <= discovery_ts]
+    if trades_before:
+        last_trade_ts = int(trades_before[-1]["timestamp"])
+        hours_since_last = (discovery_ts - last_trade_ts) / 3600.0
+        if hours_since_last > dead_market_hours:
+            return {"status": "rejected_dead_market", "token_id": token_id, "market_id": market_id}
 
     # ── Hours-to-close check at DISCOVERY time (not at start_ts) ─────────────
     # Critical: a market appearing on Jan 15 with end_date Feb 14 has 30 days
@@ -258,19 +290,31 @@ def simulate_token(
         return {"status": "rejected_no_entry_levels", "token_id": token_id, "market_id": market_id,
                 "current_price": current_price}
 
-    # ── Place resting BUY orders ───────────────────────────────────────────────
-    def _tier_stake(level: float) -> float:
-        if mc.stake_tiers:
-            for tier_price, tier_stake in mc.stake_tiers:
-                if level <= tier_price:
-                    return tier_stake
-        return mc.stake_usdc
+    # ── MarketScorer gate (offline, reads feature_mart_v1_1 from SQLite) ──────
+    market_score: Optional[MarketScore] = None
+    if scorer is not None:
+        market_score = scorer.score_from_db(
+            market_id=market_id,
+            volume=volume,
+            comment_count=comment_count,
+            hours_to_close=hours_at_discovery,
+            category=category,
+            neg_risk=neg_risk,
+        )
+        if market_score.tier == "reject":
+            return {"status": "rejected_market_score", "token_id": token_id, "market_id": market_id,
+                    "market_score": market_score.total}
 
+    # ── Place resting BUY orders ───────────────────────────────────────────────
     now_ts = int(time.time())
     pending_buys: dict[str, dict] = {}
 
     for level in entry_levels:
-        stake = _tier_stake(level)
+        sized = risk.size_position(token_id, entry_price=level, market_score=market_score)
+        if sized is None:
+            # Rejected by risk manager (score below min_market_score or anti-garbage)
+            continue
+        stake = sized.stake_usdc
         token_qty = stake / level
         label = f"honest_{market_id}_{level}"
         result = clob.place_limit_order(
@@ -398,6 +442,7 @@ def simulate_token(
         "filled_entries": filled_entries,
         "filled_tps": filled_tps,
         "is_winner": is_winner,
+        "market_score": market_score.total if market_score else None,
     }
 
 
@@ -442,8 +487,10 @@ def print_summary(
     print(f"    Rejected hours_max          : {status_counts.get('rejected_hours_max', 0)}")
     print(f"    Rejected price above max    : {status_counts.get('rejected_price_above_max', 0)}")
     print(f"    Rejected no entry levels    : {status_counts.get('rejected_no_entry_levels', 0)}")
+    print(f"    Rejected dead market        : {status_counts.get('rejected_dead_market', 0)}")
+    print(f"    Rejected market score       : {status_counts.get('rejected_market_score', 0)}")
     print(f"    No trade file               : {status_counts.get('no_trade_file', 0)}")
-    print(f"    Other rejections            : {sum(v for k,v in status_counts.items() if k not in ('ok','rejected_hours_min','rejected_hours_max','rejected_price_above_max','rejected_no_entry_levels','no_trade_file'))}")
+    print(f"    Other rejections            : {sum(v for k,v in status_counts.items() if k not in ('ok','rejected_hours_min','rejected_hours_max','rejected_price_above_max','rejected_no_entry_levels','rejected_dead_market','rejected_market_score','no_trade_file'))}")
     print()
     print(f"  Resting bids placed (markets) : {len(ok)}")
     print(f"  Entry fills                   : {total_bids}  (fill_rate={fill_rate:.1f}%)")
@@ -467,7 +514,8 @@ def print_summary(
     print(f"  ⚠  Limitations (see module docstring):")
     print(f"     1. Price = last_trade_price, not CLOB best_ask (optimistic fills)")
     print(f"     2. Volume filter uses final total, not volume-at-discovery")
-    print(f"     3. MarketScorer disabled (min_market_score ignored)")
+    print(f"     3. Spread gate not implemented (no historical orderbook)")
+    print(f"     4. Neg-risk group boost not simulated")
     print(sep)
 
 
@@ -507,6 +555,27 @@ def run_honest_replay(
     risk   = RiskManager(mc, balance_usdc=10_000.0)  # high cap — don't let balance block fills
     om     = OrderManager(config, clob, risk)
 
+    # MarketScorer: reads feature_mart_v1_1 from SQLite — no live API needed.
+    scorer: Optional[MarketScorer] = None
+    if mc.min_market_score > 0 or mc.market_score_tiers:
+        try:
+            scorer = MarketScorer(db_path=DB_PATH, min_score=mc.min_market_score)
+            logger.info(
+                f"MarketScorer loaded: min_score={mc.min_market_score} "
+                f"analogy_cohorts={len(scorer._analogy)}"
+            )
+        except Exception as e:
+            logger.warning(f"MarketScorer init failed, scoring disabled: {e}")
+
+    # Trade file index: one-time filesystem scan instead of per-token
+    logger.info("Building trade file index...")
+    t_idx_start = time.monotonic()
+    trade_index = _build_trade_file_index()
+    logger.info(
+        f"Trade file index: {len(trade_index)} tokens "
+        f"({time.monotonic() - t_idx_start:.1f}s)"
+    )
+
     start_ts = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp())
     end_ts   = int(datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc).timestamp())
 
@@ -535,20 +604,24 @@ def run_honest_replay(
 
     for i, row in enumerate(all_rows, 1):
         result = simulate_token(
-            row, om, clob, mc, str(positions_db),
+            row, om, clob, mc, risk, scorer,
+            str(positions_db),
             start_ts, end_ts,
+            dead_market_hours=config.dead_market_hours,
+            trade_index=trade_index,
             activation_delay=activation_delay,
             fill_fraction=fill_fraction,
         )
         results.append(result)
 
         if not summary_only and result["status"] == "ok" and result.get("filled_entries", 0) > 0:
+            ms_info = f" mscore={result['market_score']:.3f}" if result.get("market_score") else ""
             logger.info(
                 f"[{i}/{len(all_rows)}] FILL {row['token_id'][:16]} "
                 f"cat={row.get('category','')} "
                 f"price={result['current_price']:.4f} "
                 f"entries={result['filled_entries']} tps={result['filled_tps']} "
-                f"winner={result['is_winner']}"
+                f"winner={result['is_winner']}{ms_info}"
             )
         elif not summary_only and i % 500 == 0:
             passed = sum(1 for r in results if r["status"] == "ok")
