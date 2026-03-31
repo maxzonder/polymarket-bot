@@ -339,6 +339,12 @@ class OrderManager:
                 self._log_scan(conn, candidate, price_level, "risk_rejected")
                 continue
 
+            logger.debug(
+                f"Sized: {candidate.token_id[:16]} @ ${price_level:.5f} "
+                f"stake=${sized.stake_usdc:.2f} qty={sized.token_quantity:.2f} "
+                f"ms_tier={candidate.market_score.tier if candidate.market_score else 'n/a'}"
+            )
+
             if self._count_open_positions(conn) >= self.mc.max_open_positions:
                 logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping")
                 self._log_scan(conn, candidate, price_level, "max_positions")
@@ -454,10 +460,17 @@ class OrderManager:
                     neg_risk_group_id=candidate.market_info.neg_risk_group_id,
                 )
                 self._log_scan(conn, candidate, price_level, "placed", order_id=result.order_id)
+                neg_risk_tag = (
+                    f" [neg-risk grp={candidate.market_info.neg_risk_group_id[:12]}]"
+                    if candidate.market_info.neg_risk_group_id else ""
+                )
+                ms_tier = candidate.market_score.tier if candidate.market_score else "n/a"
                 logger.info(
                     f"Placed resting BUY: {candidate.market_info.question[:50]!r} "
                     f"token={candidate.token_id[:16]} @ ${price_level:.5f} "
-                    f"qty={sized.token_quantity:.2f} order_id={result.order_id}"
+                    f"stake=${sized.stake_usdc:.2f} qty={sized.token_quantity:.2f} "
+                    f"tier={ms_tier} score={candidate.total_score:.3f} "
+                    f"order_id={result.order_id}{neg_risk_tag}"
                 )
                 results.append(result)
             else:

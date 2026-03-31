@@ -283,6 +283,14 @@ class MarketScorer:
         ) * loser_penalty * feedback_penalty
         total = round(min(total, 1.0), 4)
 
+        if loser_penalty < 1.0 or feedback_penalty < 1.0:
+            import logging as _logging
+            _logging.getLogger("market_scorer").debug(
+                f"Penalty applied [{market_id[:16]}] cat={cat} vol={vbk} "
+                f"loser_penalty={loser_penalty:.2f} feedback_penalty={feedback_penalty:.2f} "
+                f"→ total={total:.3f}"
+            )
+
         if total >= TOP10_THRESHOLD:
             tier = "top10"
         elif total >= TOP25_THRESHOLD:

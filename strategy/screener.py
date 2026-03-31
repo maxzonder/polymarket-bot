@@ -124,6 +124,12 @@ class Screener:
             else:
                 binary_markets.append(m)
 
+        logger.info(
+            f"Scan start: {len(markets)} markets fetched — "
+            f"{len(binary_markets)} binary, {len(neg_risk_groups)} neg-risk groups "
+            f"({sum(len(v) for v in neg_risk_groups.values())} outcomes)"
+        )
+
         for m in binary_markets:
             candidates.extend(self._evaluate_market(m, log_entries))
 
@@ -131,6 +137,13 @@ class Screener:
             candidates.extend(self._evaluate_neg_risk_group(group_id, group_markets, log_entries))
 
         candidates.sort(key=lambda c: c.total_score, reverse=True)
+
+        passed = [c for c in candidates if c.total_score > 0]
+        logger.info(
+            f"Scan done: {len(passed)} candidates → order manager "
+            f"(binary={sum(1 for c in passed if not c.market_info.neg_risk_group_id)}, "
+            f"neg-risk={sum(1 for c in passed if c.market_info.neg_risk_group_id)})"
+        )
 
         if log_entries:
             self._flush_screener_log(log_entries)
@@ -298,6 +311,18 @@ class Screener:
             _log("passed_to_order_manager", token_id=token_id, price=price,
                  ef=ef_s, res=res_s, candidate_id=candidate_id, ms=ms_score)
 
+            boost_info = f" boost={group_boost:.2f}" if group_boost != 1.0 else ""
+            neg_risk_info = f" [neg-risk grp={m.neg_risk_group_id[:12]}]" if m.neg_risk_group_id else ""
+            ms_str = f"{ms_score:.3f}" if ms_score is not None else "N/A"
+            hrs_str = f"{m.hours_to_close:.1f}" if m.hours_to_close is not None else "N/A"
+            logger.info(
+                f"Candidate: {(m.question or '')[:60]!r} | "
+                f"{outcome_name} @ ${price:.4f} | "
+                f"score={total_score:.3f}{boost_info} ms={ms_str} | "
+                f"cat={m.category} vol=${m.volume_usdc:.0f} hrs={hrs_str}"
+                f"{neg_risk_info}"
+            )
+
             ms_info = f" {ms_obj.rationale}" if ms_obj else ""
             rationale = (
                 f"category={m.category} fill_score={ef_s:.3f} res_score={res_s:.3f} "
@@ -391,6 +416,14 @@ class Screener:
         max_underdogs = self.mc.max_resting_per_cluster if self.mc.max_resting_per_cluster > 0 else 10
         underdog_markets = sorted(underdog_markets, key=lambda m: m.volume_usdc, reverse=True)
         underdog_markets = underdog_markets[:max_underdogs]
+
+        fav_q = (fav_market.question or "")[:50]
+        logger.info(
+            f"Neg-risk group {group_id[:16]}: {len(sorted_markets)} outcomes | "
+            f"fav={fav_q!r} @ ${favorite_price:.3f} | "
+            f"boost={group_boost:.2f} | "
+            f"{len(underdog_markets)}/{len(sorted_markets)} underdogs to evaluate"
+        )
 
         candidates = []
         for m in underdog_markets:
