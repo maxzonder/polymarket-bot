@@ -163,7 +163,7 @@ BIG_SWAN_MODE = ModeConfig(
     name="big_swan_mode",
     # wide range — we pre-position early, resting bids at floor levels
     entry_price_levels=(0.001, 0.005, 0.01),
-    entry_price_max=0.30,       # screen markets with price up to 30c
+    entry_price_max=0.20,       # must match SWAN_BUY_PRICE_THRESHOLD — no scorer data above this
     use_resting_bids=True,
     scanner_entry=False,        # ONLY resting bids; no chasing dips
     tp_levels=(
