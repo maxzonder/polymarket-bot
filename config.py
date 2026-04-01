@@ -179,8 +179,8 @@ BIG_SWAN_MODE = ModeConfig(
     max_resting_markets=5000,
     max_resting_per_cluster=10,
     max_capital_deployed_pct=0.99,
-    min_hours_to_close=1.0,
-    max_hours_to_close=720.0,   # raised from 120h: Stage 0 shows >6mo = 10.6% swan_rate
+    min_hours_to_close=0.25,     # 15 min
+    max_hours_to_close=24.0,
     hours_to_close_null_default=48.0,  # safe fallback for markets without deadline info
     optimize_metric="tail_ev",
     # v1.1: market_score gate — reject bottom-half markets
