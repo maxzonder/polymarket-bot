@@ -26,7 +26,9 @@ DOCUMENTED LIMITATIONS (read before interpreting results):
   6. Trade files are full-history snapshots (not daily diffs). We use the latest
      available file per market, which may have been collected after the sim window ends.
      This is fine for fill/TP logic — timestamps are in the trade records.
-  7. Neg-risk group-aware screening not implemented (each token processed independently).
+  7. Spread gate not implemented (no historical orderbook snapshots).
+  8. Neg-risk group simulation uses end-of-day volume as underdog sort key
+     (volume-at-discovery not available in DB).
 
 Usage:
     python3 scripts/run_honest_replay.py --start 2026-01-01 --end 2026-01-31
@@ -118,6 +120,123 @@ def _price_at(trades: list[dict], ts: int) -> Optional[float]:
     return p
 
 
+# ── Neg-risk group boost pre-computation ──────────────────────────────────────
+
+def _compute_neg_risk_boosts(
+    rows: list[dict],
+    trade_index: dict[tuple[str, str], str],
+    start_ts: int,
+    mc: ModeConfig,
+) -> dict[str, Optional[float]]:
+    """
+    Pre-compute group_boost for every token in a neg-risk group.
+
+    Returns {token_id: boost} where:
+    - boost=float  → underdog, process with this stake multiplier
+    - boost=None   → skip (favorite or over max_resting_per_cluster cap)
+    Tokens not in this dict are binary markets — process normally (boost=1.0).
+
+    Logic mirrors screener._evaluate_neg_risk_group:
+    - Sort group tokens by price at group_discovery_ts (favorite = highest)
+    - group_boost based on favorite_price: ≥0.80→1.5, ≥0.60→1.2, ≥0.40→1.0, else→0.7
+    - Favorite-drop catalyst: if favorite dropped 20%+ in 24h → extra ×1.5
+    - Only underdogs (price ≤ entry_price_max) pass; capped at max_resting_per_cluster
+    """
+    # Group rows by neg_risk_market_id
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        grp = row.get("neg_risk_market_id")
+        if grp:
+            groups.setdefault(grp, []).append(row)
+
+    if not groups:
+        return {}
+
+    result: dict[str, Optional[float]] = {}
+
+    for group_id, group_rows in groups.items():
+        # Load trades for each token in the group
+        token_trades: dict[str, list[dict]] = {}
+        for row in group_rows:
+            fpath = trade_index.get((row["market_id"], row["token_id"]))
+            if fpath:
+                trades = _load_trades_sorted(fpath)
+                if trades:
+                    token_trades[row["token_id"]] = trades
+
+        if not token_trades:
+            for row in group_rows:
+                result[row["token_id"]] = None
+            continue
+
+        # Group discovery = first time screener could see any token
+        first_trade_tss = [t[0]["timestamp"] for t in token_trades.values()]
+        group_discovery_ts = max(start_ts, min(first_trade_tss))
+
+        # Price per token at group_discovery_ts
+        prices: dict[str, float] = {}
+        for tid, trades in token_trades.items():
+            p = _price_at(trades, group_discovery_ts)
+            if p is not None:
+                prices[tid] = p
+
+        if not prices:
+            for row in group_rows:
+                result[row["token_id"]] = None
+            continue
+
+        # Favorite = highest price token at discovery
+        fav_token_id = max(prices, key=lambda t: prices[t])
+        favorite_price = prices[fav_token_id]
+
+        # Base boost by favorite confidence
+        if favorite_price >= 0.80:
+            group_boost = 1.5
+        elif favorite_price >= 0.60:
+            group_boost = 1.2
+        elif favorite_price >= 0.40:
+            group_boost = 1.0
+        else:
+            group_boost = 0.7  # no clear favorite — underdogs less interesting
+
+        # Favorite-drop catalyst: dropped 20%+ in 24h before discovery?
+        fav_trades = token_trades.get(fav_token_id, [])
+        price_24h_ago = _price_at(fav_trades, group_discovery_ts - 86400)
+        if price_24h_ago and favorite_price < price_24h_ago * 0.80:
+            group_boost *= 1.5
+            logger.info(
+                f"Neg-risk group {group_id[:16]}: favorite dropped "
+                f"${price_24h_ago:.3f} → ${favorite_price:.3f} — underdogs ×1.5"
+            )
+
+        # Underdogs: price at discovery ≤ entry_price_max
+        underdog_rows = [
+            r for r in group_rows
+            if prices.get(r["token_id"], 1.0) <= mc.entry_price_max
+        ]
+
+        # Cap: top N by volume (most liquid underdogs first)
+        max_underdogs = mc.max_resting_per_cluster if mc.max_resting_per_cluster > 0 else 10
+        underdog_rows = sorted(
+            underdog_rows,
+            key=lambda r: float(r.get("volume") or 0),
+            reverse=True,
+        )[:max_underdogs]
+        allowed_tids = {r["token_id"] for r in underdog_rows}
+
+        logger.debug(
+            f"Neg-risk group {group_id[:16]}: {len(group_rows)} tokens | "
+            f"fav @ ${favorite_price:.3f} boost={group_boost:.2f} | "
+            f"{len(underdog_rows)}/{len(group_rows)} underdogs accepted"
+        )
+
+        for row in group_rows:
+            tid = row["token_id"]
+            result[tid] = group_boost if tid in allowed_tids else None
+
+    return result
+
+
 # ── Market loading ─────────────────────────────────────────────────────────────
 
 def load_all_markets(
@@ -148,6 +267,7 @@ def load_all_markets(
             m.start_date,
             m.duration_hours,
             m.neg_risk,
+            m.neg_risk_market_id,
             COALESCE(m.comment_count, 0) AS comment_count,
             t.token_id,
             t.outcome_name,
@@ -211,6 +331,7 @@ def simulate_token(
     trade_index: dict[tuple[str, str], str],
     activation_delay: int = 0,
     fill_fraction: float = 1.0,
+    group_boost: float = 1.0,
 ) -> dict:
     """
     Simulate one market/token pair through the bot's full entry → TP → resolution path.
@@ -314,7 +435,7 @@ def simulate_token(
         if sized is None:
             # Rejected by risk manager (score below min_market_score or anti-garbage)
             continue
-        stake = sized.stake_usdc
+        stake = max(0.001, round(sized.stake_usdc * group_boost, 6))
         token_qty = stake / level
         label = f"honest_{market_id}_{level}"
         result = clob.place_limit_order(
@@ -443,6 +564,7 @@ def simulate_token(
         "filled_tps": filled_tps,
         "is_winner": is_winner,
         "market_score": market_score.total if market_score else None,
+        "group_boost": group_boost,
     }
 
 
@@ -489,8 +611,9 @@ def print_summary(
     print(f"    Rejected no entry levels    : {status_counts.get('rejected_no_entry_levels', 0)}")
     print(f"    Rejected dead market        : {status_counts.get('rejected_dead_market', 0)}")
     print(f"    Rejected market score       : {status_counts.get('rejected_market_score', 0)}")
+    print(f"    Skipped neg-risk (fav/cap)  : {status_counts.get('skipped_neg_risk', 0)}")
     print(f"    No trade file               : {status_counts.get('no_trade_file', 0)}")
-    print(f"    Other rejections            : {sum(v for k,v in status_counts.items() if k not in ('ok','rejected_hours_min','rejected_hours_max','rejected_price_above_max','rejected_no_entry_levels','rejected_dead_market','rejected_market_score','no_trade_file'))}")
+    print(f"    Other rejections            : {sum(v for k,v in status_counts.items() if k not in ('ok','rejected_hours_min','rejected_hours_max','rejected_price_above_max','rejected_no_entry_levels','rejected_dead_market','rejected_market_score','skipped_neg_risk','no_trade_file'))}")
     print()
     print(f"  Resting bids placed (markets) : {len(ok)}")
     print(f"  Entry fills                   : {total_bids}  (fill_rate={fill_rate:.1f}%)")
@@ -599,10 +722,31 @@ def run_honest_replay(
     )
     logger.info(f"Output: {output_dir}")
 
+    # Neg-risk group boosts: pre-compute once, O(1) lookup per token
+    logger.info("Pre-computing neg-risk group boosts...")
+    neg_risk_boosts = _compute_neg_risk_boosts(all_rows, trade_index, start_ts, mc)
+    nr_underdog = sum(1 for v in neg_risk_boosts.values() if v is not None)
+    nr_skip = sum(1 for v in neg_risk_boosts.values() if v is None)
+    if neg_risk_boosts:
+        logger.info(f"Neg-risk: {nr_underdog} underdog tokens, {nr_skip} skipped (favorites/cap)")
+
     results: list[dict] = []
     t0 = time.monotonic()
 
     for i, row in enumerate(all_rows, 1):
+        token_id = row["token_id"]
+
+        # Skip neg-risk favorites and over-cap tokens
+        if token_id in neg_risk_boosts and neg_risk_boosts[token_id] is None:
+            results.append({
+                "status": "skipped_neg_risk",
+                "token_id": token_id,
+                "market_id": row["market_id"],
+            })
+            continue
+
+        group_boost = neg_risk_boosts.get(token_id, 1.0)
+
         result = simulate_token(
             row, om, clob, mc, risk, scorer,
             str(positions_db),
@@ -611,17 +755,19 @@ def run_honest_replay(
             trade_index=trade_index,
             activation_delay=activation_delay,
             fill_fraction=fill_fraction,
+            group_boost=group_boost,
         )
         results.append(result)
 
         if not summary_only and result["status"] == "ok" and result.get("filled_entries", 0) > 0:
             ms_info = f" mscore={result['market_score']:.3f}" if result.get("market_score") else ""
+            boost_info = f" boost={result['group_boost']:.2f}" if result.get("group_boost", 1.0) != 1.0 else ""
             logger.info(
                 f"[{i}/{len(all_rows)}] FILL {row['token_id'][:16]} "
                 f"cat={row.get('category','')} "
                 f"price={result['current_price']:.4f} "
                 f"entries={result['filled_entries']} tps={result['filled_tps']} "
-                f"winner={result['is_winner']}{ms_info}"
+                f"winner={result['is_winner']}{ms_info}{boost_info}"
             )
         elif not summary_only and i % 500 == 0:
             passed = sum(1 for r in results if r["status"] == "ok")
