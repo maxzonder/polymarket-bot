@@ -17,7 +17,7 @@ import asyncio
 import subprocess
 import sys
 
-from config import load_config
+from config import load_config, check_swan_buy_price_threshold
 from bot.main_loop import BotRunner
 from utils.logger import setup_logger, add_bot_log_file
 
@@ -52,6 +52,9 @@ def main() -> None:
             sys.exit(1)
         logger.info("  [LIVE] Real orders will be placed on Polymarket")
     logger.info("=" * 60)
+
+    for alert in check_swan_buy_price_threshold(config.mode_config):
+        logger.warning(alert)
 
     runner = BotRunner(config)
     asyncio.run(runner.run())

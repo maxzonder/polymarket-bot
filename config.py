@@ -238,13 +238,16 @@ MODES: dict[str, ModeConfig] = {
 }
 
 # ── Swan analyzer global threshold ────────────────────────────────────────────
-# Must cover ALL entry_price_levels across ALL modes.
-# swan_analyzer.py uses this as --buy-price-threshold default.
-# If a mode has entry levels above this value, swans_v2 will be missing data
-# for those levels and scorer/feature_mart will have blind spots.
-SWAN_BUY_PRICE_THRESHOLD: float = max(
-    max(m.entry_price_levels) for m in MODES.values()
-)
+# FIXED constant — reflects the buy_min_price ceiling used when swans_v2 was
+# collected. History is the source of truth: the bot must not bid above this
+# level, because there is no scorer data for higher prices.
+#
+# Do NOT derive this from entry_price_levels — that would make the check
+# circular (threshold always ≥ any level, warning never fires).
+#
+# To raise the ceiling: re-run swan_analyzer with --buy-price-threshold <new>,
+# then update this constant.
+SWAN_BUY_PRICE_THRESHOLD: float = 0.20
 
 # ── Swan analysis thresholds ──────────────────────────────────────────────────
 # Single source of truth — used by swan_analyzer, feature_mart, rejected_outcomes.
@@ -254,21 +257,26 @@ SWAN_MIN_SELL_VOLUME: float = 30.0   # min USDC traded at the exit (winners exem
 SWAN_MIN_REAL_X: float = 5.0         # min price multiplier to count as a real swan
 
 
-def check_swan_buy_price_threshold(threshold: float) -> list[str]:
+def check_swan_buy_price_threshold(mode_config: "ModeConfig") -> list[str]:
     """
-    Returns a list of warning strings if threshold doesn't cover all mode entry levels.
+    Returns warning strings if the active mode has entry levels above the
+    collected data ceiling (SWAN_BUY_PRICE_THRESHOLD).
     Empty list = OK.
+
+    History is the source of truth: the bot must not bid at prices where
+    swans_v2 has no data, because the scorer will silently fall back to
+    defaults and sizing/scoring will be blind.
     """
-    warnings = []
-    for mode in MODES.values():
-        uncovered = [p for p in mode.entry_price_levels if p > threshold]
-        if uncovered:
-            warnings.append(
-                f"WARNING: swan_analyzer threshold ${threshold} < "
-                f"{mode.name} entry levels {uncovered} — "
-                f"swans_v2 will miss these price zones"
-            )
-    return warnings
+    uncovered = [p for p in mode_config.entry_price_levels if p > SWAN_BUY_PRICE_THRESHOLD]
+    if uncovered:
+        return [
+            f"ALERT: mode '{mode_config.name}' has entry levels {uncovered} "
+            f"above SWAN_BUY_PRICE_THRESHOLD={SWAN_BUY_PRICE_THRESHOLD} — "
+            f"swans_v2 has no data for these prices. "
+            f"Re-run swan_analyzer with --buy-price-threshold {max(uncovered)} "
+            f"then raise SWAN_BUY_PRICE_THRESHOLD."
+        ]
+    return []
 
 
 @dataclass
@@ -346,6 +354,10 @@ class BotConfig:
                 f"Mode {self.mode}: tp fractions ({tp_total:.2f}) + moonbag "
                 f"({mc.moonbag_fraction:.2f}) > 1.0"
             )
+        # History is source of truth: warn if active mode bids above data ceiling.
+        for msg in check_swan_buy_price_threshold(mc):
+            import warnings as _w
+            _w.warn(msg, stacklevel=3)
 
 
 def load_config() -> BotConfig:
