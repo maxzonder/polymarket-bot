@@ -167,10 +167,10 @@ BIG_SWAN_MODE = ModeConfig(
     use_resting_bids=True,
     scanner_entry=False,        # ONLY resting bids; no chasing dips
     tp_levels=(
-        TPLevel(x=5.0, fraction=0.20),   # recoup capital, keep running
-        TPLevel(x=20.0, fraction=0.20),  # partial profit lock
+        TPLevel(x=10.0, fraction=0.10),
+        TPLevel(x=20.0, fraction=0.10),
     ),
-    moonbag_fraction=0.60,      # 60% held to resolution
+    moonbag_fraction=0.80,      # 80% held to resolution
     min_entry_fill_score=0.02,  # low bar — wide coverage
     min_resolution_score=0.15,
     min_real_x_historical=10.0,
