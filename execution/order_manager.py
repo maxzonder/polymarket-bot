@@ -746,9 +746,22 @@ class OrderManager:
         """Called when a TP SELL order gets filled. Accumulates partial PnL into position."""
         now = int(time.time())
         conn = self._conn()
+
+        # Determine new cumulative fill and whether the order is fully matched.
+        tp_row = conn.execute(
+            "SELECT sell_quantity, filled_quantity FROM tp_orders WHERE order_id=?",
+            (order_id,),
+        ).fetchone()
+        if tp_row is None:
+            conn.close()
+            return
+        new_filled = float(tp_row["filled_quantity"] or 0) + fill_quantity
+        is_done = new_filled >= float(tp_row["sell_quantity"]) * 0.99
+        new_status = "matched" if is_done else "live"
+
         conn.execute(
-            "UPDATE tp_orders SET status='matched', filled_quantity = filled_quantity + ?, filled_at=? WHERE order_id=?",
-            (fill_quantity, now, order_id),
+            "UPDATE tp_orders SET status=?, filled_quantity=?, filled_at=? WHERE order_id=?",
+            (new_status, new_filled, now, order_id),
         )
         # Find position and persist partial PnL
         row = conn.execute(
@@ -771,8 +784,10 @@ class OrderManager:
                 proceeds = fill_price * fill_quantity
                 pb.credit(conn, proceeds, f"TP fill {order_id[:12]}")
             logger.info(
-                f"TP filled: order={order_id[:8]} @ ${fill_price:.5f} "
-                f"qty={fill_quantity:.2f} pnl=${pnl:.4f}"
+                f"TP {'fully' if is_done else 'partially'} filled: order={order_id[:8]} "
+                f"@ ${fill_price:.5f} qty={fill_quantity:.2f} "
+                f"cumulative={new_filled:.2f}/{float(tp_row['sell_quantity']):.2f} "
+                f"pnl=${pnl:.4f}"
             )
         conn.commit()
         conn.close()
