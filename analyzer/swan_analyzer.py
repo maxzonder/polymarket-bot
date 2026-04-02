@@ -121,6 +121,28 @@ def _sum_usdc(trades: list[dict]) -> float:
     return total
 
 
+def _find_floor_zones(
+    prices: list[float], threshold: float
+) -> list[tuple[int, int]]:
+    """
+    Find all contiguous zones where price <= threshold.
+    Returns list of (start_idx, end_idx) sorted by minimum price ascending
+    (lowest floor first = highest potential x).
+    """
+    zones: list[tuple[int, int]] = []
+    i = 0
+    while i < len(prices):
+        if prices[i] <= threshold:
+            start = i
+            while i < len(prices) and prices[i] <= threshold:
+                i += 1
+            zones.append((start, i - 1))
+        else:
+            i += 1
+    zones.sort(key=lambda z: min(prices[z[0]: z[1] + 1]))
+    return zones
+
+
 def analyze_token(
     trades: list[dict],
     is_winner: int,
@@ -134,49 +156,38 @@ def analyze_token(
     Возвращает dict с метриками или None если лебедь не найден.
 
     Логика:
-    1. Найти глобальный минимум цены по всей истории токена
-       (не первый вход в зону — рынок мог несколько раз проваливаться)
-    2. Если min_price >= buy_price_threshold → не лебедь
-    3. Построить зону дна вокруг глобального минимума:
-       все трейды в окне ±lookback от минимума с ценой < buy_price_threshold
-    4. Проверить buy_volume >= min_buy_volume
-    5. Для не-победителей: проверить sell_volume >= min_sell_volume
+    1. Найти все contiguous floor-zones где price <= buy_price_threshold
+    2. Перебрать зоны в порядке возрастания минимальной цены (самый глубокий флор первым)
+    3. Выбрать первую зону, где buy_volume >= min_buy_volume
+       (micro-print без ликвидности не блокирует поиск реального floor event)
+    4. Для не-победителей: проверить sell_volume >= min_sell_volume
        sell_volume = объём сделок после зоны дна по цене >= buy_min_price * min_real_x
-    6. Для победителей (is_winner=1): Polymarket выплачивает $1 → sell_volume не нужен
-    7. max_traded_x = 1/buy_min_price если winner, иначе max(price_after_floor) / buy_min_price
+    5. Для победителей (is_winner=1): Polymarket выплачивает $1 → sell_volume не нужен
+    6. max_traded_x = 1/buy_min_price если winner, иначе max(price_after_floor) / buy_min_price
     """
     if not trades:
         return None
 
     prices = [float(t["price"]) for t in trades]
 
-    # --- 1. Глобальный минимум ---
-    global_min = min(prices)
-    if global_min > buy_price_threshold:
+    # --- 1. Найти все floor-zones и выбрать первую с достаточным buy_volume ---
+    zones = _find_floor_zones(prices, buy_price_threshold)
+    if not zones:
         return None  # цена никогда не падала до порога
 
-    global_min_idx = prices.index(global_min)
+    floor_start = floor_end = -1
+    for zs, ze in zones:
+        zone_trades = trades[zs: ze + 1]
+        if _sum_usdc(zone_trades) >= min_buy_volume:
+            floor_start, floor_end = zs, ze
+            break
 
-    # --- 2. Зона дна вокруг глобального минимума ---
-    # Расширяем в обе стороны пока цена <= buy_price_threshold (включительно)
-    floor_start = global_min_idx
-    while floor_start > 0 and prices[floor_start - 1] <= buy_price_threshold:
-        floor_start -= 1
-
-    floor_end = global_min_idx
-    while floor_end < len(prices) - 1 and prices[floor_end + 1] <= buy_price_threshold:
-        floor_end += 1
+    if floor_start == -1:
+        return None  # ни одна floor-zone не прошла buy_volume gate
 
     floor_trades = trades[floor_start: floor_end + 1]
-    if not floor_trades:
-        return None
-
-    # --- 3. Проверить ликвидность на входе ---
     buy_volume = _sum_usdc(floor_trades)
-    if buy_volume < min_buy_volume:
-        return None
-
-    buy_min_price = global_min
+    buy_min_price = min(prices[floor_start: floor_end + 1])
     buy_ts_first = int(floor_trades[0]["timestamp"])
     buy_ts_last = int(floor_trades[-1]["timestamp"])
 
@@ -355,10 +366,21 @@ def run(
                     :max_price_in_history, :last_price_in_history,
                     :is_winner, :max_traded_x, :payout_x
                 ) ON CONFLICT(token_id, date) DO UPDATE SET
-                    max_traded_x=excluded.max_traded_x,
-                    is_winner=excluded.is_winner,
-                    payout_x=excluded.payout_x,
-                    sell_volume=excluded.sell_volume
+                    buy_price_threshold   = excluded.buy_price_threshold,
+                    min_buy_volume        = excluded.min_buy_volume,
+                    min_sell_volume       = excluded.min_sell_volume,
+                    min_real_x            = excluded.min_real_x,
+                    buy_min_price         = excluded.buy_min_price,
+                    buy_volume            = excluded.buy_volume,
+                    buy_trade_count       = excluded.buy_trade_count,
+                    buy_ts_first          = excluded.buy_ts_first,
+                    buy_ts_last           = excluded.buy_ts_last,
+                    sell_volume           = excluded.sell_volume,
+                    max_price_in_history  = excluded.max_price_in_history,
+                    last_price_in_history = excluded.last_price_in_history,
+                    is_winner             = excluded.is_winner,
+                    max_traded_x          = excluded.max_traded_x,
+                    payout_x              = excluded.payout_x
                 """,
                 {
                     "token_id": token_id,

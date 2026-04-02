@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS feature_mart_v1_1 (
     -- ── Neg-risk group features (NULL for binary markets) ────────────────────
     neg_risk_group_id       TEXT,            -- negRiskMarketID — parent group
     group_token_count       INTEGER,         -- number of outcomes in the group
-    group_max_price         REAL,            -- max volume in group (proxy for favorite)
+    group_max_volume         REAL,            -- max market volume in neg-risk group
     group_underdog_count    INTEGER,         -- outcomes in group with swan event
     group_underdog_winner   INTEGER          -- 1 if any underdog token in group won
 )
@@ -146,7 +146,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
     for col, col_type in [
         ("neg_risk_group_id",    "TEXT"),
         ("group_token_count",    "INTEGER"),
-        ("group_max_price",      "REAL"),
+        ("group_max_volume",      "REAL"),
         ("group_underdog_count", "INTEGER"),
         ("group_underdog_winner","INTEGER"),
     ]:
@@ -188,7 +188,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             SELECT
                 m2.neg_risk_market_id                           AS group_id,
                 COUNT(DISTINCT m2.id)                           AS group_token_count,
-                MAX(m2.volume)                                  AS group_max_price,
+                MAX(m2.volume)                                  AS group_max_volume,
                 COUNT(DISTINCT CASE
                     WHEN s2.buy_min_price <= :entry_max THEN m2.id
                 END)                                            AS group_underdog_count,
@@ -226,7 +226,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             -- Neg-risk group features (NULL for binary markets)
             m.neg_risk_market_id     AS neg_risk_group_id,
             gs.group_token_count,
-            gs.group_max_price,
+            gs.group_max_volume,
             gs.group_underdog_count,
             gs.group_underdog_winner
 
@@ -268,7 +268,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
 
             neg_risk_group_id    = row[17]
             group_token_count    = row[18]
-            group_max_price      = row[19]
+            group_max_volume      = row[19]
             group_underdog_count = row[20]
             group_underdog_winner = row[21]
 
@@ -309,7 +309,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     best_buy_volume, best_buy_trade_count,
                     best_floor_duration_s, best_time_to_res_hours,
                     swan_is_winner, label_20x, label_tail,
-                    neg_risk_group_id, group_token_count, group_max_price,
+                    neg_risk_group_id, group_token_count, group_max_volume,
                     group_underdog_count, group_underdog_winner
                 ) VALUES (
                     ?, ?, ?,
@@ -343,7 +343,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     label_tail               = excluded.label_tail,
                     neg_risk_group_id        = excluded.neg_risk_group_id,
                     group_token_count        = excluded.group_token_count,
-                    group_max_price          = excluded.group_max_price,
+                    group_max_volume          = excluded.group_max_volume,
                     group_underdog_count     = excluded.group_underdog_count,
                     group_underdog_winner    = excluded.group_underdog_winner
             """, (
@@ -362,7 +362,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                 label_20x, label_tail,
                 neg_risk_group_id,
                 int(group_token_count) if group_token_count is not None else None,
-                float(group_max_price) if group_max_price is not None else None,
+                float(group_max_volume) if group_max_volume is not None else None,
                 int(group_underdog_count) if group_underdog_count is not None else None,
                 int(group_underdog_winner) if group_underdog_winner is not None else None,
             ))
