@@ -29,6 +29,11 @@ DOCUMENTED LIMITATIONS (read before interpreting results):
   7. Spread gate not implemented (no historical orderbook snapshots).
   8. Neg-risk group simulation uses end-of-day volume as underdog sort key
      (volume-at-discovery not available in DB).
+  9. Trade tape uses filterAmount=10 (≥$10 USDC trades only). Our resting bids at
+     0.001–0.005 price levels are $0.01–$5 USDC — these never appear in the tape.
+     → Fill rate at levels 0.001–0.005 is a LOWER BOUND of real performance,
+       not an accurate estimate. Actual fills on those levels may be significantly
+       higher because micro-trades from other participants at those prices are invisible.
 
 Usage:
     python3 scripts/run_honest_replay.py --start 2026-01-01 --end 2026-01-31
