@@ -162,6 +162,7 @@ class MarketScorer:
             # Normalise to [0, 1]
             self._analogy = {k: v / max_rate for k, v in raw.items()}
             self._loser_rates = raw_loser
+            self._ready = len(self._analogy) > 0
 
             # Load feedback penalties (from analyze_empty_candidates.py)
             try:
@@ -180,6 +181,12 @@ class MarketScorer:
         except Exception:
             # feature_mart_v1_1 not yet built — use fallback (zero analogy scores)
             self._analogy = {}
+            self._ready = False
+
+    @property
+    def is_ready(self) -> bool:
+        """True if analogy table was loaded with sufficient data."""
+        return getattr(self, "_ready", False)
 
     def refresh(self) -> None:
         self._load_analogy_table()

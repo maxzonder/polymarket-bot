@@ -28,6 +28,7 @@ from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.market_scorer import MarketScore, MarketScorer
 from utils.logger import setup_logger
 from utils.paths import DATA_DIR
+from utils.telegram import send_message as tg_alert
 
 logger = setup_logger("screener")
 
@@ -103,6 +104,13 @@ class Screener:
         Fetch open markets, apply filters, score, return candidates sorted by total_score desc.
         All rejection reasons are recorded in screener_log for funnel analysis.
         """
+        # Guard: market_score is the primary ranking signal. If scorer has no data,
+        # all scores will be 0 and the bot would trade blind. Skip the cycle instead.
+        if self.market_scorer is not None and not self.market_scorer.is_ready:
+            logger.error("MarketScorer not ready (feature_mart_v1_1 empty or unavailable) — skipping scan cycle")
+            tg_alert("⚠️ <b>MarketScorer not ready</b>\nfeature_mart_v1_1 is empty or failed to load. Screener skipping this cycle — no new positions will be opened.")
+            return []
+
         try:
             markets = fetch_open_markets(
                 price_max=self.mc.entry_price_max,
