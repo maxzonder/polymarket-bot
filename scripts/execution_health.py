@@ -87,6 +87,61 @@ def check_duplicate_open_positions(conn: sqlite3.Connection) -> tuple[str, str, 
     return FAIL, f"{len(rows)} token(s) with duplicate open positions", detail
 
 
+def check_orphaned_tp_orders(conn: sqlite3.Connection) -> tuple[str, str, list]:
+    """Live TP orders whose parent position is no longer open."""
+    rows = conn.execute("""
+        SELECT t.order_id, t.label, t.token_id, p.status AS pos_status
+        FROM tp_orders t
+        JOIN positions p ON t.position_id = p.position_id
+        WHERE t.status = 'live'
+          AND p.status != 'open'
+    """).fetchall()
+    if not rows:
+        return PASS, "No orphaned TP orders", []
+    detail = [
+        f"  {r['order_id'][:12]} {r['label']} token={r['token_id'][:20]} pos_status={r['pos_status']}"
+        for r in rows
+    ]
+    return FAIL, f"{len(rows)} live TP order(s) on non-open position(s)", detail
+
+
+def check_open_positions_without_tp(conn: sqlite3.Connection) -> tuple[str, str, list]:
+    """Open positions with no live or moonbag TP orders — can never close via TP."""
+    rows = conn.execute("""
+        SELECT p.position_id, p.token_id, p.opened_at
+        FROM positions p
+        WHERE p.status = 'open'
+          AND NOT EXISTS (
+              SELECT 1 FROM tp_orders t
+              WHERE t.position_id = p.position_id
+                AND t.status IN ('live', 'moonbag')
+          )
+    """).fetchall()
+    if not rows:
+        return PASS, "All open positions have live TP orders", []
+    detail = [
+        f"  pos={r['position_id'][:12]} token={r['token_id'][:20]}"
+        for r in rows
+    ]
+    return WARN, f"{len(rows)} open position(s) with no live TP orders", detail
+
+
+def check_tp_overfilled(conn: sqlite3.Connection) -> tuple[str, str, list]:
+    """TP orders where filled_quantity exceeds sell_quantity — data integrity."""
+    rows = conn.execute("""
+        SELECT order_id, label, sell_quantity, filled_quantity
+        FROM tp_orders
+        WHERE filled_quantity > sell_quantity * 1.01
+    """).fetchall()
+    if not rows:
+        return PASS, "No over-filled TP orders", []
+    detail = [
+        f"  {r['order_id'][:12]} {r['label']} filled={r['filled_quantity']:.2f} > sell={r['sell_quantity']:.2f}"
+        for r in rows
+    ]
+    return FAIL, f"{len(rows)} TP order(s) with filled_quantity > sell_quantity", detail
+
+
 def check_exposure_manager_wired(conn: sqlite3.Connection) -> tuple[str, str, list]:
     """exposure_v1_1 table empty while there are open positions."""
     try:
@@ -109,6 +164,9 @@ def check_exposure_manager_wired(conn: sqlite3.Connection) -> tuple[str, str, li
 
 CHECKS = [
     ("Premature TP matched", check_premature_matched_tp),
+    ("TP overfilled", check_tp_overfilled),
+    ("Orphaned TP orders", check_orphaned_tp_orders),
+    ("Positions without TP", check_open_positions_without_tp),
     ("Duplicate resting orders", check_duplicate_resting_orders),
     ("Duplicate open positions", check_duplicate_open_positions),
     ("ExposureManager wired", check_exposure_manager_wired),
