@@ -227,7 +227,7 @@ class Screener:
         # dead gate (ef_score pre-filtered all markets that would fail market_scorer).
         ms_obj: Optional[MarketScore] = None
         if self.market_scorer is not None:
-            ms_obj = self.market_scorer.score(m)
+            ms_obj = self.market_scorer.score(m, hours_to_close=hours)
             if ms_obj.tier == "reject":
                 _log("rejected_market_score", ms=ms_obj.total)
                 return []

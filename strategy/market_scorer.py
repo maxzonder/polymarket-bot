@@ -191,13 +191,18 @@ class MarketScorer:
     def refresh(self) -> None:
         self._load_analogy_table()
 
-    def score(self, market: MarketInfo) -> MarketScore:
-        """Compute market_score for a MarketInfo object."""
+    def score(self, market: MarketInfo, hours_to_close: Optional[float] = None) -> MarketScore:
+        """Compute market_score for a MarketInfo object.
+
+        hours_to_close: pass resolved value (null-default applied) so time_score
+        is consistent with screener gate and composite scoring.
+        Falls back to market.hours_to_close if not provided.
+        """
         return self._score_raw(
             market_id=market.market_id,
             volume=market.volume_usdc,
             comment_count=market.comment_count,
-            hours_to_close=market.hours_to_close,
+            hours_to_close=hours_to_close if hours_to_close is not None else market.hours_to_close,
             category=market.category,
             neg_risk=market.neg_risk,
         )
