@@ -29,6 +29,24 @@ Design:
     - Backed by a lightweight SQLite table (exposure_v1_1) in the positions DB.
     - In-memory cache for hot-path reads; flushed on write.
     - Thread-safe for single-process use (SQLite WAL + no separate threads).
+
+Lifetime cap semantics (intentional):
+    record_fill() accumulates stake; there is no decrement on position close or
+    market resolution. This is intentional: ExposureManager acts as a *lifetime*
+    cap — "never deploy more than max_per_market USDC into this (market, token)
+    across the entire DB lifetime".
+
+    An active-exposure cap (decrement on close) is not needed in practice because:
+    1. The dedupe guard in OrderManager blocks re-entry on any token that already
+       has a live resting order OR an open position. A position stays open until
+       on_market_resolved() fires.
+    2. Once a market resolves, it cannot be re-entered — so the cap can never
+       block a legitimate second entry.
+    3. If the DB is reset between runs (e.g. new dry-run cycle), exposure resets
+       naturally via ExposureManager.reset().
+
+    If active-exposure semantics are ever needed, add a record_close() method
+    that decrements total_stake_usdc and call it from on_market_resolved().
 """
 
 from __future__ import annotations

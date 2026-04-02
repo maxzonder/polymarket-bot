@@ -73,18 +73,28 @@ def check_duplicate_resting_orders(conn: sqlite3.Connection) -> tuple[str, str, 
 
 
 def check_duplicate_open_positions(conn: sqlite3.Connection) -> tuple[str, str, list]:
-    """Multiple open positions on the same token_id."""
+    """
+    Multiple open positions on the same token_id AND same market_id.
+
+    Note: multiple positions on the same token across different price levels is
+    intentional (resting-bid ladder). This check only fires if the same
+    (market_id, token_id) pair has more than one open position, which indicates
+    a dedupe failure rather than normal ladder behaviour.
+    """
     rows = conn.execute("""
-        SELECT token_id, COUNT(*) as cnt
+        SELECT market_id, token_id, COUNT(*) as cnt
         FROM positions
         WHERE status = 'open'
-        GROUP BY token_id
+        GROUP BY market_id, token_id
         HAVING cnt > 1
     """).fetchall()
     if not rows:
-        return PASS, "No duplicate open positions", []
-    detail = [f"  token={r['token_id'][:20]} count={r['cnt']}" for r in rows]
-    return FAIL, f"{len(rows)} token(s) with duplicate open positions", detail
+        return PASS, "No duplicate open positions per (market, token)", []
+    detail = [
+        f"  market={r['market_id'][:16]} token={r['token_id'][:20]} count={r['cnt']}"
+        for r in rows
+    ]
+    return FAIL, f"{len(rows)} (market, token) pair(s) with duplicate open positions", detail
 
 
 def check_orphaned_tp_orders(conn: sqlite3.Connection) -> tuple[str, str, list]:
