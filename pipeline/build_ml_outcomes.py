@@ -68,27 +68,9 @@ SELECT
     CASE WHEN p.opened_at IS NOT NULL AND r.created_at > 0
          THEN ROUND((p.opened_at - r.created_at) / 3600.0, 4)
          ELSE NULL END                          AS time_to_fill_hours,
-    CASE WHEN EXISTS (
-             SELECT 1 FROM tp_orders tp
-             WHERE tp.position_id = p.position_id
-               AND tp.status = 'matched'
-               AND p.entry_price > 0
-               AND tp.sell_price >= p.entry_price * 5
-         ) THEN 1 ELSE 0 END                    AS tp_5x_hit,
-    CASE WHEN EXISTS (
-             SELECT 1 FROM tp_orders tp
-             WHERE tp.position_id = p.position_id
-               AND tp.status = 'matched'
-               AND p.entry_price > 0
-               AND tp.sell_price >= p.entry_price * 10
-         ) THEN 1 ELSE 0 END                    AS tp_10x_hit,
-    CASE WHEN EXISTS (
-             SELECT 1 FROM tp_orders tp
-             WHERE tp.position_id = p.position_id
-               AND tp.status = 'matched'
-               AND p.entry_price > 0
-               AND tp.sell_price >= p.entry_price * 20
-         ) THEN 1 ELSE 0 END                    AS tp_20x_hit,
+    CASE WHEN p.peak_x >= 5  THEN 1 ELSE 0 END  AS tp_5x_hit,
+    CASE WHEN p.peak_x >= 10 THEN 1 ELSE 0 END  AS tp_10x_hit,
+    CASE WHEN p.peak_x >= 20 THEN 1 ELSE 0 END  AS tp_20x_hit,
     CASE WHEN EXISTS (
              SELECT 1 FROM tp_orders tp
              WHERE tp.position_id = p.position_id

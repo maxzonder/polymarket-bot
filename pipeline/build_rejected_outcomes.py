@@ -61,7 +61,10 @@ CREATE TABLE IF NOT EXISTS ml_rejected_outcomes (
     res_score            REAL,
 
     -- Post-hoc ground truth (populated after analyzer runs on closed market)
-    had_swan_event       INTEGER NOT NULL DEFAULT 0,
+    -- NULL = not yet labeled (analyzer hasn't processed this market yet)
+    -- 0   = confirmed no swan event
+    -- 1   = swan event observed
+    had_swan_event       INTEGER,
     entry_min_price      REAL,
     possible_x           REAL,
     is_winner            INTEGER,
@@ -200,12 +203,21 @@ def build(
         token_id = g["token_id"]
         dominant_reason = Counter(g["reasons"]).most_common(1)[0][0]
 
-        # Post-hoc truth — present only if analyzer has processed this market
+        # Post-hoc truth — present only if analyzer has processed this market.
+        # had_swan semantics:
+        #   1    = swan event confirmed (token is in swans_v2)
+        #   0    = confirmed no swan (market resolved, not in swans_v2)
+        #   NULL = not yet labeled (market unresolved / analyzer not yet run)
         ts = ts_map.get(token_id) if token_id else None
-        had_swan     = 1 if ts else 0
+        is_winner    = tk_map.get(token_id) if token_id else None
+        if ts:
+            had_swan = 1
+        elif is_winner is not None:
+            had_swan = 0  # resolved but no swan event
+        else:
+            had_swan = None  # not yet labeled
         entry_min_p  = ts["buy_min_price"]  if ts else None
         possible_x   = ts["max_traded_x"]   if ts else None
-        is_winner    = tk_map.get(token_id) if token_id else None
 
         # Missed opportunity = had swan AND floor was within our entry range
         was_missed = 1 if (had_swan and entry_min_p is not None and entry_min_p <= SWAN_ENTRY_MAX) else 0

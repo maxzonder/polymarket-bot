@@ -92,6 +92,7 @@ def load_rejected_stats(dataset_db_path: str) -> dict[str, CategoryStats]:
                 AVG(ef_score)                 AS avg_ef,
                 AVG(res_score)                AS avg_res
             FROM ml_rejected_outcomes
+            WHERE had_swan_event IS NOT NULL
             GROUP BY category
         """).fetchall()
     except sqlite3.OperationalError:
@@ -131,7 +132,7 @@ def load_accepted_stats(ops_db_path: str) -> dict[str, CategoryStats]:
                 SUM(CASE WHEN is_winner=1 THEN 1 ELSE 0 END) AS winners,
                 AVG(CASE WHEN got_fill=1 AND realized_roi IS NOT NULL
                          THEN realized_roi END)  AS avg_roi,
-                AVG(CASE WHEN got_fill=1 AND realized_roi IS NOT NULL
+                AVG(CASE WHEN got_fill=1 AND is_winner=1 AND realized_roi IS NOT NULL
                          THEN realized_roi END)  AS avg_tail_ev
             FROM ml_outcomes
             GROUP BY category
