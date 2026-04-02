@@ -238,8 +238,8 @@ BIG_SWAN_MODE = ModeConfig(
     prefer_long_duration=True,   # flat score=1.0 up to 168h, decay after
 )
 
-DIP_MODE = ModeConfig(
-    name="dip_mode",
+SMALL_SWAN_MODE = ModeConfig(
+    name="small_swan_mode",
     # moderate dip — resting bids at 5c/10c/15c/20c zones
     entry_price_levels=(0.05, 0.10, 0.15, 0.20),
     entry_price_max=0.50,       # screen markets with price up to 50c
@@ -281,7 +281,7 @@ MODES: dict[str, ModeConfig] = {
     "fast_tp_mode": FAST_TP_MODE,
     "balanced_mode": BALANCED_MODE,
     "big_swan_mode": BIG_SWAN_MODE,
-    "dip_mode": DIP_MODE,
+    "small_swan_mode": SMALL_SWAN_MODE,
 }
 
 # ── Swan analyzer global threshold ────────────────────────────────────────────

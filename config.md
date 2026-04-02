@@ -4,7 +4,7 @@
 
 `config.py` определяет все параметры торговой стратегии. Два класса конфигурации:
 
-- **`ModeConfig`** — неизменяемая конфигурация стратегии для одного режима (вход, выход, sizing, фильтры)
+- **`ModeConfig`** — неизменяемая конфигурация стратегии для одного режима
 - **`BotConfig`** — runtime-конфигурация из `.env` / переменных окружения
 
 Активный режим выбирается через переменную `BOT_MODE` (по умолчанию: `big_swan_mode`).
@@ -13,23 +13,110 @@
 
 ## Торговые режимы
 
-| Режим | Стратегия | Вход | Moonbag |
-|---|---|---|---|
-| `big_swan_mode` | Resting bids на глубоких уровнях | только resting | 60% |
-| `dip_mode` | Resting bids на умеренных дипах | только resting | 40% |
-| `balanced_mode` | Resting bids + scanner | оба | 20% |
-| `fast_tp_mode` | Scanner-вход, быстрый TP | только scanner | 0% |
+### `big_swan_mode` ← активный
+
+Resting bids на глубоком флоре, удержание до резолюции.
+
+| Параметр | Значение |
+|---|---|
+| `entry_price_levels` | `(0.001, 0.005, 0.01)` — resting bids на трёх уровнях |
+| `entry_price_max` | `0.20` — рынки выше пропускаются |
+| `use_resting_bids` | `True` |
+| `scanner_entry` | `False` — только resting, не гоняться за дипами |
+| `tp_levels` | 10× → 10%, 20× → 10% |
+| `moonbag_fraction` | `0.80` — 80% удерживается до резолюции |
+| `min_hours_to_close` | `0.25` (15 мин) |
+| `max_hours_to_close` | `24.0` |
+| `optimize_metric` | `tail_ev` |
+| `max_open_positions` | `500` |
+| `max_resting_markets` | `5000` |
+| `max_resting_per_cluster` | `10` |
+| `max_capital_deployed_pct` | `0.99` |
+| `max_exposure_per_market` | `$2.00` (на один токен) |
+| `min_market_score` | `0.25` — рынки ниже отклоняются |
+
+**Ставки (market_score_tiers):**
+
+| market_score | ставка за уровень |
+|---|---|
+| ≥ 0.60 | $0.50 |
+| ≥ 0.40 | $0.25 |
+| ≥ 0.25 | $0.10 |
+| < 0.25 | reject |
 
 ---
 
-## Поля ModeConfig
+### `small_swan_mode`
+
+Resting bids на умеренных дипах, ставка зависит от глубины входа.
+
+| Параметр | Значение |
+|---|---|
+| `entry_price_levels` | `(0.05, 0.10, 0.15, 0.20)` |
+| `entry_price_max` | `0.50` |
+| `use_resting_bids` | `True` |
+| `scanner_entry` | `False` |
+| `tp_levels` | 2× → 30%, 5× → 30% |
+| `moonbag_fraction` | `0.40` |
+| `min_hours_to_close` | `1.0` |
+| `max_hours_to_close` | `120.0` |
+| `optimize_metric` | `ev_total` |
+| `max_open_positions` | `100` |
+| `max_resting_per_cluster` | `1` |
+
+**Ставки (stake_tiers по цене входа):**
+
+| цена входа | ставка |
+|---|---|
+| ≤ 0.05 | $0.20 |
+| ≤ 0.10 | $0.10 |
+| ≤ 0.15 | $0.05 |
+| ≤ 0.20 | $0.05 |
+
+---
+
+### `balanced_mode`
+
+Resting bids + scanner, умеренный moonbag.
+
+| Параметр | Значение |
+|---|---|
+| `entry_price_levels` | `(0.002, 0.005, 0.01, 0.02, 0.05)` |
+| `entry_price_max` | `0.10` |
+| `use_resting_bids` | `True` |
+| `scanner_entry` | `True` |
+| `tp_levels` | 5× → 35%, 10× → 25%, 20× → 20% |
+| `moonbag_fraction` | `0.20` |
+| `stake_usdc` | `$0.05` (flat) |
+| `max_open_positions` | `20` |
+
+---
+
+### `fast_tp_mode`
+
+Scanner-вход, быстрый выход, нет moonbag.
+
+| Параметр | Значение |
+|---|---|
+| `entry_price_levels` | `(0.005, 0.01, 0.02, 0.03, 0.05)` |
+| `entry_price_max` | `0.05` |
+| `use_resting_bids` | `False` |
+| `scanner_entry` | `True` |
+| `tp_levels` | 5× → 70%, 10× → 30% |
+| `moonbag_fraction` | `0.0` |
+| `stake_usdc` | `$0.05` (flat) |
+| `max_open_positions` | `30` |
+
+---
+
+## Поля ModeConfig (справочник)
 
 ### Вход
 
 | Поле | Тип | Описание |
 |---|---|---|
-| `entry_price_levels` | `tuple[float, ...]` | Ценовые уровни для resting-заявок (по возрастанию). Screener выставляет только уровни **ниже** текущей цены рынка. |
-| `entry_price_max` | `float` | Максимальная текущая цена для скрининга. Рынки выше этого порога пропускаются. |
+| `entry_price_levels` | `tuple[float, ...]` | Ценовые уровни для resting-заявок. Screener выставляет только уровни **ниже** текущей цены рынка. |
+| `entry_price_max` | `float` | Максимальная текущая цена для скрининга. |
 | `use_resting_bids` | `bool` | Выставлять ли ордера заранее, до падения цены к уровню. |
 | `scanner_entry` | `bool` | Входить ли, если scanner видит цену уже в зоне входа. |
 
@@ -37,70 +124,50 @@
 
 | Поле | Тип | Описание |
 |---|---|---|
-| `tp_levels` | `tuple[TPLevel, ...]` | Лестница тейк-профита. Каждый `TPLevel(x, fraction)` продаёт `fraction` позиции при достижении `entry_price * x`. |
-| `moonbag_fraction` | `float` | Доля позиции, удерживаемая до резолюции рынка. Сумма `tp_levels` фракций + `moonbag_fraction` должна быть ≤ 1.0. |
+| `tp_levels` | `tuple[TPLevel, ...]` | Лестница тейк-профита. `TPLevel(x, fraction)` продаёт `fraction` позиции при достижении `entry_price * x`. |
+| `moonbag_fraction` | `float` | Доля позиции, удерживаемая до резолюции. |
 
 ### Фильтры scoring
 
 | Поле | Тип | Описание |
 |---|---|---|
-| `min_entry_fill_score` | `float` | Мин. историческая P(рынок когда-либо достигнет зоны входа). Отсекает рынки, которые скорее всего никогда не зафиллятся. |
-| `min_resolution_score` | `float` | Мин. resolution score (сигнал P(winner) × avg_x) для принятия кандидата. |
-| `min_real_x_historical` | `float` | Мин. наблюдаемый множитель цены в исторических данных (без шумовых отскоков). |
-| `min_market_score` | `float` | v1.1: мин. композитный `market_score`. `0.0` = отключено. |
+| `min_entry_fill_score` | `float` | Мин. P(рынок когда-либо достигнет зоны входа). |
+| `min_resolution_score` | `float` | Мин. resolution score для принятия кандидата. |
+| `min_real_x_historical` | `float` | Мин. наблюдаемый множитель цены в исторических данных. |
+| `min_market_score` | `float` | Мин. композитный `market_score`. `0.0` = отключено. |
 
 ### Размер позиции
 
 | Поле | Тип | Описание |
 |---|---|---|
-| `stake_usdc` | `float` | Fallback-стейк (USDC токенов при филе). Используется если ни один тир не совпал. |
+| `stake_usdc` | `float` | Fallback-стейк. Используется если ни один тир не совпал. |
 | `max_open_positions` | `int` | Жёсткий лимит одновременно открытых позиций. |
 | `max_resting_markets` | `int` | Макс. число рынков с живыми resting-заявками. |
-| `max_resting_per_cluster` | `int` | Макс. рынков на neg-risk группу (`neg_risk_group_id`), защита от концентрации. Бинарные рынки (без группы) обходят этот лимит. |
-| `max_capital_deployed_pct` | `float` | Макс. доля баланса в открытых позициях (0.0–1.0). |
-| `max_exposure_per_market` | `float` | v1.1: макс. суммарный USDC по всем филам на одном `(market_id, token_id)`. `0.0` = отключено. |
+| `max_resting_per_cluster` | `int` | Макс. рынков на neg-risk группу. |
+| `max_capital_deployed_pct` | `float` | Макс. доля баланса в открытых позициях. |
+| `max_exposure_per_market` | `float` | Макс. суммарный USDC по всем филам на одном токене. `0.0` = отключено. |
 
 ### Стейк-тиры
 
-Два взаимоисключающих расписания — `market_score_tiers` имеет приоритет над `stake_tiers`:
+Два взаимоисключающих расписания — `market_score_tiers` имеет приоритет:
 
-#### `stake_tiers` (по цене, v1 legacy)
-
-```python
-stake_tiers: tuple[tuple[float, float], ...] = ()
-# формат: ((max_entry_price, stake_usdc), ...)
-# отсортировано по цене по возрастанию
-```
-
-Логика: для каждого фила найти **первый** тир где `fill_price <= max_entry_price` → использовать его стейк. Fallback на `stake_usdc` если ни один тир не подошёл.
-
-Идея: глубже флор = больше стейк (выше потенциальный upside).
-
-Пример (`big_swan_mode`):
-```
-фил @ 0.001 → $0.50   (потенциал 1000x)
-фил @ 0.005 → $0.25
-фил @ 0.010 → $0.10
-```
-
-#### `market_score_tiers` (по score, v1.1)
+#### `market_score_tiers` (по score, v1.1) — используется в `big_swan_mode`
 
 ```python
-market_score_tiers: tuple[tuple[float, float], ...] = ()
 # формат: ((min_score_threshold, stake_usdc), ...)
-# сортируется по убыванию порога в runtime
+market_score_tiers: tuple[tuple[float, float], ...] = ()
 ```
 
-Логика: для композитного `market_score` рынка найти **наивысший** порог ≤ score → использовать его стейк. Когда задан — **полностью заменяет** `stake_tiers` (не умножает).
+Для каждого фила: найти наивысший порог ≤ score → использовать его стейк. Полностью заменяет `stake_tiers`.
 
-Пример (`big_swan_mode`):
-```
-score ≥ 0.60 → $0.50   (топ ~10%)
-score ≥ 0.40 → $0.25   (топ ~25%)
-score ≥ 0.25 → $0.10   (проходной порог)
+#### `stake_tiers` (по цене, legacy) — используется в `small_swan_mode`
+
+```python
+# формат: ((max_entry_price, stake_usdc), ...)
+stake_tiers: tuple[tuple[float, float], ...] = ()
 ```
 
-> **⚠️ Известное расхождение — см. ниже**
+Для каждого фила: найти первый тир где `fill_price <= max_entry_price` → использовать его стейк. Идея: глубже флор = больше стейк.
 
 ### Временное окно
 
@@ -108,15 +175,7 @@ score ≥ 0.25 → $0.10   (проходной порог)
 |---|---|---|
 | `min_hours_to_close` | `float` | Отклонять рынки, закрывающиеся раньше этого. |
 | `max_hours_to_close` | `float` | Отклонять рынки, закрывающиеся позже этого. |
-| `hours_to_close_null_default` | `float` | Если Gamma вернул `None` для дедлайна — считать это количество часов. Защита от рынков с неизвестным дедлайном. По умолчанию: 48h. |
-
-### Цель оптимизации
-
-| Значение | Описание |
-|---|---|
-| `"tail_ev"` | `swan_rate × win_rate × avg_x` — оптимизация под редкие высокомультипликаторные исходы |
-| `"ev_total"` | Ожидаемая ценность по всем исходам |
-| `"roi_pct"` | Процент возврата на инвестиции |
+| `hours_to_close_null_default` | `float` | Если Gamma вернул `None` для дедлайна — считать это количество часов. По умолчанию: 48h. |
 
 ---
 
@@ -127,7 +186,7 @@ score ≥ 0.25 → $0.10   (проходной порог)
 | Поле | Env var | По умолчанию | Описание |
 |---|---|---|---|
 | `mode` | `BOT_MODE` | `big_swan_mode` | Активный торговый режим |
-| `dry_run` | `DRY_RUN` | `true` | Бумажная торговля — реальные ордера не отправляются |
+| `dry_run` | `DRY_RUN` | `true` | Бумажная торговля |
 | `private_key` | `POLY_PRIVATE_KEY` | — | Приватный ключ CLOB-кошелька |
 | `api_key` | `POLY_API_KEY` | — | API-ключ Polymarket |
 | `api_secret` | `POLY_API_SECRET` | — | API-секрет Polymarket |
@@ -143,19 +202,19 @@ score ≥ 0.25 → $0.10   (проходной порог)
 
 ### `category_weights`
 
-Множитель EV на категорию, применяется к market score. Рассчитан по данным `feature_mart_v1_1` (дек–фев 2026), нормализован к crypto = 1.0:
+Множитель EV на категорию, применяется к market score. Нормализован к crypto = 1.0:
 
-| Категория | Вес | Обоснование |
-|---|---|---|
-| geopolitics | 1.5 | Наивысший tail_ev (swan rate 14.98%) |
-| politics | 1.5 | Сильный tail_ev, ограничен cap 1.5 |
-| crypto | 1.0 | База |
-| weather | 1.0 | Аналогичный tail_ev с crypto |
-| health | 1.0 | Недостаточно данных, нейтральный |
-| esports | 1.0 | Нет данных за дек–фев, нейтральный |
-| sports | 0.8 | Ниже базового tail_ev |
-| tech | 0.6 | Низкий avg_x (23.9) |
-| entertainment | 0.5 | Наименьший tail_ev (swan 1.77% × win 4.3%) |
+| Категория | Вес |
+|---|---|
+| geopolitics | 1.5 |
+| politics | 1.5 |
+| crypto | 1.0 |
+| weather | 1.0 |
+| health | 1.0 |
+| esports | 1.0 |
+| sports | 0.8 |
+| tech | 0.6 |
+| entertainment | 0.5 |
 
 ---
 
@@ -163,10 +222,7 @@ score ≥ 0.25 → $0.10   (проходной порог)
 
 | Константа | Значение | Описание |
 |---|---|---|
-| `SWAN_BUY_PRICE_THRESHOLD` | `0.20` | **Фиксированная** константа — потолок цены при сборе данных в swan_analyzer. История первична: бот не должен ставить выше этого уровня, так как scorer не имеет данных для более высоких цен. При старте бота проверяется, что `entry_price_levels` активного режима не превышают это значение. Поднять можно только после перезапуска swan_analyzer с новым `--buy-price-threshold`. |
-| `SWAN_ENTRY_MAX` | = выше | Псевдоним для feature_mart и rejected_outcomes |
+| `SWAN_BUY_PRICE_THRESHOLD` | `0.20` | Фиксированная константа — потолок цены при сборе данных в swan_analyzer. История первична: бот не должен ставить выше этого уровня. |
 | `SWAN_MIN_BUY_VOLUME` | 1.0 USDC | Мин. объём на флоре (проверка ликвидности) |
 | `SWAN_MIN_SELL_VOLUME` | 30.0 USDC | Мин. объём на выходе (качество фила) |
 | `SWAN_MIN_REAL_X` | 5.0× | Мин. множитель для учёта события как настоящего swan |
-
-`SWAN_BUY_PRICE_THRESHOLD` — фиксированная константа. История первична: бот проверяется против данных, а не наоборот.

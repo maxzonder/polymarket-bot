@@ -789,7 +789,7 @@ def main() -> None:
     ap.add_argument("--start",  metavar="YYYY-MM-DD", required=True)
     ap.add_argument("--end",    metavar="YYYY-MM-DD", required=True)
     ap.add_argument("--mode",   default="big_swan_mode",
-                    choices=["big_swan_mode", "balanced_mode", "fast_tp_mode", "dip_mode"])
+                    choices=["big_swan_mode", "balanced_mode", "fast_tp_mode", "small_swan_mode"])
     ap.add_argument("--limit",  type=int, default=None,
                     help="Max market/token pairs to process (default: all)")
     ap.add_argument("--out",    default=None,
