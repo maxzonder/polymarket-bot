@@ -56,7 +56,8 @@ polymarket-bot/
 │
 ├── execution/
 │   ├── order_manager.py        # Размещение / отмена ордеров, positions.db
-│   └── position_monitor.py     # Мониторинг fills и resolution (REST polling)
+│   ├── position_monitor.py     # Мониторинг fills и resolution (REST polling)
+│   └── exposure_manager.py     # Lifetime cap: max USDC per (market_id, token_id)
 │
 ├── bot/
 │   └── main_loop.py            # asyncio: три параллельных цикла
@@ -71,10 +72,15 @@ polymarket-bot/
 │
 ├── scripts/
 │   ├── daily_pipeline.py       # Оркестратор: ingest→analyzer→feature_mart→ml→feedback→recalibrate
+│   ├── execution_health.py     # Health-check: 8 DB-level проверок слоя исполнения
 │   ├── build_ml_outcomes.py    # ML-метки по реальным сделкам бота
 │   ├── build_rejected_outcomes.py  # ML-метки по отклонённым рынкам
 │   ├── analyze_empty_candidates.py  # Feedback penalties: штрафы по (category, vol_bucket)
 │   └── recalibrate_scorers.py  # Пересчёт порогов → recommended_config.json
+│
+├── tests/
+│   ├── test_exposure_manager.py  # Unit-тесты ExposureManager (9 тестов)
+│   └── test_on_tp_filled.py      # Unit-тесты partial TP fill logic (5 тестов)
 │
 ├── _legacy/                    # Устаревшие скрипты (не используются)
 │
@@ -111,8 +117,9 @@ polymarket-bot/
 
 **`positions.db`** — активные позиции и ордера:
 - `resting_orders` — рестинг BUY биды (live / matched / cancelled)
-- `positions` — открытые позиции (open / resolved)
-- `tp_orders` — TP SELL ордера + moonbag записи
+- `positions` — открытые позиции (open / resolved); по одной строке на каждый fill (per-fill дизайн)
+- `tp_orders` — TP SELL ордера + moonbag записи; остаются `live` при частичном fill до полного заполнения
+- `exposure_v1_1` — lifetime exposure cap per (market_id, token_id); пишется `ExposureManager` при каждом fill
 
 **`paper_trades.db`** — виртуальные ордера в dry-run режиме
 
