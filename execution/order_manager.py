@@ -497,6 +497,17 @@ class OrderManager:
             conn.close()
             return []
 
+        # Dedupe: skip if there is already a live resting order or open position on this token.
+        existing = conn.execute(
+            "SELECT 1 FROM resting_orders WHERE token_id=? AND status='live' "
+            "UNION SELECT 1 FROM positions WHERE token_id=? AND status='open' LIMIT 1",
+            (candidate.token_id, candidate.token_id),
+        ).fetchone()
+        if existing:
+            logger.debug(f"Scanner entry: token {candidate.token_id[:16]} already has live order or open position — skipping")
+            conn.close()
+            return []
+
         try:
             book = get_orderbook(candidate.token_id)
             if book.best_ask is None or book.best_bid is None:
