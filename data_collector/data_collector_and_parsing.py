@@ -167,7 +167,7 @@ def _to_ts(value) -> int:
     return 0
 
 
-def _fetch_trades(condition_id: str, start_ts: int, end_ts: int, filter_amount: int = 10) -> tuple[list[dict], bool]:
+def _fetch_trades(condition_id: str, start_ts: int, end_ts: int, filter_amount: float = 10) -> tuple[list[dict], bool]:
     """
     Fetch trades for a condition_id.
     Returns (trades, truncated) where truncated=True means the fetch hit the
@@ -264,7 +264,7 @@ def _is_fetch_complete(day_str: str, market_id: str) -> bool:
         return False
 
 
-def _collect_trades_day(day: date, filter_amount: int = 10, max_duration_days: Optional[int] = None):
+def _collect_trades_day(day: date, filter_amount: float = 10, max_duration_days: Optional[int] = None):
     day_str = day.isoformat()
     day_dir = os.path.join(DATABASE_DIR, day_str)
 
@@ -333,7 +333,7 @@ def _collect_trades_day(day: date, filter_amount: int = 10, max_duration_days: O
     logger.info(f"[trades][{day_str}] DONE in {int(time.monotonic()-t0)}s | ok={ok} skipped={skipped} long={skipped_long} errors={errors}")
 
 
-def collect_trades(start: date, end: date, filter_amount: int = 10, max_duration_days: Optional[int] = None):
+def collect_trades(start: date, end: date, filter_amount: float = 10, max_duration_days: Optional[int] = None):
     label = f"CASH >= {filter_amount}"
     if max_duration_days is not None:
         label += f", duration <= {max_duration_days}d"
@@ -784,7 +784,7 @@ def run(
     skip_markets: bool = False,
     skip_trades: bool = False,
     skip_parse: bool = False,
-    filter_amount: int = 10,
+    filter_amount: float = 10,
     max_duration_days: Optional[int] = None,
 ) -> None:
     logger.info(f"Ingest started: {start} → {end}")
@@ -820,9 +820,9 @@ if __name__ == "__main__":
     ap.add_argument("--skip-markets", action="store_true", help="Skip market JSON download")
     ap.add_argument("--skip-trades",  action="store_true", help="Skip trades download")
     ap.add_argument("--skip-parse",   action="store_true", help="Skip DB parsing step")
-    ap.add_argument("--filter-amount", type=int, default=10, metavar="USDC",
+    ap.add_argument("--filter-amount", type=float, default=10, metavar="USDC",
                     help="Minimum trade size in USDC passed to filterAmount (default: 10). "
-                         "Lower values give finer price history but fewer trades per API page.")
+                         "Accepts fractional values (e.g. 0.1). Lower values give finer price history.")
     ap.add_argument("--max-market-duration-days", type=int, default=None, metavar="DAYS",
                     help="Skip trades for markets longer than N days (market JSON is kept). "
                          "Long markets eat the 4000-trade API cap without adding useful history.")
