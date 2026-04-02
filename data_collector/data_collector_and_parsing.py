@@ -167,9 +167,15 @@ def _to_ts(value) -> int:
     return 0
 
 
-def _fetch_trades(condition_id: str, start_ts: int, end_ts: int) -> list[dict]:
+def _fetch_trades(condition_id: str, start_ts: int, end_ts: int) -> tuple[list[dict], bool]:
+    """
+    Fetch trades for a condition_id.
+    Returns (trades, truncated) where truncated=True means the fetch hit the
+    offset cap and the history may be incomplete.
+    """
     all_trades: list[dict] = []
     offset = 0
+    truncated = False
 
     while True:
         params = {
@@ -185,6 +191,7 @@ def _fetch_trades(condition_id: str, start_ts: int, end_ts: int) -> list[dict]:
             page = resp.json()
         except Exception as e:
             if offset == TRADES_MAX_OFFSET:
+                truncated = True
                 break
             raise e
 
@@ -199,11 +206,12 @@ def _fetch_trades(condition_id: str, start_ts: int, end_ts: int) -> list[dict]:
             break
         if offset >= TRADES_MAX_OFFSET:
             logger.warning(f"Reached API max offset {TRADES_MAX_OFFSET} for {condition_id}, truncating")
+            truncated = True
             break
 
         offset += TRADES_PAGE_LIMIT
 
-    return all_trades
+    return all_trades, truncated
 
 
 def _split_by_token(trades: list[dict]) -> dict[str, list[dict]]:
@@ -228,6 +236,34 @@ def _save_trades(day_str: str, market_id: str, token_id: str, trades: list[dict]
         json.dump(trades, f, ensure_ascii=False)
 
 
+def _manifest_path(day_str: str, market_id: str) -> str:
+    return os.path.join(_trades_dir(day_str, market_id), ".complete.json")
+
+
+def _write_manifest(day_str: str, market_id: str, truncated: bool) -> None:
+    manifest = {
+        "fetch_complete": not truncated,
+        "truncated": truncated,
+        "fetched_at": int(time.time()),
+    }
+    path = _manifest_path(day_str, market_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+
+
+def _is_fetch_complete(day_str: str, market_id: str) -> bool:
+    """Return True only if a manifest exists and says fetch_complete=True."""
+    path = _manifest_path(day_str, market_id)
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            return bool(json.load(f).get("fetch_complete"))
+    except Exception:
+        return False
+
+
 def _collect_trades_day(day: date):
     day_str = day.isoformat()
     day_dir = os.path.join(DATABASE_DIR, day_str)
@@ -246,8 +282,7 @@ def _collect_trades_day(day: date):
     for i, fname in enumerate(market_files, 1):
         market_id = fname[:-5]
 
-        trades_folder = _trades_dir(day_str, market_id)
-        if os.path.isdir(trades_folder) and os.listdir(trades_folder):
+        if _is_fetch_complete(day_str, market_id):
             skipped += 1
             continue
 
@@ -270,9 +305,12 @@ def _collect_trades_day(day: date):
             continue
 
         try:
-            trades = _fetch_trades(condition_id, start_ts, end_ts)
+            trades, truncated = _fetch_trades(condition_id, start_ts, end_ts)
             for token_id, token_trades in _split_by_token(trades).items():
                 _save_trades(day_str, market_id, token_id, token_trades)
+            _write_manifest(day_str, market_id, truncated=truncated)
+            if truncated:
+                logger.warning(f"[trades][{day_str}] {market_id}: saved with truncated=True (offset cap hit)")
             ok += 1
         except Exception as e:
             logger.warning(f"[trades][{day_str}] {market_id}: fetch error — {e}")

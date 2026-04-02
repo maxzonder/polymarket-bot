@@ -86,7 +86,7 @@ def _build_trade_file_index() -> dict[tuple[str, str], str]:
                     continue
                 market_id = entry.name[:-7]
                 for tf in os.scandir(entry.path):
-                    if tf.name.endswith(".json"):
+                    if tf.name.endswith(".json") and not tf.name.startswith("."):
                         key = (market_id, tf.name[:-5])
                         if key not in index:
                             index[key] = tf.path
