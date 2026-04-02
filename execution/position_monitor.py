@@ -153,7 +153,7 @@ class PositionMonitor:
 
             if new_filled >= order_size * 0.99:
                 # Fully filled — create position and TP orders
-                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=this_fill)
+                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
                 conn.close()
                 self.om.on_entry_filled(
                     order_id=order["order_id"],
