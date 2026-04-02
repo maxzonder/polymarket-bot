@@ -159,16 +159,25 @@ BALANCED_MODE = ModeConfig(
     optimize_metric="ev_total",
 )
 
+# Budget and levels are defined together so market_score_tiers stakes auto-scale with budget.
+# Change _BIG_SWAN_BUDGET or _BIG_SWAN_LEVELS here — tiers update automatically.
+_BIG_SWAN_BUDGET = 2.0
+_BIG_SWAN_LEVELS = (0.001, 0.005, 0.01)
+_bsm_s = _BIG_SWAN_BUDGET / len(_BIG_SWAN_LEVELS)  # stake per level at full-budget allocation
+
 BIG_SWAN_MODE = ModeConfig(
     name="big_swan_mode",
     # wide range — we pre-position early, resting bids at floor levels
-    entry_price_levels=(0.001, 0.005, 0.01),
+    entry_price_levels=_BIG_SWAN_LEVELS,
     entry_price_max=0.20,       # must match SWAN_BUY_PRICE_THRESHOLD — no scorer data above this
     use_resting_bids=True,
     scanner_entry=False,        # ONLY resting bids; no chasing dips
+    # TP at 100x/500x — consistent with 0.001 floor entries (0.001→0.10, 0.001→0.50).
+    # For 0.01 entries, 100x = $1.00 is skipped by order_manager (price >= $1.00),
+    # so those positions ride fully to resolution (moonbag only).
     tp_levels=(
-        TPLevel(x=10.0, fraction=0.10),
-        TPLevel(x=20.0, fraction=0.10),
+        TPLevel(x=100.0, fraction=0.10),   # 0.001→$0.10, 0.005→$0.50; covers full budget cost
+        TPLevel(x=500.0, fraction=0.10),   # 0.001→$0.50 only; skipped for 0.005+
     ),
     moonbag_fraction=0.80,      # 80% held to resolution
     min_entry_fill_score=0.02,  # low bar — wide coverage
@@ -179,23 +188,20 @@ BIG_SWAN_MODE = ModeConfig(
     max_resting_markets=5000,
     max_resting_per_cluster=10,
     max_capital_deployed_pct=0.99,
-    min_hours_to_close=0.25,     # 15 min
-    max_hours_to_close=24.0,
-    hours_to_close_null_default=48.0,  # safe fallback for markets without deadline info
+    min_hours_to_close=0.25,     # 15 min — allow short-lived markets
+    max_hours_to_close=168.0,    # 7 days — big events need time to materialise
+    hours_to_close_null_default=48.0,
     optimize_metric="tail_ev",
     # v1.1: market_score gate — reject bottom-half markets
     min_market_score=0.25,
-    # v1.1: quality-weighted stake (higher score → bigger stake per fill).
-    # Fully replaces price-based stake_tiers. All entry_price_levels for a market
-    # get the same stake — depth of floor no longer affects sizing directly.
-    # Per-market exposure is capped by max_exposure_per_market instead.
+    # Budget-aware stakes: _bsm_s × 3 levels = full _BIG_SWAN_BUDGET at top tier.
+    # Fractions: 1.0 / 0.5 / 0.25 of full budget.
     market_score_tiers=(
-        (0.60, 0.50),   # top10:  $0.50 per entry level
-        (0.40, 0.25),   # top25:  $0.25 per entry level
-        (0.25, 0.10),   # pass:   $0.10 per entry level
+        (0.60, _bsm_s),           # full budget:    _bsm_s × 3 = $2.00
+        (0.40, _bsm_s * 0.50),    # half budget:    _bsm_s × 3 = $1.00
+        (0.25, _bsm_s * 0.25),    # quarter budget: _bsm_s × 3 = $0.50
     ),
-    # v1.1: per-market cap — never deploy more than $2.00 on a single token
-    max_exposure_per_market=2.0,
+    max_exposure_per_market=_BIG_SWAN_BUDGET,
 )
 
 DIP_MODE = ModeConfig(
@@ -219,7 +225,7 @@ DIP_MODE = ModeConfig(
     max_resting_per_cluster=1,
     max_capital_deployed_pct=0.50,
     min_hours_to_close=1.0,
-    max_hours_to_close=120.0,
+    max_hours_to_close=48.0,     # faster turnover — dip/recovery cycle is short
     optimize_metric="ev_total",
     # deeper floor = larger bet
     stake_tiers=(
