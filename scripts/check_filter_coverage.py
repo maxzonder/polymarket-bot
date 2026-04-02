@@ -34,9 +34,9 @@ TRADES_MAX_OFFSET = 3000
 DATA_API_BASE = "https://data-api.polymarket.com"
 
 
-def _count_trades_at_filter1(condition_id: str) -> tuple[int, bool]:
+def _count_trades_at_filter1(condition_id: str, filter_amount: float = 1) -> tuple[int, bool, bool]:
     """
-    Fetch all trades with filterAmount=1. Returns (count, truncated).
+    Fetch all trades with given filterAmount. Returns (count, truncated, error).
     We only count — we don't store any data.
     """
     total = 0
@@ -49,7 +49,7 @@ def _count_trades_at_filter1(condition_id: str) -> tuple[int, bool]:
             "limit": TRADES_PAGE_LIMIT,
             "offset": offset,
             "filterType": "CASH",
-            "filterAmount": 1,
+            "filterAmount": filter_amount,
         }
         try:
             resp = requests.get(f"{DATA_API_BASE}/trades", params=params, timeout=30)
@@ -57,7 +57,7 @@ def _count_trades_at_filter1(condition_id: str) -> tuple[int, bool]:
             page = resp.json()
         except Exception as e:
             logger.warning(f"{condition_id}: API error at offset {offset} — {e}")
-            return total, True
+            return total, False, True
 
         if not isinstance(page, list) or not page:
             break
@@ -73,10 +73,10 @@ def _count_trades_at_filter1(condition_id: str) -> tuple[int, bool]:
         offset += TRADES_PAGE_LIMIT
         time.sleep(0.1)
 
-    return total, truncated
+    return total, truncated, False
 
 
-def run(sample: int, max_duration_days: int):
+def run(sample: int, max_duration_days: int, filter_amount: float = 1.0):
     conn = sqlite3.connect(DB_PATH)
 
     rows = conn.execute(
@@ -102,11 +102,11 @@ def run(sample: int, max_duration_days: int):
     logger.info(f"Sampled {len(rows)} markets with duration <= {max_duration_days} days")
 
     buckets: dict[str, dict] = {
-        "0-1d":   {"total": 0, "fits": 0, "truncated": 0},
-        "1-3d":   {"total": 0, "fits": 0, "truncated": 0},
-        "3-7d":   {"total": 0, "fits": 0, "truncated": 0},
-        "7-14d":  {"total": 0, "fits": 0, "truncated": 0},
-        "14-30d": {"total": 0, "fits": 0, "truncated": 0},
+        "0-1d":   {"total": 0, "fits": 0, "truncated": 0, "errors": 0},
+        "1-3d":   {"total": 0, "fits": 0, "truncated": 0, "errors": 0},
+        "3-7d":   {"total": 0, "fits": 0, "truncated": 0, "errors": 0},
+        "7-14d":  {"total": 0, "fits": 0, "truncated": 0, "errors": 0},
+        "14-30d": {"total": 0, "fits": 0, "truncated": 0, "errors": 0},
     }
 
     def _bucket(duration_hours: float) -> str:
@@ -119,10 +119,8 @@ def run(sample: int, max_duration_days: int):
 
     for i, (market_id, question, start_ts, end_ts, duration_hours, token_id) in enumerate(rows, 1):
         b = _bucket(duration_hours)
-        buckets[b]["total"] += 1
 
-        # Derive conditionId from token file path in database directory
-        # We need conditionId, not market_id. Find it from market JSON files.
+        # Derive conditionId from market JSON files (not in DB schema)
         condition_id = None
         for day_dir in sorted(os.listdir(DATABASE_DIR), reverse=True):
             mpath = os.path.join(DATABASE_DIR, day_dir, f"{market_id}.json")
@@ -139,36 +137,42 @@ def run(sample: int, max_duration_days: int):
             logger.warning(f"[{i}/{len(rows)}] {market_id}: no conditionId found, skipping")
             continue
 
-        count, truncated = _count_trades_at_filter1(condition_id)
+        # Count toward total only after conditionId is confirmed
+        buckets[b]["total"] += 1
 
-        if truncated:
+        count, truncated, error = _count_trades_at_filter1(condition_id, filter_amount=filter_amount)
+
+        if error:
+            buckets[b]["errors"] += 1
+        elif truncated:
             buckets[b]["truncated"] += 1
         else:
             buckets[b]["fits"] += 1
 
-        status = f"truncated ({count}+ trades)" if truncated else f"fits ({count} trades)"
+        status = "error" if error else (f"truncated ({count}+ trades)" if truncated else f"fits ({count} trades)")
         logger.info(f"[{i}/{len(rows)}] {market_id} [{b}] {duration_hours/24:.1f}d — {status}")
 
     print("\n" + "=" * 60)
     print(f"filterAmount=1 coverage — {len(rows)} markets, max {max_duration_days}d")
     print("=" * 60)
-    print(f"{'Bucket':<10} {'Total':>6} {'Fits':>6} {'Trunc':>6} {'Fit%':>7}")
-    print("-" * 40)
-    grand_total = grand_fits = grand_trunc = 0
+    print(f"{'Bucket':<10} {'Total':>6} {'Fits':>6} {'Trunc':>6} {'Err':>5} {'Fit%':>7}")
+    print("-" * 45)
+    grand_total = grand_fits = grand_trunc = grand_err = 0
     for name, b in buckets.items():
         if b["total"] == 0:
             continue
         pct = 100.0 * b["fits"] / b["total"]
-        print(f"{name:<10} {b['total']:>6} {b['fits']:>6} {b['truncated']:>6} {pct:>6.0f}%")
+        print(f"{name:<10} {b['total']:>6} {b['fits']:>6} {b['truncated']:>6} {b['errors']:>5} {pct:>6.0f}%")
         grand_total += b["total"]
         grand_fits  += b["fits"]
         grand_trunc += b["truncated"]
-    print("-" * 40)
+        grand_err   += b["errors"]
+    print("-" * 45)
     if grand_total:
         pct = 100.0 * grand_fits / grand_total
-        print(f"{'TOTAL':<10} {grand_total:>6} {grand_fits:>6} {grand_trunc:>6} {pct:>6.0f}%")
+        print(f"{'TOTAL':<10} {grand_total:>6} {grand_fits:>6} {grand_trunc:>6} {grand_err:>5} {pct:>6.0f}%")
     print("=" * 60)
-    print(f"\nConclusion: {pct:.0f}% of markets <= {max_duration_days}d fit within 4000 trades at filterAmount=1")
+    print(f"\nConclusion: {pct:.0f}% of markets <= {max_duration_days}d fit within 4000 trades at filterAmount={filter_amount}")
     if pct >= 90:
         print("→ Safe to lower filterAmount to 1 for short markets without significant truncation.")
     else:
@@ -181,5 +185,7 @@ if __name__ == "__main__":
                     help="Number of markets to sample (default: 200)")
     ap.add_argument("--max-duration-days", type=int, default=30,
                     help="Only sample markets shorter than N days (default: 30)")
+    ap.add_argument("--filter-amount", type=float, default=1.0,
+                    help="filterAmount to test (default: 1.0, can be fractional e.g. 0.5)")
     args = ap.parse_args()
-    run(sample=args.sample, max_duration_days=args.max_duration_days)
+    run(sample=args.sample, max_duration_days=args.max_duration_days, filter_amount=args.filter_amount)
