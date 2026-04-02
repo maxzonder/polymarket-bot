@@ -74,27 +74,44 @@ def check_duplicate_resting_orders(conn: sqlite3.Connection) -> tuple[str, str, 
 
 def check_duplicate_open_positions(conn: sqlite3.Connection) -> tuple[str, str, list]:
     """
-    Multiple open positions on the same token_id AND same market_id.
+    Multiple open positions on the same (market_id, token_id, entry_price).
 
-    Note: multiple positions on the same token across different price levels is
-    intentional (resting-bid ladder). This check only fires if the same
-    (market_id, token_id) pair has more than one open position, which indicates
-    a dedupe failure rather than normal ladder behaviour.
+    Multiple positions on the same token at different price levels is intentional
+    (resting-bid ladder). Only same-(market, token, price) duplicates are a bug —
+    they indicate the same fill was processed twice.
     """
     rows = conn.execute("""
-        SELECT market_id, token_id, COUNT(*) as cnt
+        SELECT market_id, token_id, ROUND(entry_price, 6) AS entry_price_r, COUNT(*) AS cnt
         FROM positions
         WHERE status = 'open'
-        GROUP BY market_id, token_id
+        GROUP BY market_id, token_id, ROUND(entry_price, 6)
         HAVING cnt > 1
     """).fetchall()
     if not rows:
-        return PASS, "No duplicate open positions per (market, token)", []
+        return PASS, "No duplicate open positions per (market, token, price)", []
     detail = [
-        f"  market={r['market_id'][:16]} token={r['token_id'][:20]} count={r['cnt']}"
+        f"  market={r['market_id'][:16]} token={r['token_id'][:20]} price={r['entry_price_r']} count={r['cnt']}"
         for r in rows
     ]
-    return FAIL, f"{len(rows)} (market, token) pair(s) with duplicate open positions", detail
+    return FAIL, f"{len(rows)} (market, token, price) tuple(s) with duplicate open positions", detail
+
+
+def check_double_processed_entry(conn: sqlite3.Connection) -> tuple[str, str, list]:
+    """
+    Multiple open positions sharing the same entry_order_id.
+    Indicates the same fill event was processed more than once.
+    """
+    rows = conn.execute("""
+        SELECT entry_order_id, COUNT(*) AS cnt
+        FROM positions
+        WHERE status = 'open' AND entry_order_id IS NOT NULL
+        GROUP BY entry_order_id
+        HAVING cnt > 1
+    """).fetchall()
+    if not rows:
+        return PASS, "No double-processed entry fills", []
+    detail = [f"  entry_order_id={r['entry_order_id'][:16]} count={r['cnt']}" for r in rows]
+    return FAIL, f"{len(rows)} entry order(s) produced multiple positions", detail
 
 
 def check_orphaned_tp_orders(conn: sqlite3.Connection) -> tuple[str, str, list]:
@@ -179,6 +196,7 @@ CHECKS = [
     ("Positions without TP", check_open_positions_without_tp),
     ("Duplicate resting orders", check_duplicate_resting_orders),
     ("Duplicate open positions", check_duplicate_open_positions),
+    ("Double-processed entry fills", check_double_processed_entry),
     ("ExposureManager wired", check_exposure_manager_wired),
 ]
 
