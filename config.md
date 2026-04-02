@@ -144,8 +144,8 @@ Scanner-вход, быстрый выход, нет moonbag.
 | `max_open_positions` | `int` | Жёсткий лимит одновременно открытых позиций. |
 | `max_resting_markets` | `int` | Макс. число рынков с живыми resting-заявками. |
 | `max_resting_per_cluster` | `int` | Макс. рынков на neg-risk группу. |
-| `max_capital_deployed_pct` | `float` | Макс. доля баланса в открытых позициях. |
-| `max_exposure_per_market` | `float` | Макс. суммарный USDC по всем филам на одном токене. `0.0` = отключено. |
+| `max_capital_deployed_pct` | `float` | Зарезервировано. Поле существует, но `RiskManager` его не читает при сайзинге. Реальный капитальный лимит обеспечивается paper balance gate + `max_open_positions`. |
+| `max_exposure_per_market` | `float` | Lifetime cap: макс. суммарный USDC на один `(market_id, token_id)` за всё время жизни БД. Проверяется `ExposureManager.can_add()` перед каждым ордером. `0.0` = отключено. |
 
 ### Стейк-тиры
 
