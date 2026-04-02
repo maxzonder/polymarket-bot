@@ -182,6 +182,10 @@ class Screener:
         now = int(time.time())
         q = (m.question or "")[:120]
 
+        # Resolve hours_to_close once: gate, scoring, and logging all use the same value.
+        mc = self.config.mode_config
+        hours: float = m.hours_to_close if m.hours_to_close is not None else mc.hours_to_close_null_default
+
         def _log(outcome: str, token_id=None, price=None, ef=None, res=None,
                  candidate_id=None, ms=None) -> None:
             log_entries.append((
@@ -191,7 +195,7 @@ class Screener:
                 q,
                 m.category,
                 price,
-                m.hours_to_close,
+                hours,
                 m.volume_usdc,
                 ef,
                 res,
@@ -200,14 +204,7 @@ class Screener:
                 ms,
             ))
 
-        # Hard filter: hours to close.
-        # If hours_to_close is None (Gamma didn't return it), apply a safe default
-        # rather than silently bypassing the time-gate. This prevents markets with
-        # unknown deadlines from flooding the candidate pool.
-        mc = self.config.mode_config
-        hours = m.hours_to_close
-        if hours is None:
-            hours = mc.hours_to_close_null_default
+        if m.hours_to_close is None:
             _log("hours_to_close_null_default_applied")
         if hours < mc.min_hours_to_close:
             _log("rejected_hours_to_close_min")
@@ -249,17 +246,9 @@ class Screener:
         ef_s  = ef_score_obj.score
         res_s = res_score_obj.score
 
-        # Hard filter: scoring gates from mode config
-        # v1.1 FIX: If market_scorer is active, bypass category-level ef/res hard gates.
-        # market_scorer acts as the unified quality gate. Category-wide gates kill 
-        # entire high-opportunity sectors (like crypto) unfairly.
-        if self.market_scorer is None:
-            if ef_s < self.mc.min_entry_fill_score:
-                _log("rejected_entry_fill_score", ef=ef_s, res=res_s)
-                return []
-            if res_s < self.mc.min_resolution_score:
-                _log("rejected_resolution_score", ef=ef_s, res=res_s)
-                return []
+        # ef_score / res_score gates removed: all current modes use scoring_weights
+        # with market_score as primary signal. market_scorer.score() already acts
+        # as the unified gate above. Category-level ef/res gates are legacy dead code.
 
         candidates: list[EntryCandidate] = []
 
@@ -302,8 +291,13 @@ class Screener:
                         price = ob.best_ask
                 except Exception:
                     pass  # fallback to synthetic — acceptable per issue #45 verdict
+                # Re-check price gate after CLOB refinement: real NO ask may exceed entry_price_max
+                if price > self.mc.entry_price_max:
+                    _log("rejected_no_reprice_above_max", token_id=token_id, price=price,
+                         ef=ef_s, res=res_s)
+                    continue
 
-            total_score = self._compute_total_score(m, ef_s, res_s, ms_obj) * group_boost
+            total_score = self._compute_total_score(m, ef_s, res_s, ms_obj, hours=hours) * group_boost
 
             # Determine resting bid levels for this token
             entry_levels = [lvl for lvl in self.mc.entry_price_levels if lvl < price]
@@ -322,12 +316,11 @@ class Screener:
             boost_info = f" boost={group_boost:.2f}" if group_boost != 1.0 else ""
             neg_risk_info = f" [neg-risk grp={m.neg_risk_group_id[:12]}]" if m.neg_risk_group_id else ""
             ms_str = f"{ms_score:.3f}" if ms_score is not None else "N/A"
-            hrs_str = f"{m.hours_to_close:.1f}" if m.hours_to_close is not None else "N/A"
             logger.info(
                 f"Candidate: {(m.question or '')[:60]!r} | "
                 f"{outcome_name} @ ${price:.4f} | "
                 f"score={total_score:.3f}{boost_info} ms={ms_str} | "
-                f"cat={m.category} vol=${m.volume_usdc:.0f} hrs={hrs_str}"
+                f"cat={m.category} vol=${m.volume_usdc:.0f} hrs={hours:.1f}"
                 f"{neg_risk_info}"
             )
 
@@ -336,7 +329,7 @@ class Screener:
                 f"category={m.category} fill_score={ef_s:.3f} res_score={res_s:.3f} "
                 f"p_winner={res_score_obj.p_winner:.2f} p_20x={res_score_obj.p_20x:.3f} "
                 f"tail_ev={res_score_obj.tail_ev:.1f} "
-                f"vol=${m.volume_usdc:.0f} hrs_to_close={f'{m.hours_to_close:.1f}' if m.hours_to_close is not None else 'N/A'}"
+                f"vol=${m.volume_usdc:.0f} hrs_to_close={hours:.1f}"
                 f"{ms_info}"
             )
 
@@ -446,6 +439,7 @@ class Screener:
         ef_score: float,
         res_score: float,
         market_score: Optional[MarketScore] = None,
+        hours: Optional[float] = None,
     ) -> float:
         """
         Weighted composite score for ranking candidates.
@@ -453,8 +447,10 @@ class Screener:
         Weights come from mc.scoring_weights (config-driven per mode).
         Components (all normalised 0–1): market_score, liq, duration, category.
         Legacy ef_score/res_score path kept as fallback for modes without scoring_weights.
+        hours: resolved hours_to_close (null-default already applied by caller).
         """
-        hours = m.hours_to_close or 24.0
+        if hours is None:
+            hours = m.hours_to_close if m.hours_to_close is not None else 24.0
 
         # Duration score — direction controlled by mc.prefer_long_duration
         if self.mc.prefer_long_duration:

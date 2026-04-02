@@ -58,9 +58,9 @@ class ModeConfig:
     moonbag_fraction: float
 
     # ── Scoring gates ─────────────────────────────────────────────────────────
-    # min historical P(market hits entry zone) to bother placing resting bid
+    # legacy: bypassed when market_scorer is active (all current modes).
+    # Kept for backward-compat; has no live effect when scoring_weights is set.
     min_entry_fill_score: float
-    # min resolution score to accept a trade candidate
     min_resolution_score: float
     # min historical real_x (excluding small bounces)
     min_real_x_historical: float
@@ -228,11 +228,12 @@ BIG_SWAN_MODE = ModeConfig(
         (0.25, _bsm_s * 0.25),    # quarter budget: _bsm_s × 3 = $0.50
     ),
     max_exposure_per_market=_BIG_SWAN_BUDGET,
-    # Scoring: market_score dominates; duration flat until max_hours_to_close.
+    # Duration omitted: all markets passing the 168h hard gate get duration_score=1.0
+    # (prefer_long_duration=True + horizon=max_hours_to_close = constant signal).
+    # Redistributed to market_score for cleaner ranking.
     scoring_weights=(
-        ("market_score", 0.60),
+        ("market_score", 0.70),
         ("liq",          0.20),
-        ("duration",     0.10),
         ("category",     0.10),
     ),
     prefer_long_duration=True,   # flat score=1.0 up to 168h, decay after

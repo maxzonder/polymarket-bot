@@ -152,19 +152,19 @@ def analyze_token(
 
     # --- 1. Глобальный минимум ---
     global_min = min(prices)
-    if global_min >= buy_price_threshold:
+    if global_min > buy_price_threshold:
         return None  # цена никогда не падала до порога
 
     global_min_idx = prices.index(global_min)
 
     # --- 2. Зона дна вокруг глобального минимума ---
-    # Расширяем в обе стороны пока цена < buy_price_threshold
+    # Расширяем в обе стороны пока цена <= buy_price_threshold (включительно)
     floor_start = global_min_idx
-    while floor_start > 0 and prices[floor_start - 1] < buy_price_threshold:
+    while floor_start > 0 and prices[floor_start - 1] <= buy_price_threshold:
         floor_start -= 1
 
     floor_end = global_min_idx
-    while floor_end < len(prices) - 1 and prices[floor_end + 1] < buy_price_threshold:
+    while floor_end < len(prices) - 1 and prices[floor_end + 1] <= buy_price_threshold:
         floor_end += 1
 
     floor_trades = trades[floor_start: floor_end + 1]
