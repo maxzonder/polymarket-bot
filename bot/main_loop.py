@@ -314,6 +314,28 @@ class BotRunner:
                         f"Daily pipeline: FAILED (exit {result.returncode})\n"
                         + "\n".join(result.stderr.strip().splitlines()[-20:])
                     )
+
+                # Run execution health check after pipeline regardless of outcome.
+                # Sends Telegram alert only if anomalies are found.
+                _health_script = _scripts_dir / "execution_health.py"
+                try:
+                    health = await asyncio.to_thread(
+                        lambda: subprocess.run(
+                            [sys.executable, str(_health_script), "--telegram"],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                        )
+                    )
+                    if health.returncode == 0:
+                        logger.info("Execution health check: all OK")
+                    else:
+                        logger.warning(
+                            "Execution health check: anomalies found\n"
+                            + health.stdout.strip()
+                        )
+                except Exception as e:
+                    logger.warning(f"Execution health check: ERROR: {e}")
             except subprocess.TimeoutExpired:
                 logger.error("Daily pipeline: TIMEOUT after 30 min")
             except Exception as e:
