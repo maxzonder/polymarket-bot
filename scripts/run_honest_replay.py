@@ -363,8 +363,10 @@ def simulate_token(
         return {"status": "no_trades", "token_id": token_id, "market_id": market_id}
 
     # ── Discovery time: when screener would first see this token ───────────────
+    # max(sim_start, first_trade, market_start_date) — all three gates required
     first_trade_ts = trades[0]["timestamp"]
-    discovery_ts = max(start_ts, first_trade_ts)
+    market_start_ts = int(row.get("start_date") or 0)
+    discovery_ts = max(start_ts, first_trade_ts, market_start_ts)
 
     # Skip if market already closed before simulation window
     if end_date <= start_ts:
@@ -462,19 +464,19 @@ def simulate_token(
     filled_entries = 0
     filled_tps = 0
 
-    def _dispatch_entry(order_id: str, order: dict) -> None:
+    def _dispatch_fill(order_id: str, order: dict, fill_qty: float) -> None:
+        """Dispatch a single incremental fill immediately so TP ladder is live."""
         nonlocal filled_entries
-        total_fill = order["filled_qty"]
-        if total_fill <= 1e-9:
+        if fill_qty <= 1e-9:
             return
-        clob.paper_simulate_fill(order_id, order["price"], total_fill)
+        clob.paper_simulate_fill(order_id, order["price"], fill_qty)
         try:
             om.on_entry_filled(
                 order_id=order_id,
                 token_id=token_id,
                 market_id=market_id,
                 fill_price=order["price"],
-                fill_quantity=total_fill,
+                fill_quantity=fill_qty,
                 outcome_name=outcome,
             )
         except Exception as e:
@@ -510,12 +512,12 @@ def simulate_token(
                     trade_budget     -= fill_qty
                     order["remaining_qty"] -= fill_qty
                     order["filled_qty"]    += fill_qty
+                    _dispatch_fill(order_id, order, fill_qty)
                     if order["remaining_qty"] <= 1e-9:
-                        _dispatch_entry(order_id, order)
                         del pending_buys[order_id]
 
         # ── TP fills (BUY-side taker hits our SELL TP orders) ─────────────────
-        if trade_side not in ("SELL",):
+        if trade_side == "BUY":
             open_sells = [
                 o for o in clob.get_open_orders(token_id)
                 if o.get("side") == "SELL"
@@ -533,16 +535,15 @@ def simulate_token(
                         logger.warning(f"on_tp_filled error {token_id[:16]}: {e}")
                     filled_tps += 1
 
-    # ── Flush partial fills at end of trade stream ────────────────────────────
+    # ── Cancel unfilled resting orders at end of trade stream ────────────────
+    # Partial fills were already dispatched incrementally; only cancel orders
+    # that never got any fill at all.
     conn = sqlite3.connect(positions_db_path)
     for order_id, order in list(pending_buys.items()):
-        if order["filled_qty"] > 1e-9:
-            _dispatch_entry(order_id, order)
-        else:
-            conn.execute(
-                "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
-                (order_id,),
-            )
+        conn.execute(
+            "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
+            (order_id,),
+        )
     conn.commit()
     conn.close()
 
