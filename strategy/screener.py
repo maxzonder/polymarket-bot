@@ -455,8 +455,9 @@ class Screener:
         # For big_swan: longer duration = more time for event to materialise
         hours = m.hours_to_close or 24.0
         if mode == "tail_ev":
-            # big_swan: issue #53 shows short is fine. Flat 1.0 up to 168h, then decay.
-            duration_score = 1.0 if hours <= 168.0 else max(0.5, 168.0 / hours)
+            # big_swan: flat 1.0 up to max_hours_to_close, then decay.
+            horizon = self.mc.max_hours_to_close
+            duration_score = 1.0 if hours <= horizon else max(0.5, horizon / hours)
         else:
             # fast_tp / balanced: prefer markets closing within 48h
             duration_score = max(0.0, 1.0 - hours / 48.0)
