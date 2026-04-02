@@ -27,6 +27,7 @@ from api.clob_client import ClobClient, OrderResult, get_orderbook
 from api.gamma_client import fetch_market
 from config import BotConfig
 from execution import paper_balance as pb
+from execution.exposure_manager import ExposureManager
 from strategy.screener import EntryCandidate
 from strategy.risk_manager import RiskManager, SizedPosition, TPOrder
 from utils.logger import setup_logger
@@ -208,6 +209,9 @@ class OrderManager:
         self.risk = risk_manager
         self._db_path = str(POSITIONS_DB)
         self._last_balance_alert_ts: int = 0
+        self.em = ExposureManager(
+            max_per_market=self.mc.max_exposure_per_market or float("inf"),
+        )
         self._init_db()
 
     def _init_db(self) -> None:
@@ -436,6 +440,17 @@ class OrderManager:
                 self._log_scan(conn, candidate, price_level, "depth_gate_error")
                 continue
 
+            # ── Exposure cap gate ──────────────────────────────────────────
+            if self.mc.max_exposure_per_market > 0 and not self.em.can_add(
+                candidate.market_info.market_id, candidate.token_id, sized.stake_usdc
+            ):
+                logger.debug(
+                    f"Exposure cap: {candidate.token_id[:16]} market={candidate.market_info.market_id[:16]} "
+                    f"stake=${sized.stake_usdc:.2f} would exceed max_exposure_per_market=${self.mc.max_exposure_per_market:.2f}"
+                )
+                self._log_scan(conn, candidate, price_level, "exposure_cap")
+                continue
+
             label = f"resting_{candidate.market_info.market_id}_{price_level}"
             result = self.clob.place_limit_order(
                 token_id=candidate.token_id,
@@ -562,6 +577,17 @@ class OrderManager:
                 self._maybe_send_balance_alert(bal)
                 conn.close()
                 return []
+
+        # Exposure cap gate
+        if self.mc.max_exposure_per_market > 0 and not self.em.can_add(
+            candidate.market_info.market_id, candidate.token_id, sized.stake_usdc
+        ):
+            logger.debug(
+                f"Exposure cap (scanner): {candidate.token_id[:16]} "
+                f"stake=${sized.stake_usdc:.2f} would exceed max_exposure_per_market=${self.mc.max_exposure_per_market:.2f}"
+            )
+            conn.close()
+            return []
 
         label = f"scanner_{candidate.market_info.market_id}"
         result = self.clob.place_limit_order(
@@ -707,6 +733,9 @@ class OrderManager:
             (position_id, token_id, market_id, outcome_name, order_id,
              fill_price, stake_usdc, fill_quantity, moonbag_qty, now, self.mc.name),
         )
+
+        # Record fill in ExposureManager
+        self.em.record_fill(market_id, token_id, fill_price, fill_quantity, fill_ts=now)
 
         # Place TP orders
         tp_orders = self.risk.build_tp_orders(sized)
