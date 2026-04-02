@@ -442,25 +442,20 @@ class Screener:
         """
         Weighted composite score for ranking candidates.
 
-        Components (all normalised 0–1):
-        - fill_score × weight
-        - resolution_score × weight
-        - duration_score (prefer shorter-window markets with urgency)
-        - liquidity_inefficiency_score (prefer lower volume)
-        - category_weight from config
+        Weights come from mc.scoring_weights (config-driven per mode).
+        Components (all normalised 0–1): market_score, liq, duration, category.
+        Legacy ef_score/res_score path kept as fallback for modes without scoring_weights.
         """
-        mode = self.config.mode_config.optimize_metric
-
-        # Duration score: closer to close = more urgent (for fast_tp/balanced)
-        # For big_swan: longer duration = more time for event to materialise
         hours = m.hours_to_close or 24.0
-        if mode == "tail_ev":
-            # big_swan: flat 1.0 up to max_hours_to_close, then decay.
+
+        # Duration score — direction controlled by mc.prefer_long_duration
+        if self.mc.prefer_long_duration:
+            # Flat 1.0 until max_hours_to_close, then decay (big_swan: events need time)
             horizon = self.mc.max_hours_to_close
             duration_score = 1.0 if hours <= horizon else max(0.5, horizon / hours)
         else:
-            # fast_tp / balanced: prefer markets closing within 48h
-            duration_score = max(0.0, 1.0 - hours / 48.0)
+            # Linear decay: 1.0 at 0h, 0.0 at max_hours_to_close (prefer closing soon)
+            duration_score = max(0.0, 1.0 - hours / self.mc.max_hours_to_close)
 
         # Liquidity inefficiency: lower volume = worse price efficiency = better edge
         # $500–$5000 volume sweet spot, penalise above $50k
@@ -474,34 +469,33 @@ class Screener:
         else:
             liq_score = max(0.2, 1.0 - vol / 100_000)
 
-        cat_weight = self.config.category_weights.get(m.category or "", 1.0)
+        cat_norm = min(self.config.category_weights.get(m.category or "", 1.0) / 1.5, 1.0)
 
-        if mode == "tail_ev":
+        if self.mc.scoring_weights:
+            ms_val = market_score.total if market_score is not None else 0.0
+            components = {
+                "market_score": ms_val,
+                "liq":          liq_score,
+                "duration":     duration_score,
+                "category":     cat_norm,
+            }
+            score = sum(w * components.get(name, 0.0) for name, w in self.mc.scoring_weights)
+        else:
+            # Legacy fallback for modes without scoring_weights
             if market_score is not None:
-                # v1.1: market_score replaces category-level signals for big_swan_mode
                 score = (
                     0.60 * market_score.total
                     + 0.20 * liq_score
                     + 0.10 * duration_score
-                    + 0.10 * min(cat_weight / 1.5, 1.0)
+                    + 0.10 * cat_norm
                 )
             else:
-                # legacy: resolution score dominates
                 score = (
                     0.40 * res_score
                     + 0.25 * ef_score
                     + 0.15 * liq_score
                     + 0.10 * duration_score
-                    + 0.10 * min(cat_weight / 1.5, 1.0)
+                    + 0.10 * cat_norm
                 )
-        else:
-            # fast_tp / balanced: fill score more important (need the dip to happen)
-            score = (
-                0.30 * ef_score
-                + 0.30 * res_score
-                + 0.20 * duration_score
-                + 0.10 * liq_score
-                + 0.10 * min(cat_weight / 1.5, 1.0)
-            )
 
         return round(score, 4)

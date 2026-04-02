@@ -109,6 +109,17 @@ class ModeConfig:
     # from escaping the filter entirely. Default 48h = safe middle ground.
     hours_to_close_null_default: float = 48.0
 
+    # ── Screener scoring weights ───────────────────────────────────────────────
+    # Tuple of (component_name, weight) pairs. Weights should sum to 1.0.
+    # Components: "market_score", "liq", "duration", "category"
+    # Empty tuple = legacy ef_score/res_score formula (backward-compat fallback).
+    scoring_weights: tuple[tuple[str, float], ...] = ()
+
+    # Duration scoring direction:
+    #   True  = prefer long  (flat score=1.0 until max_hours_to_close, then decay)
+    #   False = prefer short (linear decay from 0 to max_hours_to_close)
+    prefer_long_duration: bool = False
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -132,6 +143,14 @@ FAST_TP_MODE = ModeConfig(
     min_hours_to_close=1.0,
     max_hours_to_close=48.0,
     optimize_metric="ev_total",
+    # duration matters most: scanner needs markets closing soon for quick exit
+    scoring_weights=(
+        ("market_score", 0.40),
+        ("duration",     0.35),
+        ("liq",          0.15),
+        ("category",     0.10),
+    ),
+    prefer_long_duration=False,
 )
 
 BALANCED_MODE = ModeConfig(
@@ -157,6 +176,13 @@ BALANCED_MODE = ModeConfig(
     min_hours_to_close=1.0,
     max_hours_to_close=120.0,
     optimize_metric="ev_total",
+    scoring_weights=(
+        ("market_score", 0.50),
+        ("duration",     0.25),
+        ("liq",          0.15),
+        ("category",     0.10),
+    ),
+    prefer_long_duration=False,
 )
 
 # Budget and levels are defined together so market_score_tiers stakes auto-scale with budget.
@@ -202,6 +228,14 @@ BIG_SWAN_MODE = ModeConfig(
         (0.25, _bsm_s * 0.25),    # quarter budget: _bsm_s × 3 = $0.50
     ),
     max_exposure_per_market=_BIG_SWAN_BUDGET,
+    # Scoring: market_score dominates; duration flat until max_hours_to_close.
+    scoring_weights=(
+        ("market_score", 0.60),
+        ("liq",          0.20),
+        ("duration",     0.10),
+        ("category",     0.10),
+    ),
+    prefer_long_duration=True,   # flat score=1.0 up to 168h, decay after
 )
 
 DIP_MODE = ModeConfig(
@@ -227,6 +261,13 @@ DIP_MODE = ModeConfig(
     min_hours_to_close=1.0,
     max_hours_to_close=48.0,     # faster turnover — dip/recovery cycle is short
     optimize_metric="ev_total",
+    scoring_weights=(
+        ("market_score", 0.50),
+        ("duration",     0.25),
+        ("liq",          0.15),
+        ("category",     0.10),
+    ),
+    prefer_long_duration=False,
     # deeper floor = larger bet
     stake_tiers=(
         (0.05,  0.20),
