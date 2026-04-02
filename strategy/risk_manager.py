@@ -50,11 +50,19 @@ class RiskManager:
     """
     Computes position size and TP ladder for a given candidate.
 
-    Position sizing rules:
-    - Default: mode_config.stake_usdc
-    - Scale up if resolution_score is high AND sufficient balance
-    - Hard cap: never more than balance * max_capital_deployed_pct / max_open_positions
-    - Anti-garbage filter: reject if historical avg entry_volume_usdc is too thin
+    Position sizing (priority order):
+    1. market_score_tiers: quality-weighted stake if configured
+    2. stake_tiers: price-based stake tiers (legacy)
+    3. stake_usdc: flat fallback
+
+    Additional gates (enforced by OrderManager, not here):
+    - Paper balance check (dry_run)
+    - max_open_positions cap
+    - max_exposure_per_market via ExposureManager
+
+    Rejects:
+    - market_score < min_market_score
+    - entry_price < 0.0005 with fewer than 5 historical samples
     """
 
     def __init__(self, mode_config: ModeConfig, balance_usdc: float = 10.0):
