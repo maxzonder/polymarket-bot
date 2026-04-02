@@ -52,6 +52,11 @@ TRADES_MAX_OFFSET   = 3000
 TRADES_SLEEP        = 0.1
 PROGRESS_STEP       = 100
 
+# Markets longer than this are excluded from trade collection by default.
+# Long markets exhaust the 4000-trade API cap without adding useful history
+# for the strategy (max_hours_to_close=24h means we never trade them anyway).
+MAX_MARKET_DURATION_DAYS = 30
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 1 — Download market JSONs
@@ -264,7 +269,7 @@ def _is_fetch_complete(day_str: str, market_id: str) -> bool:
         return False
 
 
-def _collect_trades_day(day: date, filter_amount: float = 10, max_duration_days: Optional[int] = None):
+def _collect_trades_day(day: date, filter_amount: float = 10, max_duration_days: Optional[int] = MAX_MARKET_DURATION_DAYS):
     day_str = day.isoformat()
     day_dir = os.path.join(DATABASE_DIR, day_str)
 
@@ -333,7 +338,7 @@ def _collect_trades_day(day: date, filter_amount: float = 10, max_duration_days:
     logger.info(f"[trades][{day_str}] DONE in {int(time.monotonic()-t0)}s | ok={ok} skipped={skipped} long={skipped_long} errors={errors}")
 
 
-def collect_trades(start: date, end: date, filter_amount: float = 10, max_duration_days: Optional[int] = None):
+def collect_trades(start: date, end: date, filter_amount: float = 10, max_duration_days: Optional[int] = MAX_MARKET_DURATION_DAYS):
     label = f"CASH >= {filter_amount}"
     if max_duration_days is not None:
         label += f", duration <= {max_duration_days}d"
@@ -785,7 +790,7 @@ def run(
     skip_trades: bool = False,
     skip_parse: bool = False,
     filter_amount: float = 10,
-    max_duration_days: Optional[int] = None,
+    max_duration_days: Optional[int] = MAX_MARKET_DURATION_DAYS,
 ) -> None:
     logger.info(f"Ingest started: {start} → {end}")
 
@@ -823,9 +828,9 @@ if __name__ == "__main__":
     ap.add_argument("--filter-amount", type=float, default=10, metavar="USDC",
                     help="Minimum trade size in USDC passed to filterAmount (default: 10). "
                          "Accepts fractional values (e.g. 0.1). Lower values give finer price history.")
-    ap.add_argument("--max-market-duration-days", type=int, default=None, metavar="DAYS",
-                    help="Skip trades for markets longer than N days (market JSON is kept). "
-                         "Long markets eat the 4000-trade API cap without adding useful history.")
+    ap.add_argument("--max-market-duration-days", type=int, default=MAX_MARKET_DURATION_DAYS, metavar="DAYS",
+                    help=f"Skip trades for markets longer than N days, market JSON is kept "
+                         f"(default: {MAX_MARKET_DURATION_DAYS}). Pass 0 to disable the limit.")
     args = ap.parse_args()
 
     run(
@@ -835,5 +840,5 @@ if __name__ == "__main__":
         skip_trades=args.skip_trades,
         skip_parse=args.skip_parse,
         filter_amount=args.filter_amount,
-        max_duration_days=args.max_market_duration_days,
+        max_duration_days=args.max_market_duration_days or None,
     )
