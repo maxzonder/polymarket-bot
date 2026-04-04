@@ -50,18 +50,22 @@ import os
 import sqlite3
 import sys
 import time
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import execution.order_manager as om_module
 
-from api.clob_client import ClobClient
+from api.clob_client import ClobClient, Orderbook, OrderbookLevel
+from api.gamma_client import MarketInfo
 from config import BotConfig, ModeConfig
 from strategy.market_scorer import MarketScore, MarketScorer
 from strategy.risk_manager import RiskManager
+from strategy.screener import EntryCandidate
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, DATA_DIR
 
@@ -296,28 +300,92 @@ def load_all_markets(
     return [dict(r) for r in rows]
 
 
-# ── DB helpers (same pattern as run_dry_run_replay.py) ────────────────────────
+# ── Replay adapters: reuse OrderManager entry path ───────────────────────────
 
-def _insert_resting_order(
-    db_path: str,
-    order_id: str,
-    token_id: str,
-    market_id: str,
-    price: float,
-    size: float,
-    mode: str,
-    label: str = "",
-) -> None:
-    now = int(time.time())
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "INSERT OR REPLACE INTO resting_orders "
-        "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode, label) "
-        "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, 0, ?, ?)",
-        (order_id, token_id, market_id, price, size, now, mode, label),
+def _synthetic_replay_orderbook(token_id: str, current_price: float) -> Orderbook:
+    """
+    Synthetic orderbook for replay-time entry placement.
+
+    Historical orderbook snapshots do not exist in our dataset, so honest replay
+    must synthesize the minimum market state needed to run the shared
+    OrderManager path without live API calls.
+
+    We intentionally keep:
+    - best_ask ~= discovery price proxy
+    - tight enough spread to avoid triggering live spread gate
+    - non-zero top bid depth so depth gate does not block offline replay
+    """
+    best_ask = float(current_price)
+    best_bid = max(0.0001, round(best_ask * 0.95, 6))
+    return Orderbook(
+        token_id=token_id,
+        bids=[OrderbookLevel(price=best_bid, size=50.0)],
+        asks=[OrderbookLevel(price=best_ask, size=50.0)],
+        best_bid=best_bid,
+        best_ask=best_ask,
     )
-    conn.commit()
-    conn.close()
+
+
+def _build_replay_candidate(
+    row: dict,
+    current_price: float,
+    hours_at_discovery: float,
+    entry_levels: list[float],
+    market_score: Optional[MarketScore],
+    group_boost: float,
+) -> EntryCandidate:
+    token_id = row["token_id"]
+    market_id = row["market_id"]
+    outcome = row.get("outcome_name") or ""
+    category = row.get("category") or ""
+    question = row.get("question") or ""
+    volume = float(row.get("volume") or 0.0)
+    comment_count = int(row.get("comment_count") or 0)
+    neg_risk = bool(row.get("neg_risk", False))
+    neg_risk_group_id = row.get("neg_risk_market_id")
+    if neg_risk_group_id is not None:
+        neg_risk_group_id = str(neg_risk_group_id)
+
+    market_info = MarketInfo(
+        market_id=str(market_id),
+        condition_id=str(market_id),
+        question=question,
+        category=category,
+        token_ids=[str(token_id)],
+        outcome_names=[str(outcome or "Yes")],
+        best_ask=current_price,
+        best_bid=max(0.0001, round(current_price * 0.95, 6)),
+        last_trade_price=current_price,
+        volume_usdc=volume,
+        liquidity_usdc=0.0,
+        comment_count=comment_count,
+        fees_enabled=False,
+        end_date_ts=int(row.get("end_date") or 0) or None,
+        hours_to_close=hours_at_discovery,
+        neg_risk=neg_risk,
+        neg_risk_group_id=neg_risk_group_id,
+    )
+
+    base_score = market_score.total if market_score is not None else 0.0
+    total_score = base_score * group_boost
+    rationale = (
+        "offline replay candidate using shared OrderManager path; "
+        f"group_boost={group_boost:.2f} market_score={base_score:.3f}"
+    )
+
+    return EntryCandidate(
+        market_info=market_info,
+        token_id=str(token_id),
+        outcome_name=str(outcome),
+        current_price=current_price,
+        entry_fill_score=0.0,
+        resolution_score=0.0,
+        total_score=total_score,
+        suggested_entry_levels=list(entry_levels),
+        candidate_id=str(uuid.uuid4()),
+        rationale=rationale,
+        market_score=market_score,
+    )
 
 
 # ── Per-token simulation ───────────────────────────────────────────────────────
@@ -433,35 +501,33 @@ def simulate_token(
             return {"status": "rejected_market_score", "token_id": token_id, "market_id": market_id,
                     "market_score": market_score.total}
 
-    # ── Place resting BUY orders ───────────────────────────────────────────────
-    now_ts = int(time.time())
-    pending_buys: dict[str, dict] = {}
+    candidate = _build_replay_candidate(
+        row=row,
+        current_price=current_price,
+        hours_at_discovery=hours_at_discovery,
+        entry_levels=entry_levels,
+        market_score=market_score,
+        group_boost=group_boost,
+    )
 
-    for level in entry_levels:
-        sized = risk.size_position(token_id, entry_price=level, market_score=market_score)
-        if sized is None:
-            # Rejected by risk manager (score below min_market_score or anti-garbage)
-            continue
-        stake = max(0.001, round(sized.stake_usdc * group_boost, 6))
-        token_qty = stake / level
-        label = f"honest_{market_id}_{level}"
-        result = clob.place_limit_order(
-            token_id=token_id,
-            side="BUY",
-            price=level,
-            size=token_qty,
-            label=label,
-        )
-        if result.status == "live":
-            _insert_resting_order(
-                positions_db_path, result.order_id, token_id, market_id,
-                level, token_qty, mc.name, label=label,
-            )
-            pending_buys[result.order_id] = {
-                "price": level,
-                "remaining_qty": token_qty,
-                "filled_qty": 0.0,
-            }
+    synthetic_book = _synthetic_replay_orderbook(token_id, current_price)
+    with patch("execution.order_manager.get_orderbook", return_value=synthetic_book):
+        if mc.scanner_entry and current_price <= mc.entry_price_max:
+            placement_results = om.process_scanner_entry(candidate)
+            used_scanner_entry = True
+        else:
+            placement_results = om.process_candidate(candidate)
+            used_scanner_entry = False
+
+    pending_buys: dict[str, dict] = {
+        result.order_id: {
+            "price": float(result.price),
+            "remaining_qty": float(result.size),
+            "filled_qty": 0.0,
+        }
+        for result in placement_results
+        if result.status in ("live", "matched")
+    }
 
     if not pending_buys:
         return {"status": "no_orders_placed", "token_id": token_id, "market_id": market_id}
@@ -487,6 +553,13 @@ def simulate_token(
         except Exception as e:
             logger.warning(f"on_entry_filled error {token_id[:16]}: {e}")
         filled_entries += 1
+
+    # Scanner-entry orders are marketable at discovery by construction
+    # (synthetic best_ask == current_price), so replay them as immediate fills.
+    if used_scanner_entry:
+        for order_id, order in list(pending_buys.items()):
+            _dispatch_fill(order_id, order, order["remaining_qty"])
+            del pending_buys[order_id]
 
     # ── Replay trades after discovery time ────────────────────────────────────
     fill_gate = discovery_ts + activation_delay
