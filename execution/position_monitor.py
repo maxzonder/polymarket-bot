@@ -33,6 +33,21 @@ logger = setup_logger("position_monitor")
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 
+def _order_status(order: dict) -> str:
+    return str(order.get("status") or "").strip().lower()
+
+
+def _matched_size(order: dict, fallback: float = 0.0) -> float:
+    for key in ("size_matched", "sizeMatched", "filled_size", "filledSize", "matched_size", "matchedSize"):
+        try:
+            val = order.get(key)
+            if val is not None:
+                return float(val)
+        except (TypeError, ValueError):
+            pass
+    return float(fallback)
+
+
 class PositionMonitor:
     """
     Polls CLOB API for order status changes and Gamma API for market resolutions.
@@ -70,13 +85,12 @@ class PositionMonitor:
             logger.warning(f"get_all_orders failed: {e}")
             return
 
-        matched = [o for o in all_orders if o.get("status") in ("ORDER_STATUS_MATCHED", "matched")]
-
         conn = self._conn()
-        for order in matched:
+        for order in all_orders:
             order_id = order.get("id") or order.get("orderID")
             if not order_id:
                 continue
+            status = _order_status(order)
 
             # Check if it's a resting BUY
             resting = conn.execute(
@@ -84,18 +98,33 @@ class PositionMonitor:
                 (order_id,),
             ).fetchone()
             if resting:
-                fill_price = float(order.get("price", resting["price"]))
-                fill_qty = float(order.get("size_matched", resting["size"]))
-                conn.close()
-                self.om.on_entry_filled(
-                    order_id=order_id,
-                    token_id=resting["token_id"],
-                    market_id=resting["market_id"],
-                    fill_price=fill_price,
-                    fill_quantity=fill_qty,
-                    outcome_name=resting["outcome_name"] or "",
-                )
-                conn = self._conn()
+                total_size = float(resting["size"])
+                stored_filled = float(resting["filled_quantity"] or 0.0)
+                fallback = total_size if "matched" in status else stored_filled
+                cumulative_filled = min(total_size, _matched_size(order, fallback=fallback))
+                if cumulative_filled > stored_filled + 1e-9:
+                    if cumulative_filled >= total_size * 0.99:
+                        fill_price = float(order.get("price", resting["price"]))
+                        conn.close()
+                        self.om.on_entry_filled(
+                            order_id=order_id,
+                            token_id=resting["token_id"],
+                            market_id=resting["market_id"],
+                            fill_price=fill_price,
+                            fill_quantity=total_size,
+                            outcome_name=resting["outcome_name"] or "",
+                        )
+                        conn = self._conn()
+                    else:
+                        conn.execute(
+                            "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
+                            (cumulative_filled, order_id),
+                        )
+                        conn.commit()
+                        logger.info(
+                            f"Real BUY partial fill: {order_id[:8]} "
+                            f"filled={cumulative_filled:.2f}/{total_size:.2f}"
+                        )
                 continue
 
             # Check if it's a TP SELL
@@ -104,11 +133,16 @@ class PositionMonitor:
                 (order_id,),
             ).fetchone()
             if tp:
-                fill_price = float(order.get("price", tp["sell_price"]))
-                fill_qty = float(order.get("size_matched", tp["sell_quantity"]))
-                conn.close()
-                self.om.on_tp_filled(order_id, fill_price, fill_qty)
-                conn = self._conn()
+                total_size = float(tp["sell_quantity"])
+                stored_filled = float(tp["filled_quantity"] or 0.0)
+                fallback = total_size if "matched" in status else stored_filled
+                cumulative_filled = min(total_size, _matched_size(order, fallback=fallback))
+                if cumulative_filled > stored_filled + 1e-9:
+                    fill_price = float(order.get("price", tp["sell_price"]))
+                    delta = cumulative_filled - stored_filled
+                    conn.close()
+                    self.om.on_tp_filled(order_id, fill_price, delta)
+                    conn = self._conn()
 
         conn.close()
 
@@ -170,6 +204,7 @@ class PositionMonitor:
                 conn = self._conn()
             else:
                 # Partial fill — accumulate, keep order live
+                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
                 conn.execute(
                     "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
                     (new_filled, order["order_id"]),
@@ -189,6 +224,10 @@ class PositionMonitor:
         for tp in tp_live:
             token_id = tp["token_id"]
             sell_price = float(tp["sell_price"])
+            filled_so_far = float(tp["filled_quantity"] or 0.0)
+            remaining = float(tp["sell_quantity"]) - filled_so_far
+            if remaining < 0.0001:
+                continue
             try:
                 book = get_orderbook(token_id)
             except Exception:
@@ -198,10 +237,11 @@ class PositionMonitor:
             if best_bid is not None and best_bid >= sell_price:
                 # Cap fill quantity at available bid depth — same realism principle as BUY side.
                 available_bid_depth = book.bid_depth_at(sell_price)
-                fill_qty = min(float(tp["sell_quantity"]), available_bid_depth)
+                fill_qty = min(remaining, available_bid_depth)
                 if fill_qty < 0.0001:
                     continue  # no real bid depth at sell level — skip
-                self.clob.paper_simulate_fill(tp["order_id"], best_bid, fill_size=fill_qty)
+                new_filled = filled_so_far + fill_qty
+                self.clob.paper_simulate_fill(tp["order_id"], best_bid, fill_size=new_filled)
                 conn.close()
                 self.om.on_tp_filled(tp["order_id"], sell_price, fill_qty)
                 logger.info(

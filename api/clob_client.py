@@ -265,18 +265,19 @@ class ClobClient:
         fill_size: Optional[float] = None,
     ) -> None:
         """
-        Called by FillEmulator: mark paper order as matched.
-        Only fills if fill_price crosses the order price.
+        Update a paper order with its cumulative matched quantity.
 
-        fill_size: actual filled quantity (depth-capped). If None, uses full order size.
-        This keeps paper_orders.filled_size consistent with what on_entry_filled /
-        on_tp_filled receive, preventing position-state divergence.
+        Only applies if fill_price crosses the order price.
+
+        fill_size: cumulative matched quantity after this fill event. If None, assumes
+        the order is fully filled. Partial fills keep the order `live`; only a near-
+        complete cumulative fill flips status to `matched`.
         """
         now = int(time.time())
         conn = sqlite3.connect(str(self.paper_db_path))
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM paper_orders WHERE order_id = ? AND status = 'live'",
+            "SELECT * FROM paper_orders WHERE order_id = ? AND status IN ('live', 'matched')",
             (order_id,),
         ).fetchone()
         if not row:
@@ -290,10 +291,13 @@ class ClobClient:
             or (side == "SELL" and fill_price >= order_price)
         )
         if should_fill:
-            actual_filled = fill_size if fill_size is not None else float(row["size"])
+            order_size = float(row["size"])
+            cumulative_filled = fill_size if fill_size is not None else order_size
+            cumulative_filled = max(float(row["filled_size"] or 0.0), min(float(cumulative_filled), order_size))
+            new_status = "matched" if cumulative_filled >= order_size * 0.99 else "live"
             conn.execute(
-                "UPDATE paper_orders SET status='matched', filled_size=?, updated_at=? WHERE order_id=?",
-                (actual_filled, now, order_id),
+                "UPDATE paper_orders SET status=?, filled_size=?, updated_at=? WHERE order_id=?",
+                (new_status, cumulative_filled, now, order_id),
             )
         conn.commit()
         conn.close()
