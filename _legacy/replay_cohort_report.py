@@ -139,7 +139,7 @@ def run(months: tuple[str, ...], limit: Optional[int], output_dir: Path) -> None
     config = BotConfig(mode="big_swan_mode", dry_run=True)
     mc = config.mode_config
     clob = ClobClient(private_key="replay_dummy", dry_run=True, paper_db_path=paper_db)
-    risk = RiskManager(mc, balance_usdc=100.0)
+    risk = RiskManager(mc, balance_usdc=config.paper_initial_balance_usdc)
     om = OrderManager(config, clob, risk)
 
     db_conn = sqlite3.connect(DB_PATH)
