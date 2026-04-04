@@ -1,25 +1,30 @@
-"""
-Dry-run lifecycle validation harness for the polymarket trading bot.
+"""Current execution validation harness for the polymarket trading bot.
 
-Validates 5 scenarios without hitting live APIs.
-Run with: python3 scripts/validate_dry_run.py
+Focus: mechanism correctness, not strategy quality.
+
+Run with:
+    python3 scripts/validate_dry_run.py
 """
 
+import json
 import os
-import sys
 import sqlite3
+import sys
 import tempfile
+import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import execution.order_manager as om_module
 from api.clob_client import ClobClient, Orderbook, OrderbookLevel
 from api.gamma_client import MarketInfo
 from config import BotConfig, FAST_TP_MODE, BIG_SWAN_MODE
 from execution.order_manager import OrderManager
 from execution.position_monitor import PositionMonitor
+from scripts.run_honest_replay import simulate_token
 from strategy.risk_manager import RiskManager
 from strategy.screener import EntryCandidate
 
@@ -27,8 +32,8 @@ from strategy.screener import EntryCandidate
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def fake_book(best_ask, best_bid, ask_depth=50.0, bid_depth=50.0):
-    asks = [OrderbookLevel(price=best_ask, size=ask_depth)] if best_ask else []
-    bids = [OrderbookLevel(price=best_bid, size=bid_depth)] if best_bid else []
+    asks = [OrderbookLevel(price=best_ask, size=ask_depth)] if best_ask is not None else []
+    bids = [OrderbookLevel(price=best_bid, size=bid_depth)] if best_bid is not None else []
     return Orderbook(
         token_id="fake",
         bids=bids,
@@ -38,11 +43,11 @@ def fake_book(best_ask, best_bid, ask_depth=50.0, bid_depth=50.0):
     )
 
 
-def fake_market():
+def fake_market(question: str = "Test market?") -> MarketInfo:
     return MarketInfo(
         market_id="mkt_test",
         condition_id="cond_test",
-        question="Test market?",
+        question=question,
         category="crypto",
         token_ids=["tok_yes", "tok_no"],
         outcome_names=["Yes", "No"],
@@ -58,9 +63,9 @@ def fake_market():
     )
 
 
-def fake_candidate(price, entry_levels, mode_config):
+def fake_candidate(price, entry_levels, market=None):
     return EntryCandidate(
-        market_info=fake_market(),
+        market_info=market or fake_market(),
         token_id="tok_yes",
         outcome_name="Yes",
         current_price=price,
@@ -68,20 +73,16 @@ def fake_candidate(price, entry_levels, mode_config):
         resolution_score=0.3,
         total_score=0.4,
         suggested_entry_levels=entry_levels,
+        candidate_id="cand_test",
     )
 
 
 def make_om(tmp_dir: Path, mode_config, balance: float | None = None):
-    """Build an OrderManager wired to a temp DB with a paper ClobClient.
-
-    POSITIONS_DB is patched at the module level before construction so the
-    OrderManager constructor (which calls _init_db()) never touches the real
-    data directory — not even once.
-    """
     config = BotConfig(
         mode=mode_config.name,
         dry_run=True,
         private_key="fake_key",
+        paper_initial_balance_usdc=(balance if balance is not None else BotConfig().paper_initial_balance_usdc),
     )
     if balance is None:
         balance = config.paper_initial_balance_usdc
@@ -94,391 +95,368 @@ def make_om(tmp_dir: Path, mode_config, balance: float | None = None):
     tmp_positions_db = tmp_dir / "positions.db"
     with patch("execution.order_manager.POSITIONS_DB", tmp_positions_db):
         om = OrderManager(config, clob, risk)
-    # _db_path is already set to tmp path by the patched constructor
     return om, config, clob
 
 
 def make_pm(tmp_dir: Path, config, clob, om):
-    """Build a PositionMonitor pointing at the same temp DB."""
     pm = PositionMonitor(config, clob, om)
     pm._db_path = str(tmp_dir / "positions.db")
     return pm
 
 
-def read_position(db_path: str, token_id: str) -> dict | None:
+def read_one(db_path: str, query: str, params=()):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM positions WHERE token_id=? ORDER BY opened_at DESC LIMIT 1",
-        (token_id,),
-    ).fetchone()
+    row = conn.execute(query, params).fetchone()
     conn.close()
     return dict(row) if row else None
 
 
-def read_paper_order(paper_db_path: str, order_id: str) -> dict | None:
+def count_rows(db_path: str, table: str, where: str = "", params=()):
+    conn = sqlite3.connect(db_path)
+    sql = f"SELECT COUNT(*) FROM {table}"
+    if where:
+        sql += f" WHERE {where}"
+    count = conn.execute(sql, params).fetchone()[0]
+    conn.close()
+    return int(count)
+
+
+def insert_resting_order(db_path: str, order_id: str, price: float, size: float, mode: str, token_id: str = "tok_yes", market_id: str = "mkt_test", outcome_name: str = "Yes"):
+    now = int(time.time())
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO resting_orders "
+        "(order_id, token_id, market_id, outcome_name, side, price, size, status, created_at, expires_at, mode) "
+        "VALUES (?, ?, ?, ?, 'BUY', ?, ?, 'live', ?, 0, ?)",
+        (order_id, token_id, market_id, outcome_name, price, size, now, mode),
+    )
+    conn.commit()
+    conn.close()
+
+
+def insert_paper_order(paper_db_path: str, order_id: str, side: str, price: float, size: float, token_id: str = "tok_yes", label: str = "test"):
+    now = int(time.time())
     conn = sqlite3.connect(paper_db_path)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM paper_orders WHERE order_id=?", (order_id,)
-    ).fetchone()
+    conn.execute(
+        "INSERT INTO paper_orders "
+        "(order_id, token_id, side, price, size, status, created_at, updated_at, label) "
+        "VALUES (?, ?, ?, ?, ?, 'live', ?, ?, ?)",
+        (order_id, token_id, side, price, size, now, now, label),
+    )
+    conn.commit()
     conn.close()
-    return dict(row) if row else None
 
 
-def read_resting_orders(db_path: str, token_id: str, status: str = "live") -> list[dict]:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM resting_orders WHERE token_id=? AND status=?",
-        (token_id, status),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+# ── Scenario 1: scanner entry path ───────────────────────────────────────────
 
-
-# ── Scenario 1: scanner_entry ─────────────────────────────────────────────────
-
-def scenario_scanner_entry() -> tuple[bool, str]:
-    """
-    fast_tp_mode, price=0.04 inside zone (<=0.05).
-    Call om.process_scanner_entry(candidate).
-    Verify: order placed at best_ask (0.04), NOT at resting ladder levels.
-    """
+def scenario_scanner_entry_best_ask() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, FAST_TP_MODE)
-
-        # book: best_ask=0.04, best_bid=0.03, deep liquidity
+        om, _, _ = make_om(tmp_dir, FAST_TP_MODE)
         book = fake_book(best_ask=0.04, best_bid=0.03, ask_depth=50.0, bid_depth=50.0)
-        candidate = fake_candidate(
-            price=0.04,
-            entry_levels=list(FAST_TP_MODE.entry_price_levels),
-            mode_config=FAST_TP_MODE,
-        )
+        candidate = fake_candidate(0.04, list(FAST_TP_MODE.entry_price_levels))
 
-        with patch("execution.order_manager.get_orderbook", return_value=book), \
-             patch("execution.position_monitor.get_orderbook", return_value=book):
+        with patch("execution.order_manager.get_orderbook", return_value=book):
             results = om.process_scanner_entry(candidate)
 
         if not results:
-            return False, "No orders returned from process_scanner_entry"
+            return False, "No scanner-entry order placed"
+        if abs(results[0].price - 0.04) > 1e-9:
+            return False, f"Expected best_ask execution at 0.04, got {results[0].price}"
 
-        result = results[0]
-        # Should be placed at best_ask (0.04)
-        if abs(result.price - 0.04) > 1e-9:
-            return False, f"Expected order price 0.04, got {result.price}"
-
-        # Make sure the price is NOT one of the ladder levels (0.005/0.01/0.02/0.03/0.05)
-        ladder_levels = set(FAST_TP_MODE.entry_price_levels)
-        # 0.04 is NOT in the ladder (ladder has 0.005, 0.01, 0.02, 0.03, 0.05)
-        if result.price in ladder_levels:
-            return False, f"Order was placed at a ladder level {result.price}, should be at best_ask"
-
-        # Confirm resting order saved in DB at 0.04
-        orders = read_resting_orders(str(tmp_dir / "positions.db"), "tok_yes")
-        if not orders:
-            return False, "No resting order saved in DB"
-        if abs(orders[0]["price"] - 0.04) > 1e-9:
-            return False, f"DB resting order price={orders[0]['price']}, expected 0.04"
-
+        row = read_one(str(tmp_dir / "positions.db"), "SELECT price FROM resting_orders WHERE order_id=?", (results[0].order_id,))
+        if row is None or abs(float(row["price"]) - 0.04) > 1e-9:
+            return False, "Resting order record not saved at best_ask"
         return True, ""
 
 
-# ── Scenario 2: resting_bid ───────────────────────────────────────────────────
+# ── Scenario 2: resting bid ladder placement ────────────────────────────────
 
-def scenario_resting_bid() -> tuple[bool, str]:
-    """
-    big_swan_mode, price=0.15 above zone max (0.30 is the screen max, but
-    entry_price_levels are (0.001, 0.002, 0.005, 0.01) — all below 0.15).
-    Call om.process_candidate(candidate).
-    Verify: resting bids placed at levels < 0.15.
-    """
+def scenario_resting_bid_uses_entry_levels() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
-
-        # book: current market price is 0.15; deep top-of-book
+        om, _, _ = make_om(tmp_dir, BIG_SWAN_MODE)
         book = fake_book(best_ask=0.15, best_bid=0.14, ask_depth=50.0, bid_depth=50.0)
-        candidate = fake_candidate(
-            price=0.15,
-            entry_levels=list(BIG_SWAN_MODE.entry_price_levels),
-            mode_config=BIG_SWAN_MODE,
-        )
+        candidate = fake_candidate(0.15, list(BIG_SWAN_MODE.entry_price_levels))
 
-        with patch("execution.order_manager.get_orderbook", return_value=book), \
-             patch("execution.position_monitor.get_orderbook", return_value=book):
+        with patch("execution.order_manager.get_orderbook", return_value=book):
             results = om.process_candidate(candidate)
 
         if not results:
-            return False, "No orders returned from process_candidate"
-
-        # All placed prices must be < 0.15 (the current market price)
-        for r in results:
-            if r.price >= 0.15:
-                return False, f"Resting bid at {r.price} >= current price 0.15"
-
-        # Prices should match entry_price_levels (0.001, 0.002, 0.005, 0.01)
-        placed_prices = {r.price for r in results}
-        expected_levels = set(BIG_SWAN_MODE.entry_price_levels)
-        unexpected = placed_prices - expected_levels
-        if unexpected:
-            return False, f"Unexpected bid prices placed: {unexpected}"
-
+            return False, "No resting bids placed"
+        placed_prices = {float(r.price) for r in results}
+        expected_prices = set(BIG_SWAN_MODE.entry_price_levels)
+        if placed_prices != expected_prices:
+            return False, f"Placed prices {placed_prices}, expected {expected_prices}"
         return True, ""
 
 
-# ── Scenario 3: partial_fill_realism ─────────────────────────────────────────
+# ── Scenario 3: balance gate ─────────────────────────────────────────────────
 
-def scenario_partial_fill_realism() -> tuple[bool, str]:
-    """
-    Resting bid at 0.01, best_ask=0.008 (would fill), ask_depth_at(0.01)=0.5
-    while order size=2.0. Trigger pm._check_fills_dry_run().
-    Verify fill_quantity=0.5 propagates to position.
-    """
+def scenario_balance_gate_blocks_extra_resting_bids() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        om, _, _ = make_om(tmp_dir, BIG_SWAN_MODE, balance=0.06)
+        book = fake_book(best_ask=0.20, best_bid=0.19, ask_depth=50.0, bid_depth=50.0)
+        candidate = fake_candidate(0.20, list(BIG_SWAN_MODE.entry_price_levels))
+
+        with patch("execution.order_manager.get_orderbook", return_value=book):
+            results = om.process_candidate(candidate)
+
+        if len(results) != 1:
+            return False, f"Expected 1 resting bid due to balance gate, got {len(results)}"
+        if count_rows(str(tmp_dir / "positions.db"), "resting_orders") != 1:
+            return False, "Expected exactly 1 resting order in DB"
+        bal = read_one(str(tmp_dir / "positions.db"), "SELECT cash_balance FROM paper_balance WHERE id=1")
+        if bal is None or abs(float(bal["cash_balance"]) - 0.06) > 1e-9:
+            return False, "Cash balance should not be debited before entry fill"
+        return True, ""
+
+
+# ── Scenario 4: dry partial BUY accumulation ────────────────────────────────
+
+def scenario_dry_partial_buy_accumulates_without_position() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
         pm = make_pm(tmp_dir, config, clob, om)
 
-        # First, manually insert a resting order at 0.01 with size=2.0
-        import time as _time
-        now = int(_time.time())
-        conn = sqlite3.connect(str(tmp_dir / "positions.db"))
-        order_id = "test_order_partial_001"
-        conn.execute(
-            "INSERT INTO resting_orders "
-            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode) "
-            "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, ?, ?)",
-            (order_id, "tok_yes", "mkt_test", 0.01, 2.0, now, now + 86400, "big_swan_mode"),
-        )
-        conn.commit()
-        conn.close()
+        insert_resting_order(str(tmp_dir / "positions.db"), "ord_partial_buy", 0.01, 2.0, BIG_SWAN_MODE.name)
+        insert_paper_order(str(tmp_dir / "paper.db"), "ord_partial_buy", "BUY", 0.01, 2.0)
 
-        # Also insert the order into paper_trades.db so paper_simulate_fill can find it
-        paper_conn = sqlite3.connect(str(tmp_dir / "paper.db"))
-        paper_conn.execute(
-            "INSERT INTO paper_orders "
-            "(order_id, token_id, side, price, size, status, created_at, updated_at, label) "
-            "VALUES (?, 'tok_yes', 'BUY', 0.01, 2.0, 'live', ?, ?, 'test')",
-            (order_id, now, now),
-        )
-        paper_conn.commit()
-        paper_conn.close()
-
-        # book: best_ask=0.008 (<= 0.01 so fills), but only 0.5 depth at or below 0.01
         book = fake_book(best_ask=0.008, best_bid=0.006, ask_depth=0.5, bid_depth=50.0)
-
-        with patch("execution.order_manager.get_orderbook", return_value=book), \
-             patch("execution.position_monitor.get_orderbook", return_value=book):
+        with patch("execution.position_monitor.get_orderbook", return_value=book):
             pm._check_fills_dry_run()
 
-        # Check position was created with fill_quantity=0.5 (depth-capped)
-        pos = read_position(str(tmp_dir / "positions.db"), "tok_yes")
-        if pos is None:
-            return False, "No position created after simulated fill"
+        resting = read_one(str(tmp_dir / "positions.db"), "SELECT filled_quantity, status FROM resting_orders WHERE order_id='ord_partial_buy'")
+        paper = read_one(str(tmp_dir / "paper.db"), "SELECT filled_size, status FROM paper_orders WHERE order_id='ord_partial_buy'")
+        pos_count = count_rows(str(tmp_dir / "positions.db"), "positions")
 
-        actual_qty = float(pos["token_quantity"])
-        if abs(actual_qty - 0.5) > 1e-6:
-            return False, f"Expected token_quantity=0.5 (depth-capped), got {actual_qty}"
-
-        # Also verify paper_orders.filled_size is consistent with position state.
-        # This is the full consistency claim: paper DB and position DB must agree.
-        paper_order = read_paper_order(str(tmp_dir / "paper.db"), order_id)
-        if paper_order is None:
-            return False, "Paper order not found after fill"
-        actual_filled_size = float(paper_order.get("filled_size") or 0.0)
-        if abs(actual_filled_size - 0.5) > 1e-6:
-            return False, (
-                f"paper_orders.filled_size={actual_filled_size}, "
-                f"expected 0.5 (should match position token_quantity)"
-            )
-
+        if resting is None or abs(float(resting["filled_quantity"]) - 0.5) > 1e-9:
+            return False, f"Expected resting filled_quantity=0.5, got {resting}"
+        if paper is None or abs(float(paper["filled_size"]) - 0.5) > 1e-9 or paper["status"] != "live":
+            return False, f"Expected paper order live with filled_size=0.5, got {paper}"
+        if pos_count != 0:
+            return False, f"Expected no open position yet for partial BUY, got {pos_count}"
         return True, ""
 
 
-# ── Scenario 4: tp_pnl_accounting ────────────────────────────────────────────
+# ── Scenario 5: TP partial sync ──────────────────────────────────────────────
 
-def scenario_tp_pnl_accounting() -> tuple[bool, str]:
-    """
-    Entry filled at 0.01 for 2.0 tokens.
-    TP fill at 0.05 for 1.0 tokens → realized_pnl = (0.05 - 0.01) * 1.0 = 0.04.
-    Market resolves as winner (price=1.0).
-    Verify final realized_pnl = 0.04 + (1.0 - 0.01) * moonbag_qty (additive).
-    """
+def scenario_tp_partial_fill_keeps_orders_live_until_full() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
+        om, _, clob = make_om(tmp_dir, BIG_SWAN_MODE)
+        insert_resting_order(str(tmp_dir / "positions.db"), "entry_tp_sync", 0.005, 100.0, BIG_SWAN_MODE.name)
+        insert_paper_order(str(tmp_dir / "paper.db"), "entry_tp_sync", "BUY", 0.005, 100.0)
 
-        # First, create a resting order entry so on_entry_filled can mark it matched
-        import time as _time
-        now = int(_time.time())
-        conn = sqlite3.connect(str(tmp_dir / "positions.db"))
-        entry_order_id = "entry_order_tp_test"
-        conn.execute(
-            "INSERT INTO resting_orders "
-            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode) "
-            "VALUES (?, ?, ?, 'BUY', 0.01, 2.0, 'live', ?, ?, ?)",
-            (entry_order_id, "tok_yes", "mkt_test", now, now + 86400, "big_swan_mode"),
+        om.on_entry_filled("entry_tp_sync", "tok_yes", "mkt_test", 0.005, 100.0, "Yes")
+        tp = read_one(
+            str(tmp_dir / "positions.db"),
+            "SELECT order_id, sell_price, sell_quantity FROM tp_orders WHERE label='tp_100x' LIMIT 1",
         )
-        conn.commit()
-        conn.close()
+        if tp is None:
+            return False, "No tp_100x order created"
 
-        # Trigger entry fill at 0.01 for 2.0 tokens
-        om.on_entry_filled(
-            order_id=entry_order_id,
-            token_id="tok_yes",
-            market_id="mkt_test",
-            fill_price=0.01,
-            fill_quantity=2.0,
-            outcome_name="Yes",
-        )
+        clob.paper_simulate_fill(tp["order_id"], float(tp["sell_price"]), 4.0)
+        om.on_tp_filled(tp["order_id"], float(tp["sell_price"]), 4.0)
+        row_partial = read_one(str(tmp_dir / "positions.db"), "SELECT status, filled_quantity FROM tp_orders WHERE order_id=?", (tp["order_id"],))
+        paper_partial = read_one(str(tmp_dir / "paper.db"), "SELECT status, filled_size FROM paper_orders WHERE order_id=?", (tp["order_id"],))
 
-        # Find the TP order in the DB (label starts with "tp_")
-        db_path = str(tmp_dir / "positions.db")
+        clob.paper_simulate_fill(tp["order_id"], float(tp["sell_price"]), 10.0)
+        om.on_tp_filled(tp["order_id"], float(tp["sell_price"]), 6.0)
+        row_full = read_one(str(tmp_dir / "positions.db"), "SELECT status, filled_quantity FROM tp_orders WHERE order_id=?", (tp["order_id"],))
+        paper_full = read_one(str(tmp_dir / "paper.db"), "SELECT status, filled_size FROM paper_orders WHERE order_id=?", (tp["order_id"],))
+
+        if row_partial is None or row_partial["status"] != "live" or abs(float(row_partial["filled_quantity"]) - 4.0) > 1e-9:
+            return False, f"Expected TP partial to stay live at 4.0, got {row_partial}"
+        if paper_partial is None or paper_partial["status"] != "live" or abs(float(paper_partial["filled_size"]) - 4.0) > 1e-9:
+            return False, f"Expected paper TP partial to stay live at 4.0, got {paper_partial}"
+        if row_full is None or row_full["status"] != "matched" or abs(float(row_full["filled_quantity"]) - 10.0) > 1e-9:
+            return False, f"Expected TP full to be matched at 10.0, got {row_full}"
+        if paper_full is None or paper_full["status"] != "matched" or abs(float(paper_full["filled_size"]) - 10.0) > 1e-9:
+            return False, f"Expected paper TP full to be matched at 10.0, got {paper_full}"
+        return True, ""
+
+
+# ── Scenario 6: resolution quantity consistency ─────────────────────────────
+
+def scenario_resolution_uses_actual_moonbag_leg() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        om, _, _ = make_om(tmp_dir, BIG_SWAN_MODE)
+        insert_resting_order(str(tmp_dir / "positions.db"), "entry_resolution", 0.01, 100.0, BIG_SWAN_MODE.name)
+
+        om.on_entry_filled("entry_resolution", "tok_yes", "mkt_test", 0.01, 100.0, "Yes")
+        om.on_market_resolved("tok_yes", True)
+
+        pos = read_one(str(tmp_dir / "positions.db"), "SELECT moonbag_quantity, realized_pnl FROM positions WHERE token_id='tok_yes'")
+        moonbag = read_one(str(tmp_dir / "positions.db"), "SELECT sell_quantity FROM tp_orders WHERE token_id='tok_yes' AND label='moonbag_resolution'")
+        if pos is None or moonbag is None:
+            return False, "Missing position or moonbag row"
+        if abs(float(pos["moonbag_quantity"]) - 100.0) > 1e-9:
+            return False, f"Expected moonbag_quantity=100.0, got {pos['moonbag_quantity']}"
+        if abs(float(moonbag["sell_quantity"]) - 100.0) > 1e-9:
+            return False, f"Expected moonbag_resolution sell_quantity=100.0, got {moonbag['sell_quantity']}"
+        if abs(float(pos["realized_pnl"]) - 99.0) > 1e-9:
+            return False, f"Expected winner resolution pnl=99.0, got {pos['realized_pnl']}"
+        return True, ""
+
+
+# ── Scenario 7: real-mode partial handling ──────────────────────────────────
+
+def scenario_real_mode_monitor_handles_partial_cumulative_fills() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        db_path = tmp_dir / "positions.db"
         conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        tp_rows = conn.execute(
-            "SELECT * FROM tp_orders WHERE token_id='tok_yes' AND status='live'"
-        ).fetchall()
-        conn.close()
-
-        if not tp_rows:
-            return False, "No live TP orders found after on_entry_filled"
-
-        # Pick first live TP order (not moonbag)
-        tp_order = None
-        for row in tp_rows:
-            if row["label"] != "moonbag_resolution":
-                tp_order = dict(row)
-                break
-
-        if tp_order is None:
-            return False, "No non-moonbag TP order found"
-
-        # Use the actual TP order quantity from the system — not a hardcoded value.
-        # For big_swan_mode entry at 0.01, 2.0 tokens: tp_5x sell_qty = 2.0 * 0.20 = 0.40
-        tp_fill_qty = float(tp_order["sell_quantity"])
-        tp_fill_price = float(tp_order["sell_price"])
-
-        om.on_tp_filled(
-            order_id=tp_order["order_id"],
-            fill_price=tp_fill_price,
-            fill_quantity=tp_fill_qty,
+        conn.executescript(
+            """
+            CREATE TABLE resting_orders (
+                order_id TEXT PRIMARY KEY,
+                token_id TEXT NOT NULL,
+                market_id TEXT NOT NULL,
+                outcome_name TEXT,
+                price REAL NOT NULL,
+                size REAL NOT NULL,
+                filled_quantity REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'live'
+            );
+            CREATE TABLE tp_orders (
+                order_id TEXT PRIMARY KEY,
+                position_id TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                sell_price REAL NOT NULL,
+                sell_quantity REAL NOT NULL,
+                filled_quantity REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'live'
+            );
+            """
         )
-
-        # Check intermediate PnL
-        pos = read_position(db_path, "tok_yes")
-        if pos is None:
-            return False, "Position not found after TP fill"
-
-        expected_tp_pnl = (tp_fill_price - 0.01) * tp_fill_qty
-        actual_pnl = float(pos["realized_pnl"] or 0.0)
-        if abs(actual_pnl - expected_tp_pnl) > 1e-6:
-            return False, (
-                f"After TP fill, expected realized_pnl={expected_tp_pnl:.6f} "
-                f"(price={tp_fill_price} qty={tp_fill_qty}), got {actual_pnl:.6f}"
-            )
-
-        # Now market resolves as winner
-        om.on_market_resolved(token_id="tok_yes", is_winner=True)
-
-        pos_after = read_position(db_path, "tok_yes")
-        if pos_after is None:
-            return False, "Position not found after market resolution"
-
-        # moonbag_fraction for big_swan_mode = 0.60
-        moonbag_qty = 2.0 * BIG_SWAN_MODE.moonbag_fraction  # 1.2
-        moonbag_pnl = (1.0 - 0.01) * moonbag_qty
-        expected_final_pnl = expected_tp_pnl + moonbag_pnl
-
-        actual_final_pnl = float(pos_after["realized_pnl"] or 0.0)
-        if abs(actual_final_pnl - expected_final_pnl) > 1e-6:
-            return (
-                False,
-                f"After resolution, expected realized_pnl={expected_final_pnl:.6f} "
-                f"(tp={expected_tp_pnl:.4f} + moonbag={moonbag_pnl:.4f}), "
-                f"got {actual_final_pnl:.6f}",
-            )
-
-        if pos_after["status"] != "resolved":
-            return False, f"Expected position status='resolved', got {pos_after['status']!r}"
-
-        return True, ""
-
-
-# ── Scenario 5: losing_resolution ────────────────────────────────────────────
-
-def scenario_losing_resolution() -> tuple[bool, str]:
-    """
-    Entry filled at 0.02 for 3.0 tokens.
-    Market resolves to 0 (loser).
-    Verify realized_pnl = (0 - 0.02) * moonbag_qty (negative).
-    """
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
-
-        import time as _time
-        now = int(_time.time())
-        conn = sqlite3.connect(str(tmp_dir / "positions.db"))
-        entry_order_id = "entry_order_loser_test"
         conn.execute(
-            "INSERT INTO resting_orders "
-            "(order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode) "
-            "VALUES (?, ?, ?, 'BUY', 0.02, 3.0, 'live', ?, ?, ?)",
-            (entry_order_id, "tok_yes", "mkt_test", now, now + 86400, "big_swan_mode"),
+            "INSERT INTO resting_orders (order_id, token_id, market_id, outcome_name, price, size, status) VALUES (?,?,?,?,?,?, 'live')",
+            ("ord_real_partial", "tok_yes", "mkt_test", "Yes", 0.01, 2.0),
+        )
+        conn.execute(
+            "INSERT INTO tp_orders (order_id, position_id, token_id, sell_price, sell_quantity, filled_quantity, status) VALUES (?,?,?,?,?,?, 'live')",
+            ("tp_real_partial", "pos1", "tok_yes", 0.50, 10.0, 4.0),
         )
         conn.commit()
         conn.close()
 
-        # Entry filled at 0.02 for 3.0 tokens
-        om.on_entry_filled(
-            order_id=entry_order_id,
-            token_id="tok_yes",
-            market_id="mkt_test",
-            fill_price=0.02,
-            fill_quantity=3.0,
-            outcome_name="Yes",
-        )
+        cfg = BotConfig(mode="big_swan_mode", dry_run=False, private_key="fake")
+        clob = MagicMock()
+        clob.get_all_orders.return_value = [
+            {"id": "ord_real_partial", "status": "PARTIAL", "price": 0.01, "size_matched": 0.5},
+            {"id": "tp_real_partial", "status": "PARTIAL", "price": 0.50, "size_matched": 7.5},
+        ]
 
-        # Market resolves as loser (price=0)
-        om.on_market_resolved(token_id="tok_yes", is_winner=False)
+        class DummyOM:
+            def __init__(self):
+                self.entry_calls = []
+                self.tp_calls = []
 
-        db_path = str(tmp_dir / "positions.db")
-        pos = read_position(db_path, "tok_yes")
-        if pos is None:
-            return False, "Position not found after losing resolution"
+            def on_entry_filled(self, **kwargs):
+                self.entry_calls.append(kwargs)
 
-        if pos["status"] != "resolved":
-            return False, f"Expected status='resolved', got {pos['status']!r}"
+            def on_tp_filled(self, order_id, fill_price, fill_quantity):
+                self.tp_calls.append((order_id, fill_price, fill_quantity))
 
-        # moonbag_qty = 3.0 * 0.60 = 1.8
-        moonbag_qty = 3.0 * BIG_SWAN_MODE.moonbag_fraction
-        # resolution_price=0.0, so moonbag_pnl = (0.0 - 0.02) * 1.8 = -0.036
-        expected_pnl = (0.0 - 0.02) * moonbag_qty
+        om = DummyOM()
+        pm = PositionMonitor(cfg, clob, om)
+        pm._db_path = str(db_path)
+        pm._check_fills_real()
 
-        actual_pnl = float(pos["realized_pnl"] or 0.0)
-        if abs(actual_pnl - expected_pnl) > 1e-6:
-            return (
-                False,
-                f"Expected realized_pnl={expected_pnl:.6f} (negative), got {actual_pnl:.6f}",
-            )
-
-        if actual_pnl >= 0:
-            return False, f"Expected negative PnL for losing position, got {actual_pnl}"
-
+        resting = read_one(str(db_path), "SELECT filled_quantity FROM resting_orders WHERE order_id='ord_real_partial'")
+        if resting is None or abs(float(resting["filled_quantity"]) - 0.5) > 1e-9:
+            return False, f"Expected recorded real BUY partial=0.5, got {resting}"
+        if om.entry_calls:
+            return False, f"Expected no full position open on partial BUY, got {om.entry_calls}"
+        if len(om.tp_calls) != 1 or abs(float(om.tp_calls[0][2]) - 3.5) > 1e-9:
+            return False, f"Expected TP delta fill=3.5, got {om.tp_calls}"
         return True, ""
 
 
-# ── Runner ────────────────────────────────────────────────────────────────────
+# ── Scenario 8: honest replay entry path + balance gate ─────────────────────
+
+def scenario_honest_replay_respects_balance_gate() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        positions_db = tmp_dir / "positions.db"
+        paper_db = tmp_dir / "paper.db"
+        trades_path = tmp_dir / "tok1.json"
+        trades_path.write_text(
+            json.dumps(
+                [
+                    {"timestamp": 1_700_000_000, "price": 0.20, "size": 100.0, "side": "BUY"},
+                    {"timestamp": 1_700_000_100, "price": 0.20, "size": 100.0, "side": "BUY"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = BotConfig(
+            mode="big_swan_mode",
+            dry_run=True,
+            private_key="fake",
+            paper_initial_balance_usdc=0.06,
+        )
+        clob = ClobClient(private_key="fake", dry_run=True, paper_db_path=paper_db)
+        risk = RiskManager(cfg.mode_config, balance_usdc=cfg.paper_initial_balance_usdc)
+        om_module.POSITIONS_DB = positions_db
+        om = OrderManager(cfg, clob, risk)
+
+        row = {
+            "token_id": "tok1",
+            "market_id": "mkt1",
+            "question": "Replay test?",
+            "outcome_name": "Yes",
+            "end_date": 1_700_100_000,
+            "start_date": 0,
+            "category": "crypto",
+            "volume": 1000.0,
+            "comment_count": 0,
+            "neg_risk": 0,
+            "neg_risk_market_id": None,
+            "is_winner": 0,
+        }
+
+        result = simulate_token(
+            row=row,
+            om=om,
+            clob=clob,
+            mc=cfg.mode_config,
+            risk=risk,
+            scorer=None,
+            positions_db_path=str(positions_db),
+            start_ts=1_700_000_000,
+            end_ts=1_700_050_000,
+            dead_market_hours=48.0,
+            trade_index={("mkt1", "tok1"): str(trades_path)},
+            activation_delay=0,
+            fill_fraction=1.0,
+            group_boost=1.0,
+        )
+
+        if result["status"] != "ok":
+            return False, f"Expected replay status=ok, got {result}"
+        if count_rows(str(positions_db), "resting_orders") != 1:
+            return False, "Expected replay to place exactly one resting bid under tight balance"
+        if count_rows(str(paper_db), "paper_orders") != 1:
+            return False, "Expected replay to create exactly one paper order under tight balance"
+        return True, ""
+
 
 SCENARIOS = [
-    ("scanner_entry", scenario_scanner_entry),
-    ("resting_bid", scenario_resting_bid),
-    ("partial_fill_realism", scenario_partial_fill_realism),
-    ("tp_pnl_accounting", scenario_tp_pnl_accounting),
-    ("losing_resolution", scenario_losing_resolution),
+    ("scanner_entry_best_ask", scenario_scanner_entry_best_ask),
+    ("resting_bid_uses_entry_levels", scenario_resting_bid_uses_entry_levels),
+    ("balance_gate_blocks_extra_resting_bids", scenario_balance_gate_blocks_extra_resting_bids),
+    ("dry_partial_buy_accumulates_without_position", scenario_dry_partial_buy_accumulates_without_position),
+    ("tp_partial_fill_keeps_orders_live_until_full", scenario_tp_partial_fill_keeps_orders_live_until_full),
+    ("resolution_uses_actual_moonbag_leg", scenario_resolution_uses_actual_moonbag_leg),
+    ("real_mode_monitor_handles_partial_cumulative_fills", scenario_real_mode_monitor_handles_partial_cumulative_fills),
+    ("honest_replay_respects_balance_gate", scenario_honest_replay_respects_balance_gate),
 ]
 
 

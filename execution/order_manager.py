@@ -210,6 +210,7 @@ class OrderManager:
         self._db_path = str(POSITIONS_DB)
         self._last_balance_alert_ts: int = 0
         self.em = ExposureManager(
+            db_path=self._db_path,
             max_per_market=self.mc.max_exposure_per_market or float("inf"),
         )
         self._init_db()
@@ -735,9 +736,6 @@ class OrderManager:
              fill_price, stake_usdc, fill_quantity, moonbag_qty, now, self.mc.name),
         )
 
-        # Record fill in ExposureManager
-        self.em.record_fill(market_id, token_id, fill_price, fill_quantity, fill_ts=now)
-
         # Place TP orders
         for tp in tp_orders:
             if tp.label == "moonbag_resolution":
@@ -773,6 +771,11 @@ class OrderManager:
 
         conn.commit()
         conn.close()
+
+        # Record fill in ExposureManager after the main DB transaction is closed.
+        # ExposureManager uses its own SQLite connection; writing through it while
+        # the main fill transaction still holds a write lock can deadlock tests/replay.
+        self.em.record_fill(market_id, token_id, fill_price, fill_quantity, fill_ts=now)
 
         logger.info(
             f"Position opened: {position_id[:8]} token={token_id[:16]} "
