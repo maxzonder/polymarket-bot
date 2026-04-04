@@ -71,7 +71,7 @@ def fake_candidate(price, entry_levels, mode_config):
     )
 
 
-def make_om(tmp_dir: Path, mode_config, balance=100.0):
+def make_om(tmp_dir: Path, mode_config, balance: float | None = None):
     """Build an OrderManager wired to a temp DB with a paper ClobClient.
 
     POSITIONS_DB is patched at the module level before construction so the
@@ -83,6 +83,8 @@ def make_om(tmp_dir: Path, mode_config, balance=100.0):
         dry_run=True,
         private_key="fake_key",
     )
+    if balance is None:
+        balance = config.paper_initial_balance_usdc
     clob = ClobClient(
         private_key="fake_key",
         dry_run=True,
@@ -145,7 +147,7 @@ def scenario_scanner_entry() -> tuple[bool, str]:
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, FAST_TP_MODE, balance=100.0)
+        om, config, clob = make_om(tmp_dir, FAST_TP_MODE)
 
         # book: best_ask=0.04, best_bid=0.03, deep liquidity
         book = fake_book(best_ask=0.04, best_bid=0.03, ask_depth=50.0, bid_depth=50.0)
@@ -194,7 +196,7 @@ def scenario_resting_bid() -> tuple[bool, str]:
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE, balance=100.0)
+        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
 
         # book: current market price is 0.15; deep top-of-book
         book = fake_book(best_ask=0.15, best_bid=0.14, ask_depth=50.0, bid_depth=50.0)
@@ -236,7 +238,7 @@ def scenario_partial_fill_realism() -> tuple[bool, str]:
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE, balance=100.0)
+        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
         pm = make_pm(tmp_dir, config, clob, om)
 
         # First, manually insert a resting order at 0.01 with size=2.0
@@ -306,7 +308,7 @@ def scenario_tp_pnl_accounting() -> tuple[bool, str]:
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE, balance=100.0)
+        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
 
         # First, create a resting order entry so on_entry_filled can mark it matched
         import time as _time
@@ -415,7 +417,7 @@ def scenario_losing_resolution() -> tuple[bool, str]:
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE, balance=100.0)
+        om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
 
         import time as _time
         now = int(_time.time())

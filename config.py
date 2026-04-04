@@ -333,6 +333,9 @@ class BotConfig:
 
     mode: str = "big_swan_mode"
     dry_run: bool = True
+    paper_initial_balance_usdc: float = field(
+        default_factory=lambda: float(os.environ.get("PAPER_INITIAL_BALANCE_USDC", "100.0"))
+    )
 
     # ── CLOB credentials (from env) ───────────────────────────────────────────
     private_key: str = field(default_factory=lambda: os.environ.get("POLY_PRIVATE_KEY", ""))

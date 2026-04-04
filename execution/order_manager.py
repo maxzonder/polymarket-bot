@@ -243,7 +243,7 @@ class OrderManager:
                 conn.commit()
             except Exception:
                 pass  # column already exists
-        pb.ensure_seeded(conn)
+        pb.ensure_seeded(conn, self.config.paper_initial_balance_usdc)
         conn.commit()
         conn.close()
 
@@ -252,7 +252,7 @@ class OrderManager:
         conn = self._conn()
         row = conn.execute("SELECT cash_balance FROM paper_balance WHERE id=1").fetchone()
         conn.close()
-        return float(row["cash_balance"]) if row else pb.INITIAL_BALANCE_USDC
+        return float(row["cash_balance"]) if row else self.config.paper_initial_balance_usdc
 
     def _log_scan(
         self,

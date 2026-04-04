@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.paths import DATA_DIR
 from utils.logger import setup_logger
+from config import load_config
 from execution.paper_balance import get_balance, topup, init_tables, ensure_seeded
 from utils.telegram import send_message
 
@@ -56,9 +57,10 @@ def cmd_topup(amount: float, note: str) -> None:
     if not DB_PATH.exists():
         print(f"DB not found: {DB_PATH}")
         sys.exit(1)
+    cfg = load_config()
     conn = _conn()
     init_tables(conn)
-    ensure_seeded(conn)
+    ensure_seeded(conn, cfg.paper_initial_balance_usdc)
     new_balance = topup(conn, amount, note)
     conn.commit()
     b = get_balance(conn)

@@ -681,7 +681,7 @@ def run_honest_replay(
     config = BotConfig(mode=mode, dry_run=True)
     mc     = config.mode_config
     clob   = ClobClient(private_key="replay_dummy", dry_run=True, paper_db_path=paper_db)
-    risk   = RiskManager(mc, balance_usdc=10_000.0)  # high cap — don't let balance block fills
+    risk   = RiskManager(mc, balance_usdc=config.paper_initial_balance_usdc)
     om     = OrderManager(config, clob, risk)
 
     # MarketScorer: reads feature_mart_v1_1 from SQLite — no live API needed.
@@ -779,6 +779,12 @@ def run_honest_replay(
             passed = sum(1 for r in results if r["status"] == "ok")
             filled = sum(r.get("filled_entries", 0) for r in results if r["status"] == "ok")
             logger.info(f"  Progress {i}/{len(all_rows)} | passed_screener={passed} | fills={filled}")
+
+    final_passed = sum(1 for r in results if r["status"] == "ok")
+    final_filled = sum(r.get("filled_entries", 0) for r in results if r["status"] == "ok")
+    logger.info(
+        f"Final totals | passed_screener={final_passed} | fills={final_filled}"
+    )
 
     elapsed = time.monotonic() - t0
     logger.info(f"Replay finished in {elapsed:.1f}s  ({len(all_rows)/elapsed:.0f} tokens/s)")
