@@ -167,18 +167,21 @@ class RiskManager:
         orders: list[TPOrder] = []
         total_qty = position.token_quantity
         entry_price = position.entry_price
-        remaining_fraction = 1.0
+        resolution_fraction = position.moonbag_fraction
 
-        for i, tp in enumerate(position.tp_levels):
+        for tp in position.tp_levels:
             # Validate TP is achievable (target price < $1.00)
             target_price = entry_price * tp.x
             if target_price >= 1.00:
-                # For resolution-only payout, skip market TP and let moonbag handle it
-                break
+                # Binary markets cap at $1.00. Unreachable TP legs must roll into
+                # the resolution leg instead of disappearing from the exit plan.
+                resolution_fraction += tp.fraction
+                continue
 
             sell_qty = total_qty * tp.fraction
             sell_qty = round(sell_qty, 4)
             if sell_qty < 0.0001:
+                resolution_fraction += tp.fraction
                 continue
 
             label = f"tp_{int(tp.x)}x"
@@ -188,12 +191,11 @@ class RiskManager:
                 sell_quantity=sell_qty,
                 label=label,
             ))
-            remaining_fraction -= tp.fraction
 
-        # Moonbag: the remaining fraction is held to resolution
-        # We do NOT place a market sell order for moonbag — resolution pays $1.00
-        # Just record it in positions table as "hold_to_resolution"
-        moonbag_qty = total_qty * position.moonbag_fraction
+        # Moonbag / resolution leg: includes configured moonbag fraction plus any
+        # TP fractions that were unreachable in a binary market.
+        resolution_fraction = min(max(resolution_fraction, 0.0), 1.0)
+        moonbag_qty = total_qty * resolution_fraction
         if moonbag_qty >= 0.0001:
             orders.append(TPOrder(
                 token_id=position.token_id,
