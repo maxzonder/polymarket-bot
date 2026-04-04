@@ -540,7 +540,7 @@ def simulate_token(
         nonlocal filled_entries
         if fill_qty <= 1e-9:
             return
-        clob.paper_simulate_fill(order_id, order["price"], fill_qty)
+        clob.paper_simulate_fill(order_id, order["price"], max(order["filled_qty"], fill_qty))
         try:
             om.on_entry_filled(
                 order_id=order_id,
@@ -604,9 +604,13 @@ def simulate_token(
                 if trade_budget <= 0:
                     break
                 if trade_price >= float(tp_order["price"]):
-                    fill_qty = min(float(tp_order["size"]), trade_budget)
+                    remaining_tp = float(tp_order["size"]) - float(tp_order.get("filled_size") or 0.0)
+                    fill_qty = min(remaining_tp, trade_budget)
+                    if fill_qty <= 1e-9:
+                        continue
                     trade_budget -= fill_qty
-                    clob.paper_simulate_fill(tp_order["order_id"], float(tp_order["price"]), fill_qty)
+                    cumulative_filled = float(tp_order.get("filled_size") or 0.0) + fill_qty
+                    clob.paper_simulate_fill(tp_order["order_id"], float(tp_order["price"]), cumulative_filled)
                     try:
                         om.on_tp_filled(tp_order["order_id"], float(tp_order["price"]), fill_qty)
                     except Exception as e:

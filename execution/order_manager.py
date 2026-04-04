@@ -710,7 +710,8 @@ class OrderManager:
             moonbag_fraction=self.mc.moonbag_fraction,
             rationale="filled",
         )
-        moonbag_qty = fill_quantity * self.mc.moonbag_fraction
+        tp_orders = self.risk.build_tp_orders(sized)
+        moonbag_qty = sum(tp.sell_quantity for tp in tp_orders if tp.label == "moonbag_resolution")
 
         conn = self._conn()
 
@@ -738,7 +739,6 @@ class OrderManager:
         self.em.record_fill(market_id, token_id, fill_price, fill_quantity, fill_ts=now)
 
         # Place TP orders
-        tp_orders = self.risk.build_tp_orders(sized)
         for tp in tp_orders:
             if tp.label == "moonbag_resolution":
                 # Don't place a market order for moonbag — just record it
@@ -844,7 +844,15 @@ class OrderManager:
         ).fetchall()
 
         for pos in positions:
-            moonbag_qty = float(pos["moonbag_quantity"])
+            moonbag_row = conn.execute(
+                "SELECT sell_quantity FROM tp_orders WHERE position_id=? AND label='moonbag_resolution' LIMIT 1",
+                (pos["position_id"],),
+            ).fetchone()
+            moonbag_qty = (
+                float(moonbag_row["sell_quantity"])
+                if moonbag_row is not None
+                else float(pos["moonbag_quantity"])
+            )
             entry_price = float(pos["entry_price"])
             # Moonbag delta: add on top of TP PnL already accumulated in realized_pnl
             moonbag_pnl = (resolution_price - entry_price) * moonbag_qty
