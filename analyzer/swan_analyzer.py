@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
 from config import (
+    MODES,
     SWAN_BUY_PRICE_THRESHOLD,
     SWAN_MIN_BUY_VOLUME,
     SWAN_MIN_SELL_VOLUME,
@@ -441,8 +442,12 @@ def main() -> None:
     ap.add_argument("--min-real-x", type=float, default=DEFAULT_MIN_REAL_X)
     args = ap.parse_args()
 
-    for w in check_swan_buy_price_threshold(args.buy_price_threshold):
-        logger.warning(w)
+    for mode in MODES.values():
+        for w in check_swan_buy_price_threshold(mode):
+            if args.buy_price_threshold < SWAN_BUY_PRICE_THRESHOLD:
+                # We are lowering it or it mismatches config.py constant
+                pass
+            logger.warning(w)
 
 
     conn = sqlite3.connect(DB_PATH)
