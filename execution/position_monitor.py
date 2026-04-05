@@ -103,28 +103,27 @@ class PositionMonitor:
                 fallback = total_size if "matched" in status else stored_filled
                 cumulative_filled = min(total_size, _matched_size(order, fallback=fallback))
                 if cumulative_filled > stored_filled + 1e-9:
-                    if cumulative_filled >= total_size * 0.99:
-                        fill_price = float(order.get("price", resting["price"]))
-                        conn.close()
-                        self.om.on_entry_filled(
-                            order_id=order_id,
-                            token_id=resting["token_id"],
-                            market_id=resting["market_id"],
-                            fill_price=fill_price,
-                            fill_quantity=total_size,
-                            outcome_name=resting["outcome_name"] or "",
-                        )
-                        conn = self._conn()
-                    else:
-                        conn.execute(
-                            "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
-                            (cumulative_filled, order_id),
-                        )
-                        conn.commit()
-                        logger.info(
-                            f"Real BUY partial fill: {order_id[:8]} "
-                            f"filled={cumulative_filled:.2f}/{total_size:.2f}"
-                        )
+                    fill_price = float(order.get("price", resting["price"]))
+                    delta = cumulative_filled - stored_filled
+                    conn.execute(
+                        "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
+                        (cumulative_filled, order_id),
+                    )
+                    conn.commit()
+                    conn.close()
+                    self.om.on_entry_filled(
+                        order_id=order_id,
+                        token_id=resting["token_id"],
+                        market_id=resting["market_id"],
+                        fill_price=fill_price,
+                        fill_quantity=delta,
+                        outcome_name=resting["outcome_name"] or "",
+                    )
+                    conn = self._conn()
+                    logger.info(
+                        f"Real BUY fill: {order_id[:8]} delta={delta:.2f} "
+                        f"cumulative={cumulative_filled:.2f}/{total_size:.2f}"
+                    )
                 continue
 
             # Check if it's a TP SELL
@@ -185,36 +184,27 @@ class PositionMonitor:
 
             new_filled = filled_so_far + this_fill
 
-            if new_filled >= order_size * 0.99:
-                # Fully filled — create position and TP orders
-                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
-                conn.close()
-                self.om.on_entry_filled(
-                    order_id=order["order_id"],
-                    token_id=token_id,
-                    market_id=order["market_id"],
-                    fill_price=bid_price,
-                    fill_quantity=order_size,  # always use full intended size
-                    outcome_name=order["outcome_name"] or "",
-                )
-                logger.info(
-                    f"[DRY] BUY fully filled: {order['order_id'][:8]} "
-                    f"@ ${bid_price:.5f} qty={order_size:.2f}"
-                )
-                conn = self._conn()
-            else:
-                # Partial fill — accumulate, keep order live
-                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
-                conn.execute(
-                    "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
-                    (new_filled, order["order_id"]),
-                )
-                conn.commit()
-                logger.info(
-                    f"[DRY] BUY partial fill: {order['order_id'][:8]} "
-                    f"@ ${bid_price:.5f} filled={new_filled:.2f}/{order_size:.2f} "
-                    f"({100*new_filled/order_size:.0f}%)"
-                )
+            self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
+            conn.execute(
+                "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
+                (new_filled, order["order_id"]),
+            )
+            conn.commit()
+            conn.close()
+            self.om.on_entry_filled(
+                order_id=order["order_id"],
+                token_id=token_id,
+                market_id=order["market_id"],
+                fill_price=bid_price,
+                fill_quantity=this_fill,
+                outcome_name=order["outcome_name"] or "",
+            )
+            logger.info(
+                f"[DRY] BUY fill: {order['order_id'][:8]} "
+                f"@ ${bid_price:.5f} delta={this_fill:.2f} cumulative={new_filled:.2f}/{order_size:.2f} "
+                f"({100*new_filled/order_size:.0f}%)"
+            )
+            conn = self._conn()
 
         # Check TP SELL orders
         tp_live = conn.execute(

@@ -254,10 +254,10 @@ def scenario_tp_partial_fill_keeps_orders_live_until_full() -> tuple[bool, str]:
         om.on_entry_filled("entry_tp_sync", "tok_yes", "mkt_test", 0.01, 100.0, "Yes")
         tp = read_one(
             str(tmp_dir / "positions.db"),
-            "SELECT order_id, sell_price, sell_quantity FROM tp_orders WHERE label='tp_10x' LIMIT 1",
+            "SELECT order_id, sell_price, sell_quantity FROM tp_orders WHERE label='tp_p10' LIMIT 1",
         )
         if tp is None:
-            return False, "No tp_10x order created"
+            return False, "No tp_p10 order created"
 
         clob.paper_simulate_fill(tp["order_id"], float(tp["sell_price"]), 4.0)
         om.on_tp_filled(tp["order_id"], float(tp["sell_price"]), 4.0)
@@ -295,10 +295,10 @@ def scenario_resolution_uses_actual_moonbag_leg() -> tuple[bool, str]:
         moonbag = read_one(str(tmp_dir / "positions.db"), "SELECT sell_quantity FROM tp_orders WHERE token_id='tok_yes' AND label='moonbag_resolution'")
         if pos is None or moonbag is None:
             return False, "Missing position or moonbag row"
-        if abs(float(pos["moonbag_quantity"]) - 100.0) > 1e-9:
-            return False, f"Expected moonbag_quantity=100.0, got {pos['moonbag_quantity']}"
-        if abs(float(moonbag["sell_quantity"]) - 100.0) > 1e-9:
-            return False, f"Expected moonbag_resolution sell_quantity=100.0, got {moonbag['sell_quantity']}"
+        if abs(float(pos["moonbag_quantity"]) - 70.0) > 1e-9:
+            return False, f"Expected moonbag_quantity=70.0, got {pos['moonbag_quantity']}"
+        if abs(float(moonbag["sell_quantity"]) - 70.0) > 1e-9:
+            return False, f"Expected moonbag_resolution sell_quantity=70.0, got {moonbag['sell_quantity']}"
         if abs(float(pos["realized_pnl"]) - 90.0) > 1e-9:
             return False, f"Expected winner resolution pnl=90.0, got {pos['realized_pnl']}"
         return True, ""

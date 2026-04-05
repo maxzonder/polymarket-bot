@@ -31,8 +31,8 @@ except ImportError:
 @dataclass(frozen=True)
 class TPLevel:
     """Single step in the take-profit ladder."""
-    x: float       # multiplier vs entry (5.0 = 5x)
-    fraction: float  # fraction of position to sell at this level (0.0–1.0)
+    progress: float   # progress from entry price to $1.00 (0.0–1.0)
+    fraction: float   # fraction of position to sell at this level (0.0–1.0)
 
 
 @dataclass(frozen=True)
@@ -128,8 +128,8 @@ FAST_TP_MODE = ModeConfig(
     use_resting_bids=False,
     scanner_entry=True,
     tp_levels=(
-        TPLevel(x=5.0, fraction=0.70),
-        TPLevel(x=10.0, fraction=0.30),
+        TPLevel(progress=0.50, fraction=0.70),
+        TPLevel(progress=0.80, fraction=0.30),
     ),
     moonbag_fraction=0.0,
     min_entry_fill_score=0.0,   # scanner-triggered — no fill score needed
@@ -160,9 +160,9 @@ BALANCED_MODE = ModeConfig(
     use_resting_bids=True,
     scanner_entry=True,
     tp_levels=(
-        TPLevel(x=5.0, fraction=0.35),
-        TPLevel(x=10.0, fraction=0.25),
-        TPLevel(x=20.0, fraction=0.20),
+        TPLevel(progress=0.25, fraction=0.35),
+        TPLevel(progress=0.50, fraction=0.25),
+        TPLevel(progress=0.75, fraction=0.20),
     ),
     moonbag_fraction=0.20,
     min_entry_fill_score=0.05,
@@ -198,12 +198,11 @@ BIG_SWAN_MODE = ModeConfig(
     entry_price_max=0.20,       # must match SWAN_BUY_PRICE_THRESHOLD — no scorer data above this
     use_resting_bids=True,
     scanner_entry=False,        # ONLY resting bids; no chasing dips
-    # Resolution-heavy ladder for higher bid zones.
-    # 0.01 entries can still realize 10x / 50x as market sells before resolution;
-    # 0.10 / 0.15 entries mostly ride to resolution because TP targets are >= $1.00.
+    # First-step binary-native ladder.
+    # Tier-aware progress presets are intentionally deferred.
     tp_levels=(
-        TPLevel(x=10.0, fraction=0.10),
-        TPLevel(x=50.0, fraction=0.20),
+        TPLevel(progress=0.10, fraction=0.10),
+        TPLevel(progress=0.50, fraction=0.20),
     ),
     moonbag_fraction=0.70,
     min_entry_fill_score=0.02,  # low bar — wide coverage
@@ -247,8 +246,8 @@ SMALL_SWAN_MODE = ModeConfig(
     use_resting_bids=True,
     scanner_entry=False,        # pre-position only
     tp_levels=(
-        TPLevel(x=2.0, fraction=0.30),   # quick capital recoup
-        TPLevel(x=5.0, fraction=0.30),   # partial profit
+        TPLevel(progress=0.20, fraction=0.30),   # quick capital recoup
+        TPLevel(progress=0.50, fraction=0.30),   # partial profit
     ),
     moonbag_fraction=0.40,      # 40% held to resolution
     min_entry_fill_score=0.05,
