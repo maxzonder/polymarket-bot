@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import execution.order_manager as om_module
+import utils.telegram as telegram_module
 from api.clob_client import ClobClient, Orderbook, OrderbookLevel
 from api.gamma_client import MarketInfo
 from config import BotConfig, FAST_TP_MODE, BIG_SWAN_MODE
@@ -27,6 +28,11 @@ from execution.position_monitor import PositionMonitor
 from scripts.run_honest_replay import simulate_token
 from strategy.risk_manager import RiskManager
 from strategy.screener import EntryCandidate
+
+# Validation harness must never emit real Telegram alerts.
+_ALERT_NOOP = lambda *a, **kw: False
+telegram_module.send_message = _ALERT_NOOP
+om_module.send_message = _ALERT_NOOP
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
