@@ -257,16 +257,35 @@ def _write_manifest(day_str: str, market_id: str, truncated: bool) -> None:
         json.dump(manifest, f)
 
 
-def _is_fetch_complete(day_str: str, market_id: str) -> bool:
-    """Return True only if a manifest exists and says fetch_complete=True."""
+def _read_trade_manifest(day_str: str, market_id: str) -> Optional[dict]:
     path = _manifest_path(day_str, market_id)
     if not os.path.exists(path):
-        return False
+        return None
     try:
         with open(path, encoding="utf-8") as f:
-            return bool(json.load(f).get("fetch_complete"))
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
     except Exception:
+        return None
+
+
+def _is_fetch_complete(day_str: str, market_id: str) -> bool:
+    """Return True only if a manifest exists and says fetch_complete=True."""
+    manifest = _read_trade_manifest(day_str, market_id)
+    if not manifest:
         return False
+    return bool(manifest.get("fetch_complete"))
+
+
+def _should_skip_parse(day_str: str, market_id: str) -> tuple[bool, Optional[str]]:
+    manifest = _read_trade_manifest(day_str, market_id)
+    if not manifest:
+        return False, None
+    if bool(manifest.get("truncated")):
+        return True, "truncated"
+    if manifest.get("fetch_complete") is False:
+        return True, "incomplete"
+    return False, None
 
 
 def _collect_trades_day(day: date, filter_amount: float = 10, max_duration_days: Optional[int] = MAX_MARKET_DURATION_DAYS):
@@ -724,11 +743,19 @@ def _parse_day(conn: sqlite3.Connection, day_str: str):
     total = len(market_files)
     logger.info(f"[parse][{day_str}] Found {total} market JSONs")
 
-    ok = errors = 0
+    ok = errors = skipped_truncated = skipped_incomplete = 0
     t0 = time.monotonic()
 
     for i, fname in enumerate(market_files, 1):
         market_id = fname[:-5]
+
+        skip_parse, skip_reason = _should_skip_parse(day_str, market_id)
+        if skip_parse:
+            if skip_reason == "truncated":
+                skipped_truncated += 1
+            else:
+                skipped_incomplete += 1
+            continue
 
         fpath = os.path.join(day_dir, fname)
         try:
@@ -760,9 +787,15 @@ def _parse_day(conn: sqlite3.Connection, day_str: str):
             elapsed = time.monotonic() - t0
             rate = i / elapsed if elapsed > 0 else 0
             eta = int((total - i) / rate) if rate > 0 else 0
-            logger.info(f"[parse][{day_str}] {i}/{total} — {rate:.0f}/s ETA ~{eta}s | ok={ok} err={errors}")
+            logger.info(
+                f"[parse][{day_str}] {i}/{total} — {rate:.0f}/s ETA ~{eta}s | "
+                f"ok={ok} trunc={skipped_truncated} incomplete={skipped_incomplete} err={errors}"
+            )
 
-    logger.info(f"[parse][{day_str}] DONE in {int(time.monotonic()-t0)}s | ok={ok} errors={errors}")
+    logger.info(
+        f"[parse][{day_str}] DONE in {int(time.monotonic()-t0)}s | "
+        f"ok={ok} truncated={skipped_truncated} incomplete={skipped_incomplete} errors={errors}"
+    )
 
 
 def parse_markets(start: date, end: date):
