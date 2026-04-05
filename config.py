@@ -188,7 +188,7 @@ BALANCED_MODE = ModeConfig(
 # Budget and levels are defined together so market_score_tiers stakes auto-scale with budget.
 # Change _BIG_SWAN_BUDGET or _BIG_SWAN_LEVELS here — tiers update automatically.
 _BIG_SWAN_BUDGET = 2.0
-_BIG_SWAN_LEVELS = (0.001, 0.005, 0.01)
+_BIG_SWAN_LEVELS = (0.01, 0.10, 0.15)
 _bsm_s = _BIG_SWAN_BUDGET / len(_BIG_SWAN_LEVELS)  # stake per level at full-budget allocation
 
 BIG_SWAN_MODE = ModeConfig(
@@ -198,14 +198,14 @@ BIG_SWAN_MODE = ModeConfig(
     entry_price_max=0.20,       # must match SWAN_BUY_PRICE_THRESHOLD — no scorer data above this
     use_resting_bids=True,
     scanner_entry=False,        # ONLY resting bids; no chasing dips
-    # TP at 100x/500x — consistent with 0.001 floor entries (0.001→0.10, 0.001→0.50).
-    # For 0.01 entries, 100x = $1.00 is skipped by order_manager (price >= $1.00),
-    # so those positions ride fully to resolution (moonbag only).
+    # Resolution-heavy ladder for higher bid zones.
+    # 0.01 entries can still realize 10x / 50x as market sells before resolution;
+    # 0.10 / 0.15 entries mostly ride to resolution because TP targets are >= $1.00.
     tp_levels=(
-        TPLevel(x=100.0, fraction=0.10),   # 0.001→$0.10, 0.005→$0.50; covers full budget cost
-        TPLevel(x=500.0, fraction=0.10),   # 0.001→$0.50 only; skipped for 0.005+
+        TPLevel(x=10.0, fraction=0.10),
+        TPLevel(x=50.0, fraction=0.20),
     ),
-    moonbag_fraction=0.80,      # 80% held to resolution
+    moonbag_fraction=0.70,
     min_entry_fill_score=0.02,  # low bar — wide coverage
     min_resolution_score=0.15,
     min_real_x_historical=10.0,

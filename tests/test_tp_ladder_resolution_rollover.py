@@ -16,29 +16,29 @@ def _make_position(entry_price: float, qty: float = 100.0) -> SizedPosition:
     )
 
 
-def test_entry_0005_rolls_unreachable_tp_into_resolution():
+def test_entry_005_rolls_unreachable_tp_into_resolution():
     rm = RiskManager(BIG_SWAN_MODE)
-    orders = rm.build_tp_orders(_make_position(0.005))
+    orders = rm.build_tp_orders(_make_position(0.05))
 
     by_label = {o.label: o for o in orders}
-    assert "tp_100x" in by_label
-    assert "tp_500x" not in by_label
+    assert "tp_10x" in by_label
+    assert "tp_50x" not in by_label
     assert "moonbag_resolution" in by_label
 
-    assert abs(by_label["tp_100x"].sell_quantity - 10.0) < 1e-9
+    assert abs(by_label["tp_10x"].sell_quantity - 10.0) < 1e-9
     assert abs(by_label["moonbag_resolution"].sell_quantity - 90.0) < 1e-9
 
     total_qty = sum(o.sell_quantity for o in orders)
     assert abs(total_qty - 100.0) < 1e-9
 
 
-def test_entry_001_rolls_all_tp_into_resolution():
+def test_entry_010_rolls_all_tp_into_resolution():
     rm = RiskManager(BIG_SWAN_MODE)
-    orders = rm.build_tp_orders(_make_position(0.01))
+    orders = rm.build_tp_orders(_make_position(0.10))
 
     by_label = {o.label: o for o in orders}
-    assert "tp_100x" not in by_label
-    assert "tp_500x" not in by_label
+    assert "tp_10x" not in by_label
+    assert "tp_50x" not in by_label
     assert "moonbag_resolution" in by_label
 
     assert abs(by_label["moonbag_resolution"].sell_quantity - 100.0) < 1e-9

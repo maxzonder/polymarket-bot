@@ -248,16 +248,16 @@ def scenario_tp_partial_fill_keeps_orders_live_until_full() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         om, _, clob = make_om(tmp_dir, BIG_SWAN_MODE)
-        insert_resting_order(str(tmp_dir / "positions.db"), "entry_tp_sync", 0.005, 100.0, BIG_SWAN_MODE.name)
-        insert_paper_order(str(tmp_dir / "paper.db"), "entry_tp_sync", "BUY", 0.005, 100.0)
+        insert_resting_order(str(tmp_dir / "positions.db"), "entry_tp_sync", 0.01, 100.0, BIG_SWAN_MODE.name)
+        insert_paper_order(str(tmp_dir / "paper.db"), "entry_tp_sync", "BUY", 0.01, 100.0)
 
-        om.on_entry_filled("entry_tp_sync", "tok_yes", "mkt_test", 0.005, 100.0, "Yes")
+        om.on_entry_filled("entry_tp_sync", "tok_yes", "mkt_test", 0.01, 100.0, "Yes")
         tp = read_one(
             str(tmp_dir / "positions.db"),
-            "SELECT order_id, sell_price, sell_quantity FROM tp_orders WHERE label='tp_100x' LIMIT 1",
+            "SELECT order_id, sell_price, sell_quantity FROM tp_orders WHERE label='tp_10x' LIMIT 1",
         )
         if tp is None:
-            return False, "No tp_100x order created"
+            return False, "No tp_10x order created"
 
         clob.paper_simulate_fill(tp["order_id"], float(tp["sell_price"]), 4.0)
         om.on_tp_filled(tp["order_id"], float(tp["sell_price"]), 4.0)
@@ -286,9 +286,9 @@ def scenario_resolution_uses_actual_moonbag_leg() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         om, _, _ = make_om(tmp_dir, BIG_SWAN_MODE)
-        insert_resting_order(str(tmp_dir / "positions.db"), "entry_resolution", 0.01, 100.0, BIG_SWAN_MODE.name)
+        insert_resting_order(str(tmp_dir / "positions.db"), "entry_resolution", 0.10, 100.0, BIG_SWAN_MODE.name)
 
-        om.on_entry_filled("entry_resolution", "tok_yes", "mkt_test", 0.01, 100.0, "Yes")
+        om.on_entry_filled("entry_resolution", "tok_yes", "mkt_test", 0.10, 100.0, "Yes")
         om.on_market_resolved("tok_yes", True)
 
         pos = read_one(str(tmp_dir / "positions.db"), "SELECT moonbag_quantity, realized_pnl FROM positions WHERE token_id='tok_yes'")
@@ -299,8 +299,8 @@ def scenario_resolution_uses_actual_moonbag_leg() -> tuple[bool, str]:
             return False, f"Expected moonbag_quantity=100.0, got {pos['moonbag_quantity']}"
         if abs(float(moonbag["sell_quantity"]) - 100.0) > 1e-9:
             return False, f"Expected moonbag_resolution sell_quantity=100.0, got {moonbag['sell_quantity']}"
-        if abs(float(pos["realized_pnl"]) - 99.0) > 1e-9:
-            return False, f"Expected winner resolution pnl=99.0, got {pos['realized_pnl']}"
+        if abs(float(pos["realized_pnl"]) - 90.0) > 1e-9:
+            return False, f"Expected winner resolution pnl=90.0, got {pos['realized_pnl']}"
         return True, ""
 
 
@@ -448,6 +448,82 @@ def scenario_honest_replay_respects_balance_gate() -> tuple[bool, str]:
         return True, ""
 
 
+def scenario_honest_replay_terminal_cleanup_cancels_paper_orders() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        positions_db = tmp_dir / "positions.db"
+        paper_db = tmp_dir / "paper.db"
+        trades_path = tmp_dir / "tok1.json"
+        trades_path.write_text(
+            json.dumps(
+                [
+                    {"timestamp": 1_700_000_000, "price": 0.20, "size": 100.0, "side": "BUY"},
+                    {"timestamp": 1_700_000_100, "price": 0.20, "size": 100.0, "side": "SELL"},
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = BotConfig(
+            mode="big_swan_mode",
+            dry_run=True,
+            private_key="fake",
+            paper_initial_balance_usdc=1000.0,
+        )
+        clob = ClobClient(private_key="fake", dry_run=True, paper_db_path=paper_db)
+        risk = RiskManager(cfg.mode_config, balance_usdc=cfg.paper_initial_balance_usdc)
+        om_module.POSITIONS_DB = positions_db
+        om = OrderManager(cfg, clob, risk)
+
+        row = {
+            "token_id": "tok1",
+            "market_id": "mkt1",
+            "question": "Replay cancel sync?",
+            "outcome_name": "Yes",
+            "end_date": 1_700_100_000,
+            "start_date": 0,
+            "category": "crypto",
+            "volume": 1000.0,
+            "comment_count": 0,
+            "neg_risk": 0,
+            "neg_risk_market_id": None,
+            "is_winner": 0,
+        }
+
+        result = simulate_token(
+            row=row,
+            om=om,
+            clob=clob,
+            mc=cfg.mode_config,
+            risk=risk,
+            scorer=None,
+            positions_db_path=str(positions_db),
+            start_ts=1_700_000_000,
+            end_ts=1_700_050_000,
+            dead_market_hours=48.0,
+            trade_index={("mkt1", "tok1"): str(trades_path)},
+            activation_delay=0,
+            fill_fraction=1.0,
+            group_boost=1.0,
+        )
+
+        if result["status"] != "ok":
+            return False, f"Expected replay status=ok, got {result}"
+        cancelled_resting = count_rows(str(positions_db), "resting_orders", "status='cancelled'")
+        live_resting = count_rows(str(positions_db), "resting_orders", "status='live'")
+        cancelled_paper = count_rows(str(paper_db), "paper_orders", "side='BUY' AND status='cancelled'")
+        live_paper = count_rows(str(paper_db), "paper_orders", "side='BUY' AND status='live'")
+        if cancelled_resting == 0:
+            return False, "Expected terminal replay cleanup to cancel resting buys"
+        if live_resting != 0:
+            return False, f"Expected no live resting buys after cleanup, got {live_resting}"
+        if cancelled_paper != cancelled_resting:
+            return False, f"Expected cancelled paper BUY count={cancelled_resting}, got {cancelled_paper}"
+        if live_paper != 0:
+            return False, f"Expected no live paper BUY orders after cleanup, got {live_paper}"
+        return True, ""
+
+
 SCENARIOS = [
     ("scanner_entry_best_ask", scenario_scanner_entry_best_ask),
     ("resting_bid_uses_entry_levels", scenario_resting_bid_uses_entry_levels),
@@ -457,6 +533,7 @@ SCENARIOS = [
     ("resolution_uses_actual_moonbag_leg", scenario_resolution_uses_actual_moonbag_leg),
     ("real_mode_monitor_handles_partial_cumulative_fills", scenario_real_mode_monitor_handles_partial_cumulative_fills),
     ("honest_replay_respects_balance_gate", scenario_honest_replay_respects_balance_gate),
+    ("honest_replay_terminal_cleanup_cancels_paper_orders", scenario_honest_replay_terminal_cleanup_cancels_paper_orders),
 ]
 
 

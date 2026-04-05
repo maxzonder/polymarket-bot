@@ -26,12 +26,12 @@ def test_on_entry_filled_uses_actual_resolution_quantity(tmp_path):
     conn.execute(
         "INSERT INTO resting_orders (order_id, token_id, market_id, side, price, size, status, created_at, expires_at, mode) "
         "VALUES (?, ?, ?, 'BUY', ?, ?, 'live', ?, 0, ?)",
-        ("entry1", "tok1", "mkt1", 0.01, 100.0, now, "big_swan_mode"),
+        ("entry1", "tok1", "mkt1", 0.10, 100.0, now, "big_swan_mode"),
     )
     conn.commit()
     conn.close()
 
-    om.on_entry_filled("entry1", "tok1", "mkt1", 0.01, 100.0, "Yes")
+    om.on_entry_filled("entry1", "tok1", "mkt1", 0.10, 100.0, "Yes")
     om.on_market_resolved("tok1", True)
 
     conn = sqlite3.connect(positions_db)
@@ -47,4 +47,4 @@ def test_on_entry_filled_uses_actual_resolution_quantity(tmp_path):
     assert pos is not None and moonbag is not None
     assert abs(float(pos["moonbag_quantity"]) - 100.0) < 1e-9
     assert abs(float(moonbag["sell_quantity"]) - 100.0) < 1e-9
-    assert abs(float(pos["realized_pnl"]) - 99.0) < 1e-9
+    assert abs(float(pos["realized_pnl"]) - 90.0) < 1e-9

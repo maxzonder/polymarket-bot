@@ -622,6 +622,10 @@ def simulate_token(
     # that never got any fill at all.
     conn = sqlite3.connect(positions_db_path)
     for order_id, order in list(pending_buys.items()):
+        if order.get("filled_qty", 0.0) > 1e-9:
+            continue
+        if not clob.cancel_order(order_id):
+            logger.warning(f"terminal cancel failed for paper order {order_id[:8]}")
         conn.execute(
             "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
             (order_id,),
