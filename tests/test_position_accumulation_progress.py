@@ -144,3 +144,31 @@ def test_resolution_settles_partial_only_accumulated_inventory(tmp_path):
     assert pos["status"] == "resolved"
     assert abs(float(pos["token_quantity"]) - 40.0) < 1e-9
     assert abs(float(pos["realized_pnl"]) - 36.0) < 1e-9
+
+
+def test_resolution_cancels_unfilled_resting_bids_and_releases_reserve(tmp_path):
+    om, positions_db, _ = _make_om(tmp_path)
+
+    conn = sqlite3.connect(positions_db)
+    _insert_resting(conn, "ord1", "tok1", "mkt1", 0.01, 5.0, 5.0)
+    _insert_resting(conn, "ord2", "tok1", "mkt1", 0.10, 0.5, 0.0)
+    conn.commit()
+    conn.close()
+
+    om.on_entry_filled("ord1", "tok1", "mkt1", 0.01, 5.0, "Yes")
+    om.on_market_resolved("tok1", True)
+
+    conn = sqlite3.connect(positions_db)
+    conn.row_factory = sqlite3.Row
+    resting = conn.execute(
+        "SELECT order_id, status FROM resting_orders ORDER BY order_id"
+    ).fetchall()
+    balance = conn.execute("SELECT cash_balance FROM paper_balance WHERE id=1").fetchone()[0]
+    reserved_resting = conn.execute(
+        "SELECT COALESCE(SUM(price * size), 0) FROM resting_orders WHERE status='live'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert [(r["order_id"], r["status"]) for r in resting] == [("ord1", "matched"), ("ord2", "cancelled")]
+    assert abs(float(balance) - 104.95) < 1e-9
+    assert abs(float(reserved_resting) - 0.0) < 1e-9
