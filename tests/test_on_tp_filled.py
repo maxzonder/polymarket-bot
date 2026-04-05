@@ -19,6 +19,7 @@ def _make_db(path: str) -> sqlite3.Connection:
             token_id       TEXT NOT NULL,
             market_id      TEXT NOT NULL,
             entry_price    REAL NOT NULL,
+            sold_quantity  REAL NOT NULL DEFAULT 0,
             realized_pnl   REAL
         );
         CREATE TABLE IF NOT EXISTS tp_orders (
@@ -49,7 +50,7 @@ def _seed(conn: sqlite3.Connection, sell_qty: float) -> tuple[str, str]:
     )
     conn.execute(
         "INSERT INTO tp_orders (order_id, position_id, token_id, sell_price, sell_quantity, label, status, created_at) "
-        "VALUES (?,?,?,?,?,'tp_5x','live',?)",
+        "VALUES (?,?,?,?,?,'tp_p50','live',?)",
         (tp_id, pos_id, "tok1", 0.50, sell_qty, now),
     )
     conn.commit()

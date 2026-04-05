@@ -77,6 +77,7 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             entry_price      REAL NOT NULL,
             entry_size_usdc  REAL NOT NULL,
             token_quantity   REAL NOT NULL,
+            sold_quantity    REAL NOT NULL DEFAULT 0,
             moonbag_quantity REAL NOT NULL DEFAULT 0,
             status           TEXT NOT NULL DEFAULT 'open',
             opened_at        INTEGER NOT NULL,
@@ -231,6 +232,7 @@ class OrderManager:
             "ALTER TABLE positions      ADD COLUMN is_winner INTEGER",
             "ALTER TABLE positions      ADD COLUMN peak_price REAL",
             "ALTER TABLE positions      ADD COLUMN peak_x REAL",
+            "ALTER TABLE positions      ADD COLUMN sold_quantity REAL NOT NULL DEFAULT 0",
             "ALTER TABLE ml_outcomes    ADD COLUMN tp_10x_hit INTEGER",
             "ALTER TABLE ml_outcomes    ADD COLUMN tp_20x_hit INTEGER",
             "ALTER TABLE ml_outcomes    ADD COLUMN tp_moonbag_hit INTEGER",
@@ -682,6 +684,107 @@ class OrderManager:
             (order_id, token_id, market_id, price, size, now, expires_at, mode, candidate_id, outcome_name, neg_risk_group_id),
         )
 
+    def _get_open_position(self, conn: sqlite3.Connection, token_id: str, market_id: str) -> Optional[sqlite3.Row]:
+        return conn.execute(
+            "SELECT * FROM positions WHERE token_id=? AND market_id=? AND status='open' ORDER BY opened_at LIMIT 1",
+            (token_id, market_id),
+        ).fetchone()
+
+    def _planned_entry_quantity(self, conn: sqlite3.Connection, token_id: str, market_id: str) -> float:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM resting_orders WHERE token_id=? AND market_id=? AND status != 'cancelled'",
+            (token_id, market_id),
+        ).fetchone()
+        return float(row[0] or 0.0)
+
+    def _tp_activation_passed(self, conn: sqlite3.Connection, token_id: str, market_id: str, total_qty: float) -> bool:
+        planned_qty = self._planned_entry_quantity(conn, token_id, market_id)
+        if planned_qty <= 0:
+            return True
+        return (total_qty / planned_qty) >= 0.25
+
+    def _reconcile_tp_orders(self, conn: sqlite3.Connection, position_id: str, token_id: str, market_id: str) -> None:
+        pos = conn.execute(
+            "SELECT * FROM positions WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        if pos is None or pos["status"] != "open":
+            return
+
+        total_qty = float(pos["token_quantity"] or 0.0)
+        if total_qty <= 0:
+            return
+
+        sized = SizedPosition(
+            token_id=token_id,
+            entry_price=float(pos["entry_price"]),
+            stake_usdc=float(pos["entry_size_usdc"]),
+            token_quantity=total_qty,
+            tp_levels=list(self.mc.tp_levels),
+            moonbag_fraction=self.mc.moonbag_fraction,
+            rationale="accumulated",
+        )
+        target_orders = self.risk.build_tp_orders(sized)
+        moonbag_qty = sum(tp.sell_quantity for tp in target_orders if tp.label == "moonbag_resolution")
+        conn.execute(
+            "UPDATE positions SET moonbag_quantity=? WHERE position_id=?",
+            (moonbag_qty, position_id),
+        )
+
+        moonbag_id = f"moonbag_{position_id}"
+        existing_moonbag = conn.execute(
+            "SELECT 1 FROM tp_orders WHERE order_id=?",
+            (moonbag_id,),
+        ).fetchone()
+        if existing_moonbag:
+            conn.execute(
+                "UPDATE tp_orders SET sell_quantity=?, sell_price=1.0, status='moonbag' WHERE order_id=?",
+                (moonbag_qty, moonbag_id),
+            )
+        elif moonbag_qty >= 0.0001:
+            conn.execute(
+                "INSERT INTO tp_orders (order_id, position_id, token_id, sell_price, sell_quantity, label, status, created_at) "
+                "VALUES (?, ?, ?, 1.0, ?, 'moonbag_resolution', 'moonbag', ?)",
+                (moonbag_id, position_id, token_id, moonbag_qty, int(time.time())),
+            )
+
+        if not self._tp_activation_passed(conn, token_id, market_id, total_qty):
+            return
+
+        for tp in target_orders:
+            if tp.label == "moonbag_resolution":
+                continue
+
+            allocated = conn.execute(
+                "SELECT COALESCE(SUM(sell_quantity), 0) FROM tp_orders "
+                "WHERE position_id=? AND label=? AND status IN ('live', 'matched')",
+                (position_id, tp.label),
+            ).fetchone()[0]
+            allocated = float(allocated or 0.0)
+            missing_qty = round(tp.sell_quantity - allocated, 4)
+            if missing_qty < 0.0001:
+                continue
+            if allocated > 0 and (missing_qty / allocated) < 0.10:
+                continue
+
+            tp_result = self.clob.place_limit_order(
+                token_id=tp.token_id,
+                side="SELL",
+                price=tp.sell_price,
+                size=missing_qty,
+                label=tp.label,
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO tp_orders "
+                "(order_id, position_id, token_id, sell_price, sell_quantity, label, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (tp_result.order_id, position_id, tp.token_id, tp.sell_price, missing_qty, tp.label, tp_result.status, int(time.time())),
+            )
+            logger.info(
+                f"Placed TP SELL: token={token_id[:16]} {tp.label} "
+                f"@ ${tp.sell_price:.5f} qty={missing_qty:.2f} id={tp_result.order_id}"
+            )
+
     # ── On fill ───────────────────────────────────────────────────────────────
 
     def on_entry_filled(
@@ -693,97 +796,61 @@ class OrderManager:
         fill_quantity: float,
         outcome_name: str = "",
     ) -> None:
-        """
-        Called when a resting BUY order gets filled.
-        Creates a position record and places TP SELL orders.
-        """
+        """Apply a BUY fill delta to the accumulated open position."""
         import uuid
-        position_id = str(uuid.uuid4())
+
         now = int(time.time())
         stake_usdc = fill_price * fill_quantity
-
-        sized = SizedPosition(
-            token_id=token_id,
-            entry_price=fill_price,
-            stake_usdc=stake_usdc,
-            token_quantity=fill_quantity,
-            tp_levels=list(self.mc.tp_levels),
-            moonbag_fraction=self.mc.moonbag_fraction,
-            rationale="filled",
-        )
-        tp_orders = self.risk.build_tp_orders(sized)
-        moonbag_qty = sum(tp.sell_quantity for tp in tp_orders if tp.label == "moonbag_resolution")
-
         conn = self._conn()
 
-        # Mark resting order as matched
-        conn.execute(
-            "UPDATE resting_orders SET status='matched' WHERE order_id=?",
+        resting = conn.execute(
+            "SELECT size, filled_quantity FROM resting_orders WHERE order_id=?",
             (order_id,),
-        )
+        ).fetchone()
+        if resting is not None:
+            is_done = float(resting["filled_quantity"] or 0.0) >= float(resting["size"]) * 0.99
+            conn.execute(
+                "UPDATE resting_orders SET status=? WHERE order_id=?",
+                ("matched" if is_done else "live", order_id),
+            )
 
-        # Debit paper balance (entry fill = USDC spent)
         if self.config.dry_run:
             pb.debit(conn, stake_usdc, f"entry fill {order_id[:12]}")
 
-        # Create position
-        conn.execute(
-            "INSERT OR IGNORE INTO positions "
-            "(position_id, token_id, market_id, outcome_name, entry_order_id, "
-            "entry_price, entry_size_usdc, token_quantity, moonbag_quantity, status, opened_at, mode) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-            (position_id, token_id, market_id, outcome_name, order_id,
-             fill_price, stake_usdc, fill_quantity, moonbag_qty, now, self.mc.name),
-        )
-
-        # Place TP orders
-        for tp in tp_orders:
-            if tp.label == "moonbag_resolution":
-                # Don't place a market order for moonbag — just record it
-                conn.execute(
-                    "INSERT OR IGNORE INTO tp_orders "
-                    "(order_id, position_id, token_id, sell_price, sell_quantity, label, status, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'moonbag', ?)",
-                    (f"moonbag_{position_id}", position_id, token_id,
-                     tp.sell_price, tp.sell_quantity, tp.label, now),
-                )
-                continue
-
-            tp_result = self.clob.place_limit_order(
-                token_id=tp.token_id,
-                side="SELL",
-                price=tp.sell_price,
-                size=tp.sell_quantity,
-                label=tp.label,
-            )
+        pos = self._get_open_position(conn, token_id, market_id)
+        if pos is None:
+            position_id = str(uuid.uuid4())
             conn.execute(
-                "INSERT OR IGNORE INTO tp_orders "
-                "(order_id, position_id, token_id, sell_price, sell_quantity, label, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (tp_result.order_id, position_id, tp.token_id,
-                 tp.sell_price, tp.sell_quantity, tp.label,
-                 tp_result.status, now),
+                "INSERT INTO positions "
+                "(position_id, token_id, market_id, outcome_name, entry_order_id, "
+                "entry_price, entry_size_usdc, token_quantity, sold_quantity, moonbag_quantity, status, opened_at, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'open', ?, ?)",
+                (position_id, token_id, market_id, outcome_name, order_id, fill_price, stake_usdc, fill_quantity, now, self.mc.name),
             )
-            logger.info(
-                f"Placed TP SELL: token={token_id[:16]} {tp.label} "
-                f"@ ${tp.sell_price:.5f} qty={tp.sell_quantity:.2f} id={tp_result.order_id}"
+        else:
+            position_id = pos["position_id"]
+            total_usdc = float(pos["entry_size_usdc"] or 0.0) + stake_usdc
+            total_qty = float(pos["token_quantity"] or 0.0) + fill_quantity
+            avg_entry = total_usdc / max(total_qty, 1e-12)
+            conn.execute(
+                "UPDATE positions SET outcome_name=COALESCE(NULLIF(outcome_name, ''), ?), "
+                "entry_price=?, entry_size_usdc=?, token_quantity=? WHERE position_id=?",
+                (outcome_name, avg_entry, total_usdc, total_qty, position_id),
             )
+
+        self._reconcile_tp_orders(conn, position_id, token_id, market_id)
+        pos = conn.execute("SELECT * FROM positions WHERE position_id=?", (position_id,)).fetchone()
 
         conn.commit()
         conn.close()
 
-        # Record fill in ExposureManager after the main DB transaction is closed.
-        # ExposureManager uses its own SQLite connection; writing through it while
-        # the main fill transaction still holds a write lock can deadlock tests/replay.
         self.em.record_fill(market_id, token_id, fill_price, fill_quantity, fill_ts=now)
 
         logger.info(
-            f"Position opened: {position_id[:8]} token={token_id[:16]} "
-            f"entry=${fill_price:.5f} qty={fill_quantity:.2f} stake=${stake_usdc:.4f} "
-            f"moonbag={moonbag_qty:.2f}"
+            f"Position accumulated: {position_id[:8]} token={token_id[:16]} "
+            f"fill=${fill_price:.5f} delta_qty={fill_quantity:.2f} "
+            f"total_qty={float(pos['token_quantity']):.2f} avg_entry=${float(pos['entry_price']):.5f}"
         )
-        # Entry-fill alert disabled for data-collection mode (issue #57).
-        # Only hourly summary is sent — see main_loop._hourly_report_loop.
 
     def on_tp_filled(self, order_id: str, fill_price: float, fill_quantity: float) -> None:
         """Called when a TP SELL order gets filled. Accumulates partial PnL into position."""
@@ -818,9 +885,9 @@ class OrderManager:
             position_id = row["position_id"]
             pnl = (fill_price - entry_price) * fill_quantity
             conn.execute(
-                "UPDATE positions SET realized_pnl = COALESCE(realized_pnl, 0) + ? "
-                "WHERE position_id=?",
-                (pnl, position_id),
+                "UPDATE positions SET realized_pnl = COALESCE(realized_pnl, 0) + ?, "
+                "sold_quantity = COALESCE(sold_quantity, 0) + ? WHERE position_id=?",
+                (pnl, fill_quantity, position_id),
             )
             # Credit paper balance (TP fill = USDC received from selling tokens)
             if self.config.dry_run:
@@ -857,32 +924,25 @@ class OrderManager:
                 else float(pos["moonbag_quantity"])
             )
             entry_price = float(pos["entry_price"])
-            # Moonbag delta: add on top of TP PnL already accumulated in realized_pnl
-            moonbag_pnl = (resolution_price - entry_price) * moonbag_qty
-
-            # Live TP tokens (unfilled at resolution) must be valued at resolution_price,
-            # not silently discarded. For losers this is a small negative correction
-            # (entry_price * remaining_qty). For winners it captures tokens that
-            # skipped the TP price and resolved directly at $1.00.
             live_tps = conn.execute(
                 "SELECT sell_quantity, filled_quantity FROM tp_orders "
                 "WHERE position_id=? AND status='live'",
                 (pos["position_id"],),
             ).fetchall()
-            tp_residual_pnl = sum(
-                (resolution_price - entry_price) * (float(r["sell_quantity"]) - float(r["filled_quantity"]))
+            live_tp_remaining = sum(
+                float(r["sell_quantity"]) - float(r["filled_quantity"])
                 for r in live_tps
             )
+            sold_quantity = float(pos["sold_quantity"] or 0.0)
+            unscheduled_qty = max(
+                0.0,
+                float(pos["token_quantity"] or 0.0) - sold_quantity - moonbag_qty - live_tp_remaining,
+            )
+            remaining_qty = moonbag_qty + live_tp_remaining + unscheduled_qty
+            total_resolution_pnl = (resolution_price - entry_price) * remaining_qty
 
-            total_resolution_pnl = moonbag_pnl + tp_residual_pnl
-
-            # Credit paper balance: proceeds from moonbag + unfilled TP tokens at resolution
             if self.config.dry_run:
-                live_tp_remaining = sum(
-                    float(r["sell_quantity"]) - float(r["filled_quantity"])
-                    for r in live_tps
-                )
-                resolution_proceeds = resolution_price * (moonbag_qty + live_tp_remaining)
+                resolution_proceeds = resolution_price * remaining_qty
                 pb.credit(conn, resolution_proceeds, f"resolution {token_id[:16]} winner={is_winner}")
 
             conn.execute(
@@ -905,8 +965,8 @@ class OrderManager:
             outcome_icon = "🏆" if is_winner else "💀"
             logger.info(
                 f"Position resolved: {pos['position_id'][:8]} token={token_id[:16]} "
-                f"winner={is_winner} moonbag_pnl=${moonbag_pnl:.4f} "
-                f"tp_residual_pnl=${tp_residual_pnl:.4f}"
+                f"winner={is_winner} remaining_qty={remaining_qty:.2f} "
+                f"resolution_pnl=${total_resolution_pnl:.4f}"
             )
             # Resolution alert disabled for data-collection mode (issue #57).
             # Only hourly summary is sent — see main_loop._hourly_report_loop.

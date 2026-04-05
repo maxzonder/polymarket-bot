@@ -43,7 +43,7 @@ class TPOrder:
     token_id: str
     sell_price: float        # limit price for SELL order
     sell_quantity: float     # tokens to sell at this level
-    label: str               # "tp_5x", "tp_20x", "moonbag_resolution", etc.
+    label: str               # "tp_p10", "tp_p50", "moonbag_resolution", etc.
 
 
 class RiskManager:
@@ -157,12 +157,13 @@ class RiskManager:
 
     def build_tp_orders(self, position: SizedPosition) -> list[TPOrder]:
         """
-        Convert a filled position into TP orders.
+        Convert a filled/accumulated position into TP orders.
 
-        Example for big_swan_mode with entry at $0.002, stake=$0.01, qty=5 tokens:
-          tp_5x:   sell 1 token @ $0.010  (20% of 5)
-          tp_20x:  sell 1 token @ $0.040  (20% of 5)
-          moonbag: 3 tokens held to resolution (60%)
+        Binary-native semantics:
+          target_price = entry_price + progress * (1 - entry_price)
+
+        Example with entry at $0.10 and progress=0.50:
+          target_price = 0.10 + 0.50 * 0.90 = 0.55
         """
         orders: list[TPOrder] = []
         total_qty = position.token_quantity
@@ -170,13 +171,8 @@ class RiskManager:
         resolution_fraction = position.moonbag_fraction
 
         for tp in position.tp_levels:
-            # Validate TP is achievable (target price < $1.00)
-            target_price = entry_price * tp.x
-            if target_price >= 1.00:
-                # Binary markets cap at $1.00. Unreachable TP legs must roll into
-                # the resolution leg instead of disappearing from the exit plan.
-                resolution_fraction += tp.fraction
-                continue
+            target_price = entry_price + tp.progress * (1.0 - entry_price)
+            target_price = min(max(target_price, entry_price), 1.0)
 
             sell_qty = total_qty * tp.fraction
             sell_qty = round(sell_qty, 4)
@@ -184,7 +180,7 @@ class RiskManager:
                 resolution_fraction += tp.fraction
                 continue
 
-            label = f"tp_{int(tp.x)}x"
+            label = f"tp_p{int(round(tp.progress * 100))}"
             orders.append(TPOrder(
                 token_id=position.token_id,
                 sell_price=round(target_price, 6),

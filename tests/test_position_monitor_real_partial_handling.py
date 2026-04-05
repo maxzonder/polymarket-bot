@@ -52,7 +52,7 @@ def _make_positions_db(path):
     return conn
 
 
-def test_check_fills_real_accumulates_partial_buy_without_opening_position(tmp_path):
+def test_check_fills_real_passes_buy_partial_delta_into_accumulation(tmp_path):
     db_path = tmp_path / "positions.db"
     conn = _make_positions_db(db_path)
     conn.execute(
@@ -78,7 +78,9 @@ def test_check_fills_real_accumulates_partial_buy_without_opening_position(tmp_p
     conn.close()
 
     assert abs(float(filled) - 0.5) < 1e-9
-    assert om.entry_calls == []
+    assert len(om.entry_calls) == 1
+    assert om.entry_calls[0]["order_id"] == "ord1"
+    assert abs(float(om.entry_calls[0]["fill_quantity"]) - 0.5) < 1e-9
 
 
 def test_check_fills_real_passes_tp_partial_delta(tmp_path):

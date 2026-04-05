@@ -45,6 +45,6 @@ def test_on_entry_filled_uses_actual_resolution_quantity(tmp_path):
     conn.close()
 
     assert pos is not None and moonbag is not None
-    assert abs(float(pos["moonbag_quantity"]) - 100.0) < 1e-9
-    assert abs(float(moonbag["sell_quantity"]) - 100.0) < 1e-9
+    assert abs(float(pos["moonbag_quantity"]) - 70.0) < 1e-9
+    assert abs(float(moonbag["sell_quantity"]) - 70.0) < 1e-9
     assert abs(float(pos["realized_pnl"]) - 90.0) < 1e-9
