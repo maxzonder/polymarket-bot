@@ -912,6 +912,7 @@ class OrderManager:
             "SELECT * FROM positions WHERE token_id=? AND status='open'",
             (token_id,),
         ).fetchall()
+        resolved_markets = {(str(pos["market_id"]), str(pos["token_id"])) for pos in positions}
 
         for pos in positions:
             moonbag_row = conn.execute(
@@ -970,6 +971,21 @@ class OrderManager:
             )
             # Resolution alert disabled for data-collection mode (issue #57).
             # Only hourly summary is sent — see main_loop._hourly_report_loop.
+
+        # Cancel unresolved resting BUYs for resolved market/token pairs so
+        # dry-run reserved_resting is released and the book does not retain
+        # impossible post-resolution entries.
+        for market_id, token_id_for_cancel in resolved_markets:
+            live_resting = conn.execute(
+                "SELECT order_id FROM resting_orders WHERE market_id=? AND token_id=? AND status='live'",
+                (market_id, token_id_for_cancel),
+            ).fetchall()
+            for row in live_resting:
+                self.clob.cancel_order(row["order_id"])
+                conn.execute(
+                    "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
+                    (row["order_id"],),
+                )
 
         conn.commit()
         conn.close()
