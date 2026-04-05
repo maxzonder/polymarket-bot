@@ -66,6 +66,7 @@ from config import BotConfig, ModeConfig
 from strategy.market_scorer import MarketScore, MarketScorer
 from strategy.risk_manager import RiskManager
 from strategy.screener import EntryCandidate
+from strategy.entry_levels import suggested_entry_levels
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, DATA_DIR
 
@@ -476,12 +477,13 @@ def simulate_token(
     if current_price >= 0.99:
         return {"status": "rejected_price_ge_099", "token_id": token_id, "market_id": market_id}
 
-    # ── Determine entry levels: only levels BELOW current price ───────────────
-    # This is honest: we pre-position below market, not at current price.
-    # (scanner_entry = True would also enter at current price — we respect that here)
-    entry_levels = [lvl for lvl in mc.entry_price_levels if lvl < current_price]
-    if not entry_levels and mc.scanner_entry:
-        entry_levels = [current_price]
+    # Entry tiers are MAX acceptable prices, not strictly-below-current bids.
+    # If the market is already below a tier at discovery, that tier is still valid.
+    entry_levels = suggested_entry_levels(
+        current_price=current_price,
+        configured_levels=mc.entry_price_levels,
+        scanner_entry=mc.scanner_entry,
+    )
     if not entry_levels:
         return {"status": "rejected_no_entry_levels", "token_id": token_id, "market_id": market_id,
                 "current_price": current_price}
@@ -526,27 +528,28 @@ def simulate_token(
             "filled_qty": 0.0,
         }
         for result in placement_results
-        if result.status in ("live", "matched")
+        if result.status == "live"
     }
 
-    if not pending_buys:
+    immediate_matches = [result for result in placement_results if result.status == "matched"]
+    if not pending_buys and not immediate_matches:
         return {"status": "no_orders_placed", "token_id": token_id, "market_id": market_id}
 
-    filled_entries = 0
+    filled_entries = len(immediate_matches)
     filled_tps = 0
 
-    def _dispatch_fill(order_id: str, order: dict, fill_qty: float) -> None:
+    def _dispatch_fill(order_id: str, order: dict, fill_qty: float, fill_price: float) -> None:
         """Dispatch a single incremental fill immediately so TP ladder is live."""
         nonlocal filled_entries
         if fill_qty <= 1e-9:
             return
-        clob.paper_simulate_fill(order_id, order["price"], max(order["filled_qty"], fill_qty))
+        clob.paper_simulate_fill(order_id, fill_price, max(order["filled_qty"], fill_qty))
         try:
             om.on_entry_filled(
                 order_id=order_id,
                 token_id=token_id,
                 market_id=market_id,
-                fill_price=order["price"],
+                fill_price=fill_price,
                 fill_quantity=fill_qty,
                 outcome_name=outcome,
             )
@@ -558,7 +561,7 @@ def simulate_token(
     # (synthetic best_ask == current_price), so replay them as immediate fills.
     if used_scanner_entry:
         for order_id, order in list(pending_buys.items()):
-            _dispatch_fill(order_id, order, order["remaining_qty"])
+            _dispatch_fill(order_id, order, order["remaining_qty"], current_price)
             del pending_buys[order_id]
 
     # ── Replay trades after discovery time ────────────────────────────────────
@@ -590,7 +593,7 @@ def simulate_token(
                     trade_budget     -= fill_qty
                     order["remaining_qty"] -= fill_qty
                     order["filled_qty"]    += fill_qty
-                    _dispatch_fill(order_id, order, fill_qty)
+                    _dispatch_fill(order_id, order, fill_qty, trade_price)
                     if order["remaining_qty"] <= 1e-9:
                         del pending_buys[order_id]
 

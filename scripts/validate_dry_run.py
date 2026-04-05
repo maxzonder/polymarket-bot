@@ -192,6 +192,36 @@ def scenario_resting_bid_uses_entry_levels() -> tuple[bool, str]:
         return True, ""
 
 
+# ── Scenario 2b: already-cheap market must still use max-price tiers ─────────
+
+def scenario_resting_bid_below_all_levels_buys_now() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        om, _, _ = make_om(tmp_dir, BIG_SWAN_MODE)
+        book = fake_book(best_ask=0.01, best_bid=0.009, ask_depth=200.0, bid_depth=50.0)
+        candidate = fake_candidate(0.01, list(BIG_SWAN_MODE.entry_price_levels))
+
+        with patch("execution.order_manager.get_orderbook", return_value=book):
+            results = om.process_candidate(candidate)
+
+        if len(results) != len(BIG_SWAN_MODE.entry_price_levels):
+            return False, f"Expected {len(BIG_SWAN_MODE.entry_price_levels)} tier orders, got {len(results)}"
+        conn = sqlite3.connect(str(tmp_dir / "positions.db"))
+        conn.row_factory = sqlite3.Row
+        pos = conn.execute(
+            "SELECT entry_price, entry_size_usdc, token_quantity FROM positions LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if pos is None:
+            return False, "Expected immediate accumulated position for already-cheap market"
+        if abs(float(pos["entry_price"]) - 0.01) > 1e-9:
+            return False, f"Expected better fill price 0.01, got {pos['entry_price']}"
+        expected_total_stake = BIG_SWAN_MODE.stake_usdc * len(BIG_SWAN_MODE.entry_price_levels)
+        if float(pos["entry_size_usdc"]) + 1e-9 < expected_total_stake:
+            return False, f"Expected at least configured tier budget {expected_total_stake}, got {pos['entry_size_usdc']}"
+        return True, ""
+
+
 # ── Scenario 3: balance gate ─────────────────────────────────────────────────
 
 def scenario_balance_gate_blocks_extra_resting_bids() -> tuple[bool, str]:
@@ -540,6 +570,7 @@ def scenario_honest_replay_terminal_cleanup_cancels_paper_orders() -> tuple[bool
 SCENARIOS = [
     ("scanner_entry_best_ask", scenario_scanner_entry_best_ask),
     ("resting_bid_uses_entry_levels", scenario_resting_bid_uses_entry_levels),
+    ("resting_bid_below_all_levels_buys_now", scenario_resting_bid_below_all_levels_buys_now),
     ("balance_gate_blocks_extra_resting_bids", scenario_balance_gate_blocks_extra_resting_bids),
     ("dry_partial_buy_accumulates_into_position", scenario_dry_partial_buy_accumulates_into_position),
     ("tp_partial_fill_keeps_orders_live_until_full", scenario_tp_partial_fill_keeps_orders_live_until_full),
