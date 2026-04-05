@@ -216,7 +216,7 @@ def scenario_balance_gate_blocks_extra_resting_bids() -> tuple[bool, str]:
 
 # ── Scenario 4: dry partial BUY accumulation ────────────────────────────────
 
-def scenario_dry_partial_buy_accumulates_without_position() -> tuple[bool, str]:
+def scenario_dry_partial_buy_accumulates_into_position() -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         om, config, clob = make_om(tmp_dir, BIG_SWAN_MODE)
@@ -231,14 +231,25 @@ def scenario_dry_partial_buy_accumulates_without_position() -> tuple[bool, str]:
 
         resting = read_one(str(tmp_dir / "positions.db"), "SELECT filled_quantity, status FROM resting_orders WHERE order_id='ord_partial_buy'")
         paper = read_one(str(tmp_dir / "paper.db"), "SELECT filled_size, status FROM paper_orders WHERE order_id='ord_partial_buy'")
-        pos_count = count_rows(str(tmp_dir / "positions.db"), "positions")
+        pos = read_one(
+            str(tmp_dir / "positions.db"),
+            "SELECT token_quantity, entry_size_usdc, entry_price, status FROM positions LIMIT 1",
+        )
 
         if resting is None or abs(float(resting["filled_quantity"]) - 0.5) > 1e-9:
             return False, f"Expected resting filled_quantity=0.5, got {resting}"
         if paper is None or abs(float(paper["filled_size"]) - 0.5) > 1e-9 or paper["status"] != "live":
             return False, f"Expected paper order live with filled_size=0.5, got {paper}"
-        if pos_count != 0:
-            return False, f"Expected no open position yet for partial BUY, got {pos_count}"
+        if pos is None:
+            return False, "Expected accumulated position row after partial BUY"
+        if pos["status"] != "open":
+            return False, f"Expected open accumulated position, got {pos}"
+        if abs(float(pos["token_quantity"]) - 0.5) > 1e-9:
+            return False, f"Expected token_quantity=0.5, got {pos}"
+        if abs(float(pos["entry_size_usdc"]) - 0.005) > 1e-9:
+            return False, f"Expected entry_size_usdc=0.005, got {pos}"
+        if abs(float(pos["entry_price"]) - 0.01) > 1e-9:
+            return False, f"Expected entry_price=0.01, got {pos}"
         return True, ""
 
 
@@ -371,8 +382,10 @@ def scenario_real_mode_monitor_handles_partial_cumulative_fills() -> tuple[bool,
         resting = read_one(str(db_path), "SELECT filled_quantity FROM resting_orders WHERE order_id='ord_real_partial'")
         if resting is None or abs(float(resting["filled_quantity"]) - 0.5) > 1e-9:
             return False, f"Expected recorded real BUY partial=0.5, got {resting}"
-        if om.entry_calls:
-            return False, f"Expected no full position open on partial BUY, got {om.entry_calls}"
+        if len(om.entry_calls) != 1:
+            return False, f"Expected one BUY delta callback on partial fill, got {om.entry_calls}"
+        if abs(float(om.entry_calls[0]["fill_quantity"]) - 0.5) > 1e-9:
+            return False, f"Expected BUY delta fill=0.5, got {om.entry_calls}"
         if len(om.tp_calls) != 1 or abs(float(om.tp_calls[0][2]) - 3.5) > 1e-9:
             return False, f"Expected TP delta fill=3.5, got {om.tp_calls}"
         return True, ""
@@ -528,7 +541,7 @@ SCENARIOS = [
     ("scanner_entry_best_ask", scenario_scanner_entry_best_ask),
     ("resting_bid_uses_entry_levels", scenario_resting_bid_uses_entry_levels),
     ("balance_gate_blocks_extra_resting_bids", scenario_balance_gate_blocks_extra_resting_bids),
-    ("dry_partial_buy_accumulates_without_position", scenario_dry_partial_buy_accumulates_without_position),
+    ("dry_partial_buy_accumulates_into_position", scenario_dry_partial_buy_accumulates_into_position),
     ("tp_partial_fill_keeps_orders_live_until_full", scenario_tp_partial_fill_keeps_orders_live_until_full),
     ("resolution_uses_actual_moonbag_leg", scenario_resolution_uses_actual_moonbag_leg),
     ("real_mode_monitor_handles_partial_cumulative_fills", scenario_real_mode_monitor_handles_partial_cumulative_fills),
