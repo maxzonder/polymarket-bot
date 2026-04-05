@@ -9,7 +9,7 @@ Use it for:
 - cheap exploration of buy levels;
 - comparing binary-native TP ladders (`progress/fraction`);
 - estimating resolution-vs-TP tradeoffs;
-- generating candidate presets for later honest-replay validation.
+- ranking candidate buy-set / ladder presets before honest replay.
 
 Do NOT interpret the output as final live expectancy.
 Final validation should go through `scripts/run_honest_replay.py`.
@@ -19,22 +19,47 @@ Examples:
     python3 scripts/optimize_big_swan_params.py --entry-levels 0.01,0.05,0.10
     python3 scripts/optimize_big_swan_params.py --tp-levels 0.10:0.10,0.50:0.20 --moonbag 0.70
     python3 scripts/optimize_big_swan_params.py --from-date 2026-01-01 --to-date 2026-01-31 --group-by month
+    python3 scripts/optimize_big_swan_params.py --search --top 20
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import sqlite3
 import sys
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import BIG_SWAN_MODE, TPLevel
-from strategy.big_swan_optimizer import SwanPath, evaluate_ladder, validate_ladder
+from strategy.big_swan_optimizer import (
+    EntryPlanEvaluation,
+    SwanPath,
+    combine_entry_evaluations,
+    evaluate_entry_plan,
+    evaluate_ladder,
+    validate_ladder,
+)
 from utils.paths import DB_PATH
+
+EPS = 1e-9
+DEFAULT_SEARCH_ENTRY_CANDIDATES = (0.01, 0.02, 0.03, 0.05, 0.07, 0.10, 0.12, 0.15, 0.20)
+DEFAULT_SEARCH_ENTRY_SET_SIZES = (1, 2, 3)
+DEFAULT_SEARCH_PROGRESS_CANDIDATES = (0.05, 0.10, 0.20, 0.35, 0.50, 0.75, 0.90)
+DEFAULT_SEARCH_TP_LEG_COUNTS = (0, 1, 2)
+DEFAULT_SEARCH_MOONBAGS = (0.40, 0.50, 0.60, 0.70, 0.80, 1.00)
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    entry_plan: EntryPlanEvaluation
+    tp_levels: tuple[TPLevel, ...]
+    moonbag: float
+    sort_value: float
 
 
 def parse_entry_levels(raw: str) -> tuple[float, ...]:
@@ -45,6 +70,20 @@ def parse_entry_levels(raw: str) -> tuple[float, ...]:
         if level <= 0.0 or level >= 1.0:
             raise ValueError(f"Entry levels must be in (0, 1), got {level}")
     return levels
+
+
+def parse_float_list(raw: str) -> tuple[float, ...]:
+    values = tuple(float(x.strip()) for x in raw.split(",") if x.strip())
+    if not values:
+        raise ValueError("No float values provided")
+    return values
+
+
+def parse_int_list(raw: str) -> tuple[int, ...]:
+    values = tuple(int(x.strip()) for x in raw.split(",") if x.strip())
+    if not values:
+        raise ValueError("No integer values provided")
+    return values
 
 
 def parse_tp_levels(raw: str) -> tuple[TPLevel, ...]:
@@ -58,6 +97,34 @@ def parse_tp_levels(raw: str) -> tuple[TPLevel, ...]:
         progress_str, fraction_str = chunk.split(":", 1)
         levels.append(TPLevel(progress=float(progress_str), fraction=float(fraction_str)))
     return tuple(sorted(levels, key=lambda level: level.progress))
+
+
+def positive_compositions(total_units: int, parts: int) -> Iterable[tuple[int, ...]]:
+    if parts == 0:
+        if total_units == 0:
+            yield ()
+        return
+    if parts == 1:
+        if total_units > 0:
+            yield (total_units,)
+        return
+    for first in range(1, total_units - parts + 2):
+        for tail in positive_compositions(total_units - first, parts - 1):
+            yield (first,) + tail
+
+
+def generate_fraction_vectors(total_fraction: float, leg_count: int, step: float) -> Iterable[tuple[float, ...]]:
+    if leg_count == 0:
+        if abs(total_fraction) <= EPS:
+            yield ()
+        return
+    total_units = round(total_fraction / step)
+    if abs(total_units * step - total_fraction) > 1e-9:
+        return
+    if total_units < leg_count:
+        return
+    for composition in positive_compositions(total_units, leg_count):
+        yield tuple(unit * step for unit in composition)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -98,6 +165,50 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=8,
         help="How many groups to print when --group-by is enabled",
+    )
+    parser.add_argument("--search", action="store_true", help="Run grid search over candidate entry sets / ladders")
+    parser.add_argument(
+        "--candidate-entry-levels",
+        default=",".join(f"{x:g}" for x in DEFAULT_SEARCH_ENTRY_CANDIDATES),
+        help="Candidate entry levels for search mode",
+    )
+    parser.add_argument(
+        "--entry-set-sizes",
+        default=",".join(str(x) for x in DEFAULT_SEARCH_ENTRY_SET_SIZES),
+        help="Comma-separated entry-set sizes for search mode, e.g. 1,2,3",
+    )
+    parser.add_argument(
+        "--candidate-progress-levels",
+        default=",".join(f"{x:g}" for x in DEFAULT_SEARCH_PROGRESS_CANDIDATES),
+        help="Candidate TP progress levels for search mode",
+    )
+    parser.add_argument(
+        "--tp-leg-counts",
+        default=",".join(str(x) for x in DEFAULT_SEARCH_TP_LEG_COUNTS),
+        help="Comma-separated TP leg counts for search mode, e.g. 0,1,2",
+    )
+    parser.add_argument(
+        "--moonbag-options",
+        default=",".join(f"{x:g}" for x in DEFAULT_SEARCH_MOONBAGS),
+        help="Comma-separated moonbag candidates for search mode",
+    )
+    parser.add_argument(
+        "--fraction-step",
+        type=float,
+        default=0.10,
+        help="Fraction grid step for search mode, e.g. 0.10 or 0.05",
+    )
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=20,
+        help="Top search results to print",
+    )
+    parser.add_argument(
+        "--sort-by",
+        choices=["total_ev", "avg_ev_per_filled_share", "roi_on_stake", "total_fill_count"],
+        default="total_ev",
+        help="Search ranking metric",
     )
     return parser
 
@@ -205,7 +316,17 @@ def fmt_pct(value: float) -> str:
 
 
 def fmt_ratio(value: float) -> str:
-    return f"{value:.3f}"
+    return f"{value:.4f}"
+
+
+def format_entry_levels(levels: Sequence[float]) -> str:
+    return "[" + ", ".join(f"{level:.3f}" for level in levels) + "]"
+
+
+def format_tp_levels(levels: Sequence[TPLevel]) -> str:
+    if not levels:
+        return "[]"
+    return "[" + ", ".join(f"{level.progress:.2f}:{level.fraction:.2f}" for level in levels) + "]"
 
 
 def print_header(args: argparse.Namespace, paths: list[SwanPath], tp_levels: tuple[TPLevel, ...]) -> None:
@@ -228,7 +349,13 @@ def print_header(args: argparse.Namespace, paths: list[SwanPath], tp_levels: tup
     print()
 
 
-def print_evaluation_block(label: str, entry_price: float, paths: list[SwanPath], tp_levels: tuple[TPLevel, ...], moonbag: float) -> None:
+def print_evaluation_block(
+    label: str,
+    entry_price: float,
+    paths: list[SwanPath],
+    tp_levels: tuple[TPLevel, ...],
+    moonbag: float,
+) -> None:
     summary = evaluate_ladder(paths=paths, entry_price=entry_price, tp_levels=tp_levels, moonbag_fraction=moonbag)
     print(f"entry={entry_price:.4f} [{label}]")
     print(f"  fills={summary.path_count}")
@@ -254,6 +381,156 @@ def print_evaluation_block(label: str, entry_price: float, paths: list[SwanPath]
     print()
 
 
+def generate_search_ladders(
+    progress_candidates: Sequence[float],
+    tp_leg_counts: Sequence[int],
+    moonbag_options: Sequence[float],
+    fraction_step: float,
+) -> list[tuple[tuple[TPLevel, ...], float]]:
+    ladders: list[tuple[tuple[TPLevel, ...], float]] = []
+    for moonbag in moonbag_options:
+        if moonbag < 0.0 or moonbag > 1.0:
+            continue
+        for leg_count in tp_leg_counts:
+            if leg_count < 0:
+                continue
+            if leg_count == 0:
+                if abs(moonbag - 1.0) <= EPS:
+                    ladders.append((tuple(), moonbag))
+                continue
+
+            remaining_fraction = 1.0 - moonbag
+            if remaining_fraction <= 0.0:
+                continue
+
+            for progress_combo in itertools.combinations(sorted(set(progress_candidates)), leg_count):
+                for fractions in generate_fraction_vectors(remaining_fraction, leg_count, fraction_step):
+                    tp_levels = tuple(
+                        TPLevel(progress=progress, fraction=fraction)
+                        for progress, fraction in zip(progress_combo, fractions)
+                    )
+                    validate_ladder(tp_levels, moonbag)
+                    ladders.append((tp_levels, moonbag))
+    return ladders
+
+
+def plan_sort_value(plan: EntryPlanEvaluation, sort_by: str) -> float:
+    if sort_by == "total_ev":
+        return plan.total_ev
+    if sort_by == "avg_ev_per_filled_share":
+        return plan.avg_ev_per_filled_share
+    if sort_by == "roi_on_stake":
+        return plan.roi_on_stake
+    if sort_by == "total_fill_count":
+        return float(plan.total_fill_count)
+    raise ValueError(f"Unsupported sort_by: {sort_by}")
+
+
+def run_search(args: argparse.Namespace, paths: list[SwanPath]) -> None:
+    entry_candidates = parse_entry_levels(args.candidate_entry_levels)
+    entry_set_sizes = tuple(sorted(set(parse_int_list(args.entry_set_sizes))))
+    progress_candidates = parse_float_list(args.candidate_progress_levels)
+    tp_leg_counts = tuple(sorted(set(parse_int_list(args.tp_leg_counts))))
+    moonbag_options = tuple(sorted(set(parse_float_list(args.moonbag_options))))
+    fraction_step = float(args.fraction_step)
+    if fraction_step <= 0.0 or fraction_step >= 1.0:
+        raise ValueError("fraction_step must be in (0, 1)")
+
+    ladders = generate_search_ladders(
+        progress_candidates=progress_candidates,
+        tp_leg_counts=tp_leg_counts,
+        moonbag_options=moonbag_options,
+        fraction_step=fraction_step,
+    )
+    if not ladders:
+        raise SystemExit("Search space is empty: no valid ladder candidates generated")
+
+    entry_sets = [
+        entry_set
+        for size in entry_set_sizes
+        for entry_set in itertools.combinations(entry_candidates, size)
+    ]
+    if not entry_sets:
+        raise SystemExit("Search space is empty: no entry sets generated")
+
+    print("search_mode=on")
+    print(f"candidate_entry_levels={format_entry_levels(entry_candidates)}")
+    print(f"entry_set_sizes={list(entry_set_sizes)}")
+    print(f"candidate_progress_levels={list(progress_candidates)}")
+    print(f"tp_leg_counts={list(tp_leg_counts)}")
+    print(f"moonbag_options={list(moonbag_options)}")
+    print(f"fraction_step={fraction_step:.4f}")
+    print(f"generated_entry_sets={len(entry_sets)}")
+    print(f"generated_ladders={len(ladders)}")
+    print(f"sort_by={args.sort_by}")
+    print()
+
+    per_entry_cache: dict[tuple[float, int], object] = {}
+    for ladder_idx, (tp_levels, moonbag) in enumerate(ladders):
+        for entry in entry_candidates:
+            per_entry_cache[(entry, ladder_idx)] = evaluate_ladder(
+                paths=paths,
+                entry_price=entry,
+                tp_levels=tp_levels,
+                moonbag_fraction=moonbag,
+            )
+
+    results: list[SearchResult] = []
+    for ladder_idx, (tp_levels, moonbag) in enumerate(ladders):
+        for entry_set in entry_sets:
+            plan = combine_entry_evaluations(
+                tuple(per_entry_cache[(entry, ladder_idx)] for entry in entry_set)
+            )
+            results.append(
+                SearchResult(
+                    entry_plan=plan,
+                    tp_levels=tp_levels,
+                    moonbag=moonbag,
+                    sort_value=plan_sort_value(plan, args.sort_by),
+                )
+            )
+
+    results.sort(
+        key=lambda result: (
+            result.sort_value,
+            result.entry_plan.total_ev,
+            result.entry_plan.roi_on_stake,
+            result.entry_plan.total_fill_count,
+        ),
+        reverse=True,
+    )
+
+    print(f"evaluated_parameter_sets={len(results)}")
+    print(f"top_{args.top}:")
+    for idx, result in enumerate(results[: args.top], start=1):
+        plan = result.entry_plan
+        print(
+            f"{idx:>2}. sort={result.sort_value:.6f} "
+            f"entries={format_entry_levels(plan.entry_levels)} "
+            f"tp={format_tp_levels(result.tp_levels)} "
+            f"moonbag={result.moonbag:.2f}"
+        )
+        print(
+            f"    fills={plan.total_fill_count} "
+            f"win_rate={fmt_pct(plan.weighted_win_rate)} "
+            f"total_cost={plan.total_cost:.4f} "
+            f"total_payout={plan.total_payout:.4f} "
+            f"total_ev={plan.total_ev:.4f}"
+        )
+        print(
+            f"    avg_cost/fill={plan.avg_cost_per_filled_share:.4f} "
+            f"avg_payout/fill={plan.avg_total_payout_per_filled_share:.4f} "
+            f"avg_ev/fill={plan.avg_ev_per_filled_share:.4f} "
+            f"roi={fmt_pct(plan.roi_on_stake)} "
+            f"resolution_share={fmt_pct(plan.resolution_share_of_payout)}"
+        )
+        per_entry_bits = ", ".join(
+            f"{summary.entry_price:.3f}:fills={summary.path_count}:ev/share={summary.ev_per_share:.4f}"
+            for summary in plan.per_entry
+        )
+        print(f"    per_entry: {per_entry_bits}")
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -273,6 +550,32 @@ def main() -> None:
         raise SystemExit("No swan paths found for the given filters")
 
     print_header(args, paths, tp_levels)
+
+    if args.search:
+        run_search(args, paths)
+        return
+
+    plan = evaluate_entry_plan(
+        paths=paths,
+        entry_levels=entry_levels,
+        tp_levels=tp_levels,
+        moonbag_fraction=args.moonbag,
+    )
+    print("plan_summary")
+    print(f"  entries={format_entry_levels(plan.entry_levels)}")
+    print(f"  fills={plan.total_fill_count}")
+    print(f"  weighted_win_rate={fmt_pct(plan.weighted_win_rate)}")
+    print(f"  total_cost={plan.total_cost:.4f}")
+    print(f"  total_tp_payout={plan.total_tp_payout:.4f}")
+    print(f"  total_resolution_payout={plan.total_resolution_payout:.4f}")
+    print(f"  total_payout={plan.total_payout:.4f}")
+    print(f"  total_ev={plan.total_ev:.4f}")
+    print(f"  avg_cost/fill={plan.avg_cost_per_filled_share:.4f}")
+    print(f"  avg_payout/fill={plan.avg_total_payout_per_filled_share:.4f}")
+    print(f"  avg_ev/fill={plan.avg_ev_per_filled_share:.4f}")
+    print(f"  roi_on_stake={fmt_pct(plan.roi_on_stake)}")
+    print(f"  resolution_share_of_payout={fmt_pct(plan.resolution_share_of_payout)}")
+    print()
 
     for entry_price in entry_levels:
         print_evaluation_block("global", entry_price, paths, tp_levels, args.moonbag)

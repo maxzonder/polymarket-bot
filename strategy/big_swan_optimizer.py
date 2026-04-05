@@ -47,6 +47,24 @@ class LadderEvaluation:
     leg_results: tuple[LegResult, ...]
 
 
+@dataclass(frozen=True)
+class EntryPlanEvaluation:
+    entry_levels: tuple[float, ...]
+    total_fill_count: int
+    weighted_win_rate: float
+    total_cost: float
+    total_tp_payout: float
+    total_resolution_payout: float
+    total_payout: float
+    total_ev: float
+    avg_cost_per_filled_share: float
+    avg_total_payout_per_filled_share: float
+    avg_ev_per_filled_share: float
+    roi_on_stake: float
+    resolution_share_of_payout: float
+    per_entry: tuple[LadderEvaluation, ...]
+
+
 def progress_to_target_price(entry_price: float, progress: float) -> float:
     if entry_price <= 0.0 or entry_price >= 1.0:
         raise ValueError(f"entry_price must be in (0, 1), got {entry_price}")
@@ -218,3 +236,74 @@ def evaluate_ladder(
         avg_hours_to_close_from_floor=avg_hours,
         leg_results=leg_results,
     )
+
+
+def combine_entry_evaluations(per_entry: Sequence[LadderEvaluation]) -> EntryPlanEvaluation:
+    total_fill_count = sum(summary.path_count for summary in per_entry)
+    total_cost = sum(summary.path_count * summary.entry_price for summary in per_entry)
+    total_tp_payout = sum(
+        summary.path_count * summary.avg_tp_payout_per_share
+        for summary in per_entry
+    )
+    total_resolution_payout = sum(
+        summary.path_count * summary.avg_resolution_payout_per_share
+        for summary in per_entry
+    )
+    total_payout = total_tp_payout + total_resolution_payout
+    total_ev = total_payout - total_cost
+
+    if total_fill_count == 0:
+        avg_cost_per_filled_share = 0.0
+        avg_total_payout_per_filled_share = 0.0
+        avg_ev_per_filled_share = 0.0
+        weighted_win_rate = 0.0
+    else:
+        avg_cost_per_filled_share = total_cost / total_fill_count
+        avg_total_payout_per_filled_share = total_payout / total_fill_count
+        avg_ev_per_filled_share = total_ev / total_fill_count
+        weighted_win_rate = (
+            sum(summary.path_count * summary.win_rate for summary in per_entry)
+            / total_fill_count
+        )
+
+    roi_on_stake = (total_payout / total_cost - 1.0) if total_cost > 0 else -1.0
+    resolution_share_of_payout = (
+        total_resolution_payout / total_payout if total_payout > 0 else 0.0
+    )
+
+    return EntryPlanEvaluation(
+        entry_levels=tuple(summary.entry_price for summary in per_entry),
+        total_fill_count=total_fill_count,
+        weighted_win_rate=weighted_win_rate,
+        total_cost=total_cost,
+        total_tp_payout=total_tp_payout,
+        total_resolution_payout=total_resolution_payout,
+        total_payout=total_payout,
+        total_ev=total_ev,
+        avg_cost_per_filled_share=avg_cost_per_filled_share,
+        avg_total_payout_per_filled_share=avg_total_payout_per_filled_share,
+        avg_ev_per_filled_share=avg_ev_per_filled_share,
+        roi_on_stake=roi_on_stake,
+        resolution_share_of_payout=resolution_share_of_payout,
+        per_entry=tuple(per_entry),
+    )
+
+
+def evaluate_entry_plan(
+    paths: Iterable[SwanPath],
+    entry_levels: Sequence[float],
+    tp_levels: Sequence[TPLevel],
+    moonbag_fraction: float,
+) -> EntryPlanEvaluation:
+    validate_ladder(tp_levels, moonbag_fraction)
+
+    per_entry = tuple(
+        evaluate_ladder(
+            paths=paths,
+            entry_price=entry_price,
+            tp_levels=tp_levels,
+            moonbag_fraction=moonbag_fraction,
+        )
+        for entry_price in entry_levels
+    )
+    return combine_entry_evaluations(per_entry)

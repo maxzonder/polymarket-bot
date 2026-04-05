@@ -3,7 +3,13 @@ from __future__ import annotations
 import unittest
 
 from config import TPLevel
-from strategy.big_swan_optimizer import SwanPath, evaluate_ladder, evaluate_path_ladder, progress_to_target_price
+from strategy.big_swan_optimizer import (
+    SwanPath,
+    evaluate_entry_plan,
+    evaluate_ladder,
+    evaluate_path_ladder,
+    progress_to_target_price,
+)
 
 
 def make_path(**overrides) -> SwanPath:
@@ -88,6 +94,30 @@ class BigSwanOptimizerTests(unittest.TestCase):
         self.assertEqual(summary.path_count, 2)
         self.assertEqual(round(summary.leg_results[0].hit_rate, 6), 1.0)
         self.assertEqual(round(summary.leg_results[1].hit_rate, 6), 0.5)
+
+    def test_entry_plan_aggregates_multiple_buckets(self) -> None:
+        tp_levels = (
+            TPLevel(progress=0.10, fraction=0.10),
+            TPLevel(progress=0.50, fraction=0.20),
+        )
+        paths = [
+            make_path(buy_min_price=0.01, max_traded_price=0.20, is_winner=True),
+            make_path(buy_min_price=0.08, max_traded_price=0.30, is_winner=False, token_id="t2"),
+        ]
+
+        plan = evaluate_entry_plan(
+            paths=paths,
+            entry_levels=(0.01, 0.10),
+            tp_levels=tp_levels,
+            moonbag_fraction=0.70,
+        )
+
+        self.assertEqual(plan.total_fill_count, 3)
+        self.assertGreater(plan.total_cost, 0.0)
+        self.assertGreater(plan.total_payout, 0.0)
+        self.assertEqual(len(plan.per_entry), 2)
+        self.assertEqual(plan.per_entry[0].path_count, 1)
+        self.assertEqual(plan.per_entry[1].path_count, 2)
 
 
 if __name__ == "__main__":
