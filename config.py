@@ -188,7 +188,7 @@ BALANCED_MODE = ModeConfig(
 # Budget and levels are defined together so market_score_tiers stakes auto-scale with budget.
 # Change _BIG_SWAN_BUDGET or _BIG_SWAN_LEVELS here — tiers update automatically.
 _BIG_SWAN_BUDGET = 2.0
-_BIG_SWAN_LEVELS = (0.01, 0.10, 0.15)
+_BIG_SWAN_LEVELS = (0.12, 0.15, 0.20)
 _bsm_s = _BIG_SWAN_BUDGET / len(_BIG_SWAN_LEVELS)  # stake per level at full-budget allocation
 
 BIG_SWAN_MODE = ModeConfig(
@@ -198,13 +198,9 @@ BIG_SWAN_MODE = ModeConfig(
     entry_price_max=0.20,       # must match SWAN_BUY_PRICE_THRESHOLD — no scorer data above this
     use_resting_bids=True,
     scanner_entry=False,        # ONLY resting bids; no chasing dips
-    # First-step binary-native ladder.
-    # Tier-aware progress presets are intentionally deferred.
-    tp_levels=(
-        TPLevel(progress=0.10, fraction=0.10),
-        TPLevel(progress=0.50, fraction=0.20),
-    ),
-    moonbag_fraction=0.70,
+    # Current research winner: high-entry buckets with pure resolution hold.
+    tp_levels=(),
+    moonbag_fraction=1.00,
     min_entry_fill_score=0.02,  # low bar — wide coverage
     min_resolution_score=0.15,
     min_real_x_historical=10.0,
