@@ -294,17 +294,14 @@ def _compare_runs(run1: Path, run2: Path) -> None:
         print(f"run2={data2['run_dir']}")
         print()
 
-        headers = ["название", data1['run_dir'].name, data2['run_dir'].name]
-        rows = []
-        for label, key, kind in QUICK_ROWS:
-            rows.append([
-                label,
-                _fmt(data1['metrics'].get(key), kind),
-                _fmt(data2['metrics'].get(key), kind),
-            ])
-
         _print_section("compare")
-        _print_ascii_table(headers, rows, fenced=True)
+        print(f"run1_name: {data1['run_dir'].name}")
+        print(f"run2_name: {data2['run_dir'].name}")
+        print()
+        for label, key, kind in QUICK_ROWS:
+            v1 = _fmt(data1['metrics'].get(key), kind)
+            v2 = _fmt(data2['metrics'].get(key), kind)
+            print(f"{label}: {v1} | {v2}")
 
         _print_section("differing config values")
         snap1 = data1.get("config_snapshot") or {}
@@ -339,7 +336,11 @@ def _compare_runs(run1: Path, run2: Path) -> None:
         if not diff_rows:
             print("no config differences")
         else:
-            _print_ascii_table(["параметр", data1['run_dir'].name, data2['run_dir'].name], diff_rows, fenced=True)
+            print(f"run1_name: {data1['run_dir'].name}")
+            print(f"run2_name: {data2['run_dir'].name}")
+            print()
+            for key, v1, v2 in diff_rows:
+                print(f"{key}: {v1} | {v2}")
     finally:
         _close_data(data1)
         _close_data(data2)
