@@ -733,6 +733,15 @@ def print_summary(
 
 
 
+def _history_run_dir(history_root: Path, prefix: str = "run") -> Path:
+    """Create a timestamped child directory under history_root for this replay run."""
+    history_root.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    run_dir = history_root / f"{prefix}_{ts}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
 def _reset_replay_output(output_dir: Path) -> tuple[Path, Path]:
     """Ensure replay DB artifacts are fresh even if output_dir already exists."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -898,6 +907,8 @@ def main() -> None:
                     help="Max market/token pairs to process (default: all)")
     ap.add_argument("--out",    default=None,
                     help="Output dir (default: data/replay_runs/honest_<timestamp>)")
+    ap.add_argument("--history-root", default=None,
+                    help="Parent dir for timestamped history runs; creates <history-root>/run_<timestamp>")
     ap.add_argument("--pessimistic", action="store_true",
                     help="activation_delay=300s, fill_fraction=0.3")
     ap.add_argument("--activation-delay", type=int, default=0)
@@ -906,7 +917,12 @@ def main() -> None:
                     help="Only log fills (suppress per-token progress noise)")
     args = ap.parse_args()
 
-    if args.out:
+    if args.out and args.history_root:
+        ap.error("use either --out or --history-root, not both")
+
+    if args.history_root:
+        output_dir = _history_run_dir(Path(args.history_root))
+    elif args.out:
         output_dir = Path(args.out)
     else:
         ts = time.strftime("%Y%m%d_%H%M%S")
