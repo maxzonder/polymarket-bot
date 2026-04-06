@@ -249,7 +249,7 @@ def _close_data(data: dict) -> None:
     data["con2"].close()
 
 
-def _print_ascii_table(headers: list[str], rows: list[list[str]]) -> None:
+def _print_ascii_table(headers: list[str], rows: list[list[str]], fenced: bool = False) -> None:
     widths = [len(h) for h in headers]
     for row in rows:
         for i, cell in enumerate(row):
@@ -258,12 +258,19 @@ def _print_ascii_table(headers: list[str], rows: list[list[str]]) -> None:
     def line(sep: str = '-') -> str:
         return '+' + '+'.join(sep * (w + 2) for w in widths) + '+'
 
-    print(line('-'))
-    print('| ' + ' | '.join(headers[i].ljust(widths[i]) for i in range(len(headers))) + ' |')
-    print(line('='))
+    lines = []
+    lines.append(line('-'))
+    lines.append('| ' + ' | '.join(headers[i].ljust(widths[i]) for i in range(len(headers))) + ' |')
+    lines.append(line('='))
     for row in rows:
-        print('| ' + ' | '.join(row[i].ljust(widths[i]) for i in range(len(row))) + ' |')
-        print(line('-'))
+        lines.append('| ' + ' | '.join(row[i].ljust(widths[i]) for i in range(len(row))) + ' |')
+        lines.append(line('-'))
+
+    if fenced:
+        print('```text')
+    print('\n'.join(lines))
+    if fenced:
+        print('```')
 
 
 def _flatten(prefix: str, value, out: dict[str, object]) -> None:
@@ -292,7 +299,7 @@ def _compare_runs(run1: Path, run2: Path) -> None:
             ])
 
         _print_section("compare")
-        _print_ascii_table(headers, rows)
+        _print_ascii_table(headers, rows, fenced=True)
 
         _print_section("differing config values")
         snap1 = data1.get("config_snapshot") or {}
@@ -327,7 +334,7 @@ def _compare_runs(run1: Path, run2: Path) -> None:
         if not diff_rows:
             print("no config differences")
         else:
-            _print_ascii_table(["параметр", data1['run_dir'].name, data2['run_dir'].name], diff_rows)
+            _print_ascii_table(["параметр", data1['run_dir'].name, data2['run_dir'].name], diff_rows, fenced=True)
     finally:
         _close_data(data1)
         _close_data(data2)
