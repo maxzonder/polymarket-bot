@@ -255,15 +255,20 @@ def _print_ascii_table(headers: list[str], rows: list[list[str]], fenced: bool =
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
 
+    pad = 2
+
     def line(sep: str = '-') -> str:
-        return '+' + '+'.join(sep * (w + 2) for w in widths) + '+'
+        return '+' + '+'.join(sep * (w + pad * 2) for w in widths) + '+'
+
+    def render_row(cells: list[str]) -> str:
+        return '|' + '|'.join((' ' * pad) + cells[i].ljust(widths[i]) + (' ' * pad) for i in range(len(cells))) + '|'
 
     lines = []
     lines.append(line('-'))
-    lines.append('| ' + ' | '.join(headers[i].ljust(widths[i]) for i in range(len(headers))) + ' |')
+    lines.append(render_row(headers))
     lines.append(line('='))
     for row in rows:
-        lines.append('| ' + ' | '.join(row[i].ljust(widths[i]) for i in range(len(row))) + ' |')
+        lines.append(render_row(row))
         lines.append(line('-'))
 
     if fenced:
