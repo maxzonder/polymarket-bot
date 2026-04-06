@@ -58,9 +58,7 @@ def main() -> None:
     print(f"run_dir={run_dir}")
     print(f"positions_db={positions_db}")
     print(f"paper_db={paper_db}")
-
-    _print_section("overall")
-    print(_one(cur, '''
+    overall = _one(cur, '''
         select
           count(*) as positions,
           round(sum(entry_size_usdc),6) as stake,
@@ -69,7 +67,7 @@ def main() -> None:
           round(avg(entry_size_usdc),6) as avg_stake,
           round(avg(entry_price),6) as avg_entry_price
         from positions
-    '''))
+    ''')
 
     _print_section("winners / losers")
     _print_rows(cur.execute('''
@@ -113,8 +111,32 @@ def main() -> None:
             min_bal = (bal, dict(r))
         if bal > max_bal[0]:
             max_bal = (bal, dict(r))
+    initial_balance = 0.0
+    initial_row = cur.execute("""
+        select delta_usdc, note
+        from paper_balance_events
+        where note like 'initial funding%' or note like 'initial balance%'
+        order by id asc
+        limit 1
+    """).fetchone()
+    if initial_row is not None:
+        initial_balance = float(initial_row['delta_usdc'] or 0.0)
+    open_cost = cur.execute("select coalesce(sum(entry_size_usdc), 0) from positions where status='open'").fetchone()[0] or 0.0
+    final_equity = bal + float(open_cost)
+    bankroll_return_pct = ((final_equity - initial_balance) / initial_balance * 100.0) if initial_balance > 0 else None
+
+    overall['initial_balance'] = round(initial_balance, 6)
+    overall['final_equity'] = round(final_equity, 6)
+    overall['bankroll_return_pct'] = round(bankroll_return_pct, 6) if bankroll_return_pct is not None else None
+
+    _print_section("overall")
+    print(overall)
+
     print({
         'final_balance_from_events': round(bal, 6),
+        'open_position_cost_basis': round(float(open_cost), 6),
+        'final_equity': round(final_equity, 6),
+        'bankroll_return_pct': round(bankroll_return_pct, 6) if bankroll_return_pct is not None else None,
         'min_balance': round(min_bal[0], 6),
         'min_at': min_bal[1],
         'max_balance': round(max_bal[0], 6),

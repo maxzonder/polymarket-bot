@@ -663,6 +663,7 @@ def print_summary(
     mode: str,
     start: date,
     end: date,
+    initial_balance: float,
 ) -> None:
     from collections import Counter
 
@@ -672,14 +673,21 @@ def print_summary(
     conn = sqlite3.connect(positions_db_path)
     conn.row_factory = sqlite3.Row
     positions = conn.execute("SELECT * FROM positions").fetchall()
+    paper_balance = conn.execute("SELECT cash_balance FROM paper_balance WHERE id=1").fetchone()
     conn.close()
 
     total_stake   = sum(float(p["entry_size_usdc"]) for p in positions)
     total_pnl     = sum(float(p["realized_pnl"] or 0.0) for p in positions)
-    open_pos      = sum(1 for p in positions if p["status"] == "open")
+    open_positions = [p for p in positions if p["status"] == "open"]
+    open_pos      = len(open_positions)
     resolved      = [p for p in positions if p["status"] == "resolved"]
     winners       = sum(1 for p in resolved if float(p["realized_pnl"] or 0) > 0)
     roi_pct       = (total_pnl / total_stake * 100) if total_stake > 0 else 0.0
+
+    cash_balance = float(paper_balance["cash_balance"]) if paper_balance else 0.0
+    open_position_cost_basis = sum(float(p["entry_size_usdc"] or 0.0) for p in open_positions)
+    final_equity = cash_balance + open_position_cost_basis
+    bankroll_return_pct = ((final_equity - initial_balance) / initial_balance * 100) if initial_balance > 0 else 0.0
 
     total_screened = len(results)
     total_bids     = sum(r.get("filled_entries", 0) for r in ok)
@@ -711,7 +719,12 @@ def print_summary(
     print(f"    Still open                  : {open_pos}")
     print(f"  Total stake deployed  (USDC)  : ${total_stake:.4f}")
     print(f"  Total realized PnL    (USDC)  : ${total_pnl:.4f}")
-    print(f"  ROI                           : {roi_pct:.1f}%")
+    print(f"  ROI on stake                  : {roi_pct:.1f}%")
+    print(f"  Initial balance       (USDC)  : ${initial_balance:.4f}")
+    print(f"  Final equity          (USDC)  : ${final_equity:.4f}")
+    if open_pos:
+        print(f"    includes open position cost : ${open_position_cost_basis:.4f}")
+    print(f"  Bankroll return               : {bankroll_return_pct:.1f}%")
     print()
 
     # Category breakdown
@@ -890,7 +903,7 @@ def run_honest_replay(
     elapsed = time.monotonic() - t0
     logger.info(f"Replay finished in {elapsed:.1f}s  ({len(all_rows)/elapsed:.0f} tokens/s)")
 
-    print_summary(results, str(positions_db), mode, start, end)
+    print_summary(results, str(positions_db), mode, start, end, config.paper_initial_balance_usdc)
     print(f"  Positions DB : {positions_db}")
     print(f"  Paper trades : {paper_db}\n")
 
