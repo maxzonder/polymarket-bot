@@ -28,6 +28,9 @@ def send_message(text: str) -> bool:
     Send a Telegram message to the configured chat.
     Returns True on success, False on failure (never raises).
     """
+    if os.getenv("SUPPRESS_TELEGRAM_ALERTS", "").lower() in ("1", "true", "yes", "on"):
+        logger.info("Telegram alerts suppressed by SUPPRESS_TELEGRAM_ALERTS")
+        return False
     if not _CHAT_ID:
         logger.debug("TG_CHAT_ID not set — Telegram alert skipped")
         return False

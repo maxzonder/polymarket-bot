@@ -789,6 +789,8 @@ def run_honest_replay(
     _noop = lambda *a, **kw: None
     _tg.send_message = _noop
     om_module.send_message = _noop  # order_manager imports send_message at module level
+    prev_suppress_alerts = os.environ.get("SUPPRESS_TELEGRAM_ALERTS")
+    os.environ["SUPPRESS_TELEGRAM_ALERTS"] = "1"
 
     from execution.order_manager import OrderManager
 
@@ -906,6 +908,11 @@ def run_honest_replay(
     print_summary(results, str(positions_db), mode, start, end, config.paper_initial_balance_usdc)
     print(f"  Positions DB : {positions_db}")
     print(f"  Paper trades : {paper_db}\n")
+
+    if prev_suppress_alerts is None:
+        os.environ.pop("SUPPRESS_TELEGRAM_ALERTS", None)
+    else:
+        os.environ["SUPPRESS_TELEGRAM_ALERTS"] = prev_suppress_alerts
 
 
 def main() -> None:
