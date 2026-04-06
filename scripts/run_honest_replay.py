@@ -731,6 +731,19 @@ def print_summary(
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
+
+def _reset_replay_output(output_dir: Path) -> tuple[Path, Path]:
+    """Ensure replay DB artifacts are fresh even if output_dir already exists."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    positions_db = output_dir / "positions.db"
+    paper_db = output_dir / "paper_trades.db"
+    for path in (positions_db, paper_db):
+        if path.exists():
+            path.unlink()
+    return positions_db, paper_db
+
+
 def run_honest_replay(
     start: date,
     end: date,
@@ -741,9 +754,7 @@ def run_honest_replay(
     fill_fraction: float = 1.0,
     summary_only: bool = False,
 ) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    positions_db = output_dir / "positions.db"
-    paper_db     = output_dir / "paper_trades.db"
+    positions_db, paper_db = _reset_replay_output(output_dir)
 
     om_module.POSITIONS_DB = positions_db
 
