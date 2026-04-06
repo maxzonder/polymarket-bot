@@ -19,29 +19,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 QUICK_ROWS = [
-    ("universe (просмотрено)", "universe", "int"),
-    ("passed screener (прошли фильтр)", "passed_screener", "int"),
-    ("entry fills (исполнения входа)", "entry_fills", "int"),
-    ("tp fills (исполнения тейков)", "tp_fills", "int"),
-    ("fill rate % (fills / screener)", "fill_rate_pct", "pct1"),
-    ("positions (открыто позиций)", "positions", "int"),
-    ("resolved (закрыто позиций)", "resolved_positions", "int"),
-    ("open (ещё открыты)", "open_positions", "int"),
-    ("winners (плюсовые позиции)", "winners", "int"),
-    ("losers (нулевые/минусовые)", "losers", "int"),
-    ("win rate % (winners / resolved)", "win_rate_pct", "pct1"),
-    ("distinct markets (рынки с позицией)", "distinct_markets", "int"),
-    ("distinct tokens (токены с позицией)", "distinct_tokens", "int"),
-    ("stake (суммарный stake)", "stake", "float4"),
-    ("pnl (realized pnl)", "pnl", "float4"),
-    ("roi on stake % (pnl / stake)", "roi_on_stake_pct", "pct1"),
-    ("initial balance (стартовый баланс)", "initial_balance", "float4"),
-    ("final equity (итоговый equity)", "final_equity", "float4"),
-    ("bankroll return % (на стартовый банкролл)", "bankroll_return_pct", "pct1"),
-    ("avg stake (средний stake)", "avg_stake", "float4"),
-    ("avg entry price (средняя цена входа)", "avg_entry_price", "float6"),
-    ("avg peak_x (средний peak_x)", "avg_peak_x", "float4"),
-    ("max peak_x (макс peak_x)", "max_peak_x", "float4"),
+    ("universe", "universe", "int"),
+    ("passed_screener", "passed_screener", "int"),
+    ("entry_fills", "entry_fills", "int"),
+    ("tp_fills", "tp_fills", "int"),
+    ("fill_rate", "fill_rate_pct", "pct1"),
+    ("positions", "positions", "int"),
+    ("resolved", "resolved_positions", "int"),
+    ("open", "open_positions", "int"),
+    ("winners", "winners", "int"),
+    ("losers", "losers", "int"),
+    ("win_rate", "win_rate_pct", "pct1"),
+    ("markets", "distinct_markets", "int"),
+    ("tokens", "distinct_tokens", "int"),
+    ("stake", "stake", "float4"),
+    ("pnl", "pnl", "float4"),
+    ("roi_on_stake", "roi_on_stake_pct", "pct1"),
+    ("initial_balance", "initial_balance", "float4"),
+    ("final_equity", "final_equity", "float4"),
+    ("bankroll_return", "bankroll_return_pct", "pct1"),
+    ("avg_stake", "avg_stake", "float4"),
+    ("avg_entry", "avg_entry_price", "float6"),
+    ("avg_peak_x", "avg_peak_x", "float4"),
+    ("max_peak_x", "max_peak_x", "float4"),
 ]
 
 
@@ -314,11 +314,15 @@ def _compare_runs(run1: Path, run2: Path) -> None:
 
         keys = sorted(set(flat1) | set(flat2))
         diff_rows = []
+        def _compact(value):
+            s = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            return s if len(s) <= 48 else s[:45] + "..."
+
         for key in keys:
             v1 = flat1.get(key)
             v2 = flat2.get(key)
             if v1 != v2:
-                diff_rows.append([key, json.dumps(v1, ensure_ascii=False), json.dumps(v2, ensure_ascii=False)])
+                diff_rows.append([key, _compact(v1), _compact(v2)])
 
         if not diff_rows:
             print("no config differences")
