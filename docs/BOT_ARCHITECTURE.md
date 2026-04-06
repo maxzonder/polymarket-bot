@@ -304,10 +304,11 @@ python3 pipeline/daily_pipeline.py
 
 Ключевые параметры `ModeConfig`:
 - `entry_price_levels` — уровни для рестинг бидов
-- `tp_levels` — список `TPLevel(x=5.0, fraction=0.20)` — TP лестница
+- `tp_levels` — список `TPLevel(progress=0.50, fraction=0.20)` — TP лестница
 - `moonbag_fraction` — доля позиции, которая держится до resolution
 - `use_resting_bids` / `scanner_entry` — стратегия входа
-- `optimize_metric` — `"tail_ev"` | `"ev_total"` | `"roi_pct"`
+- `market_score_tiers` / `stake_tiers` — правила сайзинга
+- `min_market_score`, `scoring_weights`, `prefer_long_duration` — ranking и score gates
 
 ### `api/gamma_client.py`
 
@@ -368,8 +369,8 @@ Hard фильтры (до скоринга, дёшево):
 - Рынок активен
 - `hours_to_close` в допустимом диапазоне
 - Есть token_ids
-- `entry_fill_score >= min_entry_fill_score` (из режима)
-- `resolution_score >= min_resolution_score` (из режима)
+- `current_price <= entry_price_max`
+- `market_score >= min_market_score` если gate включён
 - **Dead market filter:** `get_last_trade_ts()` — рынок отклоняется если >48ч без сделок (логируется как `rejected_dead_market`; порог задаётся `BotConfig.dead_market_hours`)
 
 Для каждого токена (YES / NO) отдельно вычисляется `current_price`:
@@ -378,7 +379,7 @@ Hard фильтры (до скоринга, дёшево):
 
 Отбираются только токены с `price <= entry_price_max` и `price > 0`.
 
-`total_score` = взвешенная сумма `(ef_score, res_score, duration_score, liquidity_score, category_weight)` — веса зависят от `optimize_metric` режима.
+`total_score` = config-driven взвешенная сумма `(market_score, duration_score, liquidity_score, category_weight)` через `scoring_weights`. Если `scoring_weights` пустой, включается legacy fallback formula.
 
 **Neg-risk группировка:** `scan()` разделяет рынки на два потока:
 - Бинарные рынки (neg_risk_group_id=None) → `_evaluate_market()` как прежде
@@ -395,8 +396,8 @@ Hard фильтры (до скоринга, дёшево):
 
 **`size_position(token_id, entry_price, resolution_score, open_positions)`:**
 - Базовая ставка = `mode_config.stake_usdc`
-- В `big_swan_mode` масштабируется на `0.5 + res_score * 0.5`
-- Жёсткий cap = `balance * max_capital_deployed_pct / max_open_positions`
+- Если заданы `market_score_tiers`, они имеют приоритет над `stake_tiers`
+- Если `market_score < min_market_score`, позиция отклоняется
 - Отклоняет позицию если `entry_price < 0.0005` без исторических данных (защита от артефактов пустого стакана)
 
 **`build_tp_orders(position)`:**
@@ -420,8 +421,8 @@ Hard фильтры (до скоринга, дёшево):
 3. Размещает TP SELL ордера (кроме moonbag — только запись в таблицу)
 
 **`cancel_stale_orders()`:**
-- Отменяет биды старше `resting_order_ttl` (24ч по умолчанию)
-- Также проверяет через Gamma API, живы ли ещё рынки
+- TTL больше не используется
+- Метод отменяет биды только для рынков, которые через Gamma больше не живы
 
 **Таблица `resting_orders`** содержит поле `neg_risk_group_id TEXT` (индекс `idx_resting_group`). Кластерный cap считается по группам neg-risk; бинарные рынки (neg_risk_group_id=NULL) кластерный cap не применяют.
 

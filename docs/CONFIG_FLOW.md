@@ -16,11 +16,10 @@ config.py
     ├── tp_levels, moonbag_fraction
     ├── stake_usdc, stake_tiers, market_score_tiers
     ├── max_open_positions, max_resting_markets, max_resting_per_cluster
-    ├── max_capital_deployed_pct, max_exposure_per_market
+    ├── max_exposure_per_market
     ├── min_hours_to_close, max_hours_to_close
-    ├── min_entry_fill_score, min_resolution_score, min_real_x_historical
     ├── min_market_score
-    └── optimize_metric
+    └── scoring_weights, prefer_long_duration
 ```
 
 ---
@@ -141,7 +140,7 @@ BotConfig
 │   │     price gate      ← mc.entry_price_max
 │   │     entry levels    ← mc.entry_price_levels (только < current_price)
 │   │     neg-risk boost  ← mc.max_resting_per_cluster (cap underdogs)
-│   │     score gate      ← mc.min_entry_fill_score, min_resolution_score
+│   │     score gate      ← mc.min_market_score
 │   │     category weight ← config.category_weights[market.category]
 │   │
 │   ├── RiskManager (strategy/risk_manager.py)

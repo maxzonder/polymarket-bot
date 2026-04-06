@@ -75,9 +75,9 @@
 3. **feature_mart_v1_1** — полный пересчёт (`--recompute`)
 4. **ml_outcomes** — ML-метки по реальным сделкам бота
 5. **rejected_outcomes** — метки по пропущенным возможностям
-6. **recalibrate** — пересчёт порогов → `recommended_config.json`
+6. **recalibrate** — пересчёт category weights → `recommended_config.json`
 
-**Рекалибровка:** `recalibrate_scorers.py` анализирует `ml_rejected_outcomes` и `ml_outcomes`, предлагает изменения `min_entry_fill_score`, `min_resolution_score` и `category_weights`. Бот применяет их из `recommended_config.json`.
+**Рекалибровка:** `recalibrate_scorers.py` анализирует `ml_rejected_outcomes` и `ml_outcomes`, предлагает только изменения `category_weights`. Легаси threshold-рекомендации удалены вместе со старыми config knobs.
 
 ---
 

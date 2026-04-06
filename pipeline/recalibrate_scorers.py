@@ -5,10 +5,8 @@ Analyzes per-category precision/recall across both accepted and rejected markets
   - Accepted markets (ml_outcomes): fill_rate, winner_rate, realized_roi
   - Rejected markets (ml_rejected_outcomes): miss_rate (missed swan opportunities)
 
-Outputs recommended_config.json — a diff against current config thresholds:
-  - min_entry_fill_score per category (lower if missing too many swans)
-  - min_resolution_score per category (raise if low winner rate)
-  - category_weights update (boost categories with high tail_ev, penalize low ones)
+Outputs recommended_config.json with category weight updates only.
+Legacy threshold recommendations for removed config fields are intentionally gone.
 
 Usage:
     python pipeline/recalibrate_scorers.py
@@ -19,10 +17,9 @@ Usage:
         --dataset-db   /path/to/polymarket_dataset.db
 
 Recommendation logic:
-  - Category miss_rate > 5%  → lower min_entry_fill_score for that category
-  - Category winner_rate < 5% with n>=10 fills → raise min_resolution_score
   - Category avg_tail_ev high (>5x) → boost category_weight
-  - Minimum 20 labeled rows needed for a recommendation to fire
+  - Category avg_tail_ev low  (<2x) → penalize category_weight
+  - Minimum 10 filled rows needed before a recommendation can fire
 """
 
 from __future__ import annotations
@@ -51,8 +48,6 @@ MIN_REJECTED_ROWS = 20
 MIN_FILLED_ROWS   = 10
 
 # Thresholds that trigger recommendations
-MISS_RATE_HIGH    = 0.05   # > 5% missed opportunities → relax fill gate
-WINNER_RATE_LOW   = 0.05   # < 5% winners despite fills → tighten res gate
 TAIL_EV_HIGH      = 5.0    # avg_x > 5 for winners → boost category weight
 TAIL_EV_LOW       = 2.0    # avg_x < 2 for winners → penalize category weight
 
@@ -184,23 +179,18 @@ def merge_stats(
 
 def build_recommendations(
     stats: dict[str, CategoryStats],
-    current_min_ef: float = 0.02,
-    current_min_res: float = 0.15,
     current_weights: Optional[dict] = None,
 ) -> dict:
     """
-    Produce a recommendations dict with per-category threshold adjustments.
-    Only fires when sufficient data exists.
+    Produce a recommendations dict with category-weight adjustments only.
+    Legacy threshold recommendations were removed with the old config knobs.
     """
     current_weights = current_weights or {}
     recommendations: dict = {
         "generated_at": int(time.time()),
         "data_quality": {},
-        "threshold_changes": [],
         "category_weight_changes": [],
         "recommended_config": {
-            "min_entry_fill_score": current_min_ef,
-            "min_resolution_score": current_min_res,
             "category_weights": dict(current_weights),
         },
         "notes": [],
@@ -216,33 +206,6 @@ def build_recommendations(
         }
         recommendations["data_quality"][cat] = quality
 
-        # ── Rejected-side: relax fill gate if missing too many swans ──────────
-        if s.total_rejected >= MIN_REJECTED_ROWS and s.miss_rate > MISS_RATE_HIGH:
-            new_ef = max(current_min_ef * 0.7, 0.005)  # lower by 30%, floor 0.005
-            recommendations["threshold_changes"].append({
-                "category": cat,
-                "param": "min_entry_fill_score",
-                "direction": "lower",
-                "reason": f"miss_rate={s.miss_rate:.1%} > {MISS_RATE_HIGH:.0%} threshold "
-                           f"(n={s.total_rejected} rejected, {s.missed_opportunity} missed)",
-                "current": current_min_ef,
-                "suggested": round(new_ef, 4),
-            })
-
-        # ── Accepted-side: tighten res gate if fills aren't winning ───────────
-        if s.got_fill >= MIN_FILLED_ROWS and s.winner_rate < WINNER_RATE_LOW:
-            new_res = min(current_min_res * 1.3, 0.5)  # raise by 30%, cap 0.5
-            recommendations["threshold_changes"].append({
-                "category": cat,
-                "param": "min_resolution_score",
-                "direction": "raise",
-                "reason": f"winner_rate={s.winner_rate:.1%} < {WINNER_RATE_LOW:.0%} threshold "
-                           f"(fills={s.got_fill}, winners={s.winners})",
-                "current": current_min_res,
-                "suggested": round(new_res, 4),
-            })
-
-        # ── Category weight adjustments based on tail_ev ─────────────────────
         if s.got_fill >= MIN_FILLED_ROWS:
             current_w = current_weights.get(cat, 1.0)
             if s.avg_tail_ev > TAIL_EV_HIGH:
@@ -264,15 +227,13 @@ def build_recommendations(
                 })
                 recommendations["recommended_config"]["category_weights"][cat] = round(new_w, 3)
 
-    if not recommendations["threshold_changes"] and not recommendations["category_weight_changes"]:
+    if not recommendations["category_weight_changes"]:
         recommendations["notes"].append(
-            "No changes recommended — either thresholds are well-calibrated "
-            "or insufficient data (need ≥20 rejected / ≥10 filled rows per category)."
+            "No category-weight changes recommended — either weights look stable "
+            "or insufficient data (need ≥10 filled rows per category)."
         )
 
     return recommendations
-
-
 def print_summary(stats: dict[str, CategoryStats], recs: dict) -> None:
     print(f"\n{'─'*64}")
     print("  Scorer Recalibration Report")
@@ -286,16 +247,6 @@ def print_summary(stats: dict[str, CategoryStats], recs: dict) -> None:
             f"{s.got_fill:>6} {s.winner_rate:>6.1%} {roi_str:>8}"
         )
     print()
-
-    changes = recs.get("threshold_changes", [])
-    if changes:
-        print(f"  Threshold changes ({len(changes)}):")
-        for c in changes:
-            arrow = "↓" if c["direction"] == "lower" else "↑"
-            print(f"    [{c['category']}] {c['param']} {arrow} "
-                  f"{c['current']} → {c['suggested']}")
-            print(f"      {c['reason']}")
-        print()
 
     wchanges = recs.get("category_weight_changes", [])
     if wchanges:
@@ -320,18 +271,14 @@ def recalibrate(
 
     # Pull current config defaults
     try:
-        from config import BIG_SWAN_MODE, BotConfig
+        from config import BotConfig
         cfg = BotConfig()
-        current_min_ef  = BIG_SWAN_MODE.min_entry_fill_score
-        current_min_res = BIG_SWAN_MODE.min_resolution_score
         current_weights = dict(cfg.category_weights)
     except Exception as e:
         logger.warning(f"Could not load config defaults: {e}; using hardcoded fallbacks")
-        current_min_ef  = 0.02
-        current_min_res = 0.15
         current_weights = {}
 
-    recs = build_recommendations(stats, current_min_ef, current_min_res, current_weights)
+    recs = build_recommendations(stats, current_weights)
 
     with open(output_path, "w") as f:
         json.dump(recs, f, indent=2)
