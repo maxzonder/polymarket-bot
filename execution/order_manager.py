@@ -804,14 +804,17 @@ class OrderManager:
         conn = self._conn()
 
         resting = conn.execute(
-            "SELECT size, filled_quantity FROM resting_orders WHERE order_id=?",
+            "SELECT size, filled_quantity, status FROM resting_orders WHERE order_id=?",
             (order_id,),
         ).fetchone()
         if resting is not None:
-            is_done = float(resting["filled_quantity"] or 0.0) >= float(resting["size"]) * 0.99
+            prev_filled = float(resting["filled_quantity"] or 0.0)
+            prev_status = str(resting["status"] or "live")
+            new_filled = min(float(resting["size"]), prev_filled + fill_quantity)
+            is_done = new_filled >= float(resting["size"]) * 0.99
             conn.execute(
-                "UPDATE resting_orders SET status=? WHERE order_id=?",
-                ("matched" if is_done else "live", order_id),
+                "UPDATE resting_orders SET filled_quantity=?, status=? WHERE order_id=?",
+                (new_filled, "matched" if is_done else prev_status, order_id),
             )
 
         if self.config.dry_run:
