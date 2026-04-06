@@ -163,8 +163,8 @@ BALANCED_MODE = ModeConfig(
 )
 
 # Budget and levels are defined together so market_score_tiers stakes auto-scale with budget.
-# Change _BIG_SWAN_BUDGET or _BIG_SWAN_LEVELS here — tiers update automatically.
-_BIG_SWAN_BUDGET = 2.0
+# Current recommendation: conservative bankroll-aware big_swan sizing.
+_BIG_SWAN_BUDGET = 0.5
 _BIG_SWAN_LEVELS = (0.01, 0.10, 0.15)
 _bsm_s = _BIG_SWAN_BUDGET / len(_BIG_SWAN_LEVELS)  # stake per level at full-budget allocation
 
@@ -191,12 +191,11 @@ BIG_SWAN_MODE = ModeConfig(
     hours_to_close_null_default=48.0,
     # v1.1: market_score gate — reject bottom-half markets
     min_market_score=0.25,
-    # Budget-aware stakes: _bsm_s × 3 levels = full _BIG_SWAN_BUDGET at top tier.
-    # Fractions: 1.0 / 0.5 / 0.25 of full budget.
+    # Conservative bankroll-aware sizing: full / half / quarter of the $0.50 market budget.
     market_score_tiers=(
-        (0.60, _bsm_s),           # full budget:    _bsm_s × 3 = $2.00
-        (0.40, _bsm_s * 0.50),    # half budget:    _bsm_s × 3 = $1.00
-        (0.25, _bsm_s * 0.25),    # quarter budget: _bsm_s × 3 = $0.50
+        (0.60, _bsm_s),
+        (0.40, _bsm_s * 0.50),
+        (0.25, _bsm_s * 0.25),
     ),
     max_exposure_per_market=_BIG_SWAN_BUDGET,
     # Duration omitted: all markets passing the 168h hard gate get duration_score=1.0
