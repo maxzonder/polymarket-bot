@@ -45,6 +45,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -905,7 +907,12 @@ def run_honest_replay(
     elapsed = time.monotonic() - t0
     logger.info(f"Replay finished in {elapsed:.1f}s  ({len(all_rows)/elapsed:.0f} tokens/s)")
 
-    print_summary(results, str(positions_db), mode, start, end, config.paper_initial_balance_usdc)
+    summary_buf = io.StringIO()
+    with contextlib.redirect_stdout(summary_buf):
+        print_summary(results, str(positions_db), mode, start, end, config.paper_initial_balance_usdc)
+    summary_text = summary_buf.getvalue()
+    print(summary_text, end="")
+    (output_dir / "summary.txt").write_text(summary_text, encoding="utf-8")
     print(f"  Positions DB : {positions_db}")
     print(f"  Paper trades : {paper_db}\n")
 
