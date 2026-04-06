@@ -3,7 +3,7 @@ Order Manager — places and manages resting limit bids and TP orders.
 
 For big_swan_mode:
   - Places resting limit BUY orders at entry_price_levels BEFORE market dips
-  - Cancels stale resting bids (older than resting_order_ttl) for closed markets
+  - Cancels resting bids only when markets close / disappear / resolve
   - Avoids duplicate bids: max one active bid per (token_id, price_level)
 
 Anti-garbage-market protection:

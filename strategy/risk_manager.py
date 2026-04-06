@@ -120,16 +120,6 @@ class RiskManager:
                     break
 
         stake = base_stake
-
-        # Legacy resolution_score scaling for non-v1.1 modes (no market_score_tiers)
-        if (
-            self.mc.optimize_metric == "tail_ev"
-            and not self.mc.market_score_tiers
-            and resolution_score is not None
-        ):
-            score_factor = 0.5 + resolution_score.score * 0.5
-            stake = stake * score_factor
-
         stake = max(0.001, round(stake, 6))
         token_quantity = stake / entry_price
 

@@ -57,28 +57,15 @@ class ModeConfig:
     # fraction held to resolution (moonbag)
     moonbag_fraction: float
 
-    # ── Scoring gates ─────────────────────────────────────────────────────────
-    # legacy: bypassed when market_scorer is active (all current modes).
-    # Kept for backward-compat; has no live effect when scoring_weights is set.
-    min_entry_fill_score: float
-    min_resolution_score: float
-    # min historical real_x (excluding small bounces)
-    min_real_x_historical: float
-
     # ── Position sizing ───────────────────────────────────────────────────────
     stake_usdc: float          # default stake per trade (USDC tokens bought at entry)
     max_open_positions: int
     max_resting_markets: int        # max distinct markets with live resting bids
     max_resting_per_cluster: int    # max markets per neg-risk group
-    max_capital_deployed_pct: float  # max % of balance in open positions
 
     # ── Time window ───────────────────────────────────────────────────────────
     min_hours_to_close: float   # reject markets closing sooner than this
     max_hours_to_close: float   # reject markets closing later than this
-
-    # ── Optimisation target ───────────────────────────────────────────────────
-    # "tail_ev" | "ev_total" | "roi_pct"
-    optimize_metric: str
 
     # ── Price-tier stake schedule ──────────────────────────────────────────────
     # Tuple of (max_entry_price, stake_usdc) sorted ascending by price.
@@ -132,17 +119,12 @@ FAST_TP_MODE = ModeConfig(
         TPLevel(progress=0.80, fraction=0.30),
     ),
     moonbag_fraction=0.0,
-    min_entry_fill_score=0.0,   # scanner-triggered — no fill score needed
-    min_resolution_score=0.0,
-    min_real_x_historical=5.0,
     stake_usdc=0.05,
     max_open_positions=30,
     max_resting_markets=0,
     max_resting_per_cluster=0,
-    max_capital_deployed_pct=0.40,
     min_hours_to_close=1.0,
     max_hours_to_close=48.0,
-    optimize_metric="ev_total",
     # duration matters most: scanner needs markets closing soon for quick exit
     scoring_weights=(
         ("market_score", 0.40),
@@ -165,17 +147,12 @@ BALANCED_MODE = ModeConfig(
         TPLevel(progress=0.75, fraction=0.20),
     ),
     moonbag_fraction=0.20,
-    min_entry_fill_score=0.05,
-    min_resolution_score=0.10,
-    min_real_x_historical=5.0,
     stake_usdc=0.05,
     max_open_positions=20,
     max_resting_markets=1000,
     max_resting_per_cluster=3,
-    max_capital_deployed_pct=0.35,
     min_hours_to_close=1.0,
     max_hours_to_close=120.0,
-    optimize_metric="ev_total",
     scoring_weights=(
         ("market_score", 0.50),
         ("duration",     0.25),
@@ -205,18 +182,13 @@ BIG_SWAN_MODE = ModeConfig(
         TPLevel(progress=0.50, fraction=0.20),
     ),
     moonbag_fraction=0.70,
-    min_entry_fill_score=0.02,  # low bar — wide coverage
-    min_resolution_score=0.15,
-    min_real_x_historical=10.0,
     stake_usdc=0.05,            # fallback if no tier matches
     max_open_positions=500,
     max_resting_markets=5000,
     max_resting_per_cluster=10,
-    max_capital_deployed_pct=0.99,
     min_hours_to_close=0.25,     # 15 min — allow short-lived markets
     max_hours_to_close=168.0,    # 7 days — big events need time to materialise
     hours_to_close_null_default=48.0,
-    optimize_metric="tail_ev",
     # v1.1: market_score gate — reject bottom-half markets
     min_market_score=0.25,
     # Budget-aware stakes: _bsm_s × 3 levels = full _BIG_SWAN_BUDGET at top tier.
@@ -250,17 +222,12 @@ SMALL_SWAN_MODE = ModeConfig(
         TPLevel(progress=0.50, fraction=0.30),   # partial profit
     ),
     moonbag_fraction=0.40,      # 40% held to resolution
-    min_entry_fill_score=0.05,
-    min_resolution_score=0.10,
-    min_real_x_historical=2.0,  # lower bar vs big_swan (max upside 5–20x from these levels)
     stake_usdc=0.10,            # fallback if no tier matches
     max_open_positions=100,
     max_resting_markets=1000,
     max_resting_per_cluster=1,
-    max_capital_deployed_pct=0.50,
     min_hours_to_close=1.0,
     max_hours_to_close=48.0,     # faster turnover — dip/recovery cycle is short
-    optimize_metric="ev_total",
     scoring_weights=(
         ("market_score", 0.50),
         ("duration",     0.25),
@@ -338,20 +305,11 @@ class BotConfig:
 
     # ── CLOB credentials (from env) ───────────────────────────────────────────
     private_key: str = field(default_factory=lambda: os.environ.get("POLY_PRIVATE_KEY", ""))
-    api_key: str = field(default_factory=lambda: os.environ.get("POLY_API_KEY", ""))
-    api_secret: str = field(default_factory=lambda: os.environ.get("POLY_API_SECRET", ""))
-    api_passphrase: str = field(default_factory=lambda: os.environ.get("POLY_PASSPHRASE", ""))
 
     # ── Polling intervals (seconds) ───────────────────────────────────────────
     screener_interval: int = 300     # 5 minutes
     monitor_interval: int = 90       # 1.5 minutes
     resting_cleanup_interval: int = 3600  # 1 hour
-
-    # ── Resting order TTL (DEPRECATED — commit 7855cac) ─────────────────────
-    # No longer used as cancellation trigger. Resting bids are GTC and stay
-    # live until the market closes or disappears from Gamma.
-    # Field kept for backward-compat with DB schema (expires_at column).
-    resting_order_ttl: int = 0       # deprecated, was 86400
 
     # ── Screener hard limits ──────────────────────────────────────────────────
     min_volume_usdc: float = 50.0
