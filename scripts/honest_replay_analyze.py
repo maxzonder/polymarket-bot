@@ -1,19 +1,48 @@
-"""Analyze an honest replay run directory.
+"""Analyze an honest replay run directory or compare two runs.
 
 Usage:
     python3 scripts/honest_replay_analyze.py --run-dir /path/to/replay_run
     python3 scripts/honest_replay_analyze.py --run-dir /path/to/replay_run --top 15
+    python3 scripts/honest_replay_analyze.py --compare /path/to/run1 /path/to/run2
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+QUICK_ROWS = [
+    ("universe (просмотрено)", "universe", "int"),
+    ("passed screener (прошли фильтр)", "passed_screener", "int"),
+    ("entry fills (исполнения входа)", "entry_fills", "int"),
+    ("tp fills (исполнения тейков)", "tp_fills", "int"),
+    ("fill rate % (fills / screener)", "fill_rate_pct", "pct1"),
+    ("positions (открыто позиций)", "positions", "int"),
+    ("resolved (закрыто позиций)", "resolved_positions", "int"),
+    ("open (ещё открыты)", "open_positions", "int"),
+    ("winners (плюсовые позиции)", "winners", "int"),
+    ("losers (нулевые/минусовые)", "losers", "int"),
+    ("win rate % (winners / resolved)", "win_rate_pct", "pct1"),
+    ("distinct markets (рынки с позицией)", "distinct_markets", "int"),
+    ("distinct tokens (токены с позицией)", "distinct_tokens", "int"),
+    ("stake (суммарный stake)", "stake", "float4"),
+    ("pnl (realized pnl)", "pnl", "float4"),
+    ("roi on stake % (pnl / stake)", "roi_on_stake_pct", "pct1"),
+    ("initial balance (стартовый баланс)", "initial_balance", "float4"),
+    ("final equity (итоговый equity)", "final_equity", "float4"),
+    ("bankroll return % (на стартовый банкролл)", "bankroll_return_pct", "pct1"),
+    ("avg stake (средний stake)", "avg_stake", "float4"),
+    ("avg entry price (средняя цена входа)", "avg_entry_price", "float6"),
+    ("avg peak_x (средний peak_x)", "avg_peak_x", "float4"),
+    ("max peak_x (макс peak_x)", "max_peak_x", "float4"),
+]
 
 
 def _conn(path: Path) -> sqlite3.Connection:
@@ -57,29 +86,33 @@ def _parse_summary_file(path: Path) -> dict:
     }
 
 
-def _fmt_int(value) -> str:
-    return "n/a" if value is None else f"{int(value)}"
-
-
-def _fmt_float(value, digits: int = 4, pct: bool = False) -> str:
+def _fmt(value, kind: str) -> str:
     if value is None:
         return "n/a"
-    if pct:
-        return f"{float(value):.{digits}f}%"
-    return f"{float(value):.{digits}f}"
+    if kind == "int":
+        return str(int(value))
+    if kind == "pct1":
+        return f"{float(value):.1f}%"
+    if kind == "float6":
+        return f"{float(value):.6f}"
+    if kind == "float4":
+        return f"{float(value):.4f}"
+    return str(value)
 
 
 def _metric(label: str, value, desc: str) -> None:
     print(f"{label}: {value} ({desc})")
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Analyze an honest replay run directory")
-    ap.add_argument("--run-dir", required=True, help="Replay run directory containing positions.db and paper_trades.db")
-    ap.add_argument("--top", type=int, default=12, help="How many top winners/losers/markets to show")
-    args = ap.parse_args()
+def _load_config_snapshot(run_dir: Path) -> dict:
+    path = run_dir / "config_snapshot.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
-    run_dir = Path(args.run_dir).expanduser().resolve()
+
+def _collect_run_data(run_dir: Path) -> dict:
+    run_dir = run_dir.expanduser().resolve()
     positions_db = run_dir / "positions.db"
     paper_db = run_dir / "paper_trades.db"
     summary_file = run_dir / "summary.txt"
@@ -93,11 +126,6 @@ def main() -> None:
     cur = con.cursor()
     con2 = _conn(paper_db)
     cur2 = con2.cursor()
-
-    print(f"run_dir={run_dir}")
-    print(f"positions_db={positions_db}")
-    print(f"paper_db={paper_db}")
-    print(f"summary_file={summary_file if summary_file.exists() else 'n/a'}")
 
     summary_metrics = _parse_summary_file(summary_file)
 
@@ -142,6 +170,7 @@ def main() -> None:
     """).fetchone()
     if initial_row is not None:
         initial_balance = float(initial_row['delta_usdc'] or 0.0)
+
     open_cost = cur.execute("select coalesce(sum(entry_size_usdc), 0) from positions where status='open'").fetchone()[0] or 0.0
     final_equity = bal + float(open_cost)
     bankroll_return_pct = ((final_equity - initial_balance) / initial_balance * 100.0) if initial_balance > 0 else None
@@ -162,46 +191,192 @@ def main() -> None:
     fill_rate_pct = (entry_fills / passed_screener * 100.0) if passed_screener else None
     win_rate_pct = (winners / resolved_positions * 100.0) if resolved_positions else None
 
+    metrics = {
+        "universe": universe,
+        "passed_screener": passed_screener,
+        "entry_fills": entry_fills,
+        "tp_fills": tp_fills,
+        "fill_rate_pct": fill_rate_pct,
+        "positions": overall.get("positions"),
+        "resolved_positions": resolved_positions,
+        "open_positions": open_positions,
+        "winners": winners,
+        "losers": losers,
+        "win_rate_pct": win_rate_pct,
+        "distinct_markets": distinct_markets,
+        "distinct_tokens": distinct_tokens,
+        "stake": overall.get("stake"),
+        "pnl": overall.get("pnl"),
+        "roi_on_stake_pct": (overall.get("roi_on_stake") * 100.0) if overall.get("roi_on_stake") is not None else None,
+        "initial_balance": initial_balance,
+        "final_equity": final_equity,
+        "bankroll_return_pct": bankroll_return_pct,
+        "avg_stake": overall.get("avg_stake"),
+        "avg_entry_price": overall.get("avg_entry_price"),
+        "avg_peak_x": overall.get("avg_peak_x"),
+        "max_peak_x": overall.get("max_peak_x"),
+    }
+
+    data = {
+        "run_dir": run_dir,
+        "positions_db": positions_db,
+        "paper_db": paper_db,
+        "summary_file": summary_file if summary_file.exists() else None,
+        "summary_metrics": summary_metrics,
+        "overall": overall,
+        "metrics": metrics,
+        "balance": {
+            "final_balance_from_events": round(bal, 6),
+            "open_position_cost_basis": round(float(open_cost), 6),
+            "final_equity": round(final_equity, 6),
+            "bankroll_return_pct": round(bankroll_return_pct, 6) if bankroll_return_pct is not None else None,
+            "min_balance": round(min_bal[0], 6),
+            "min_at": min_bal[1],
+            "max_balance": round(max_bal[0], 6),
+            "max_at": max_bal[1],
+        },
+        "config_snapshot": _load_config_snapshot(run_dir),
+        "con": con,
+        "cur": cur,
+        "con2": con2,
+        "cur2": cur2,
+    }
+    return data
+
+
+def _close_data(data: dict) -> None:
+    data["con"].close()
+    data["con2"].close()
+
+
+def _print_ascii_table(headers: list[str], rows: list[list[str]]) -> None:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def line(sep: str = '-') -> str:
+        return '+' + '+'.join(sep * (w + 2) for w in widths) + '+'
+
+    print(line('-'))
+    print('| ' + ' | '.join(headers[i].ljust(widths[i]) for i in range(len(headers))) + ' |')
+    print(line('='))
+    for row in rows:
+        print('| ' + ' | '.join(row[i].ljust(widths[i]) for i in range(len(row))) + ' |')
+        print(line('-'))
+
+
+def _flatten(prefix: str, value, out: dict[str, object]) -> None:
+    if isinstance(value, dict):
+        for k in sorted(value):
+            _flatten(f"{prefix}.{k}" if prefix else str(k), value[k], out)
+    else:
+        out[prefix] = value
+
+
+def _compare_runs(run1: Path, run2: Path) -> None:
+    data1 = _collect_run_data(run1)
+    data2 = _collect_run_data(run2)
+    try:
+        print(f"run1={data1['run_dir']}")
+        print(f"run2={data2['run_dir']}")
+        print()
+
+        headers = ["название", data1['run_dir'].name, data2['run_dir'].name]
+        rows = []
+        for label, key, kind in QUICK_ROWS:
+            rows.append([
+                label,
+                _fmt(data1['metrics'].get(key), kind),
+                _fmt(data2['metrics'].get(key), kind),
+            ])
+
+        _print_section("compare")
+        _print_ascii_table(headers, rows)
+
+        _print_section("differing config values")
+        snap1 = data1.get("config_snapshot") or {}
+        snap2 = data2.get("config_snapshot") or {}
+        if not snap1 or not snap2:
+            print({
+                "run1_has_snapshot": bool(snap1),
+                "run2_has_snapshot": bool(snap2),
+                "note": "config_snapshot.json missing in one or both runs",
+            })
+            return
+
+        flat1: dict[str, object] = {}
+        flat2: dict[str, object] = {}
+        _flatten("bot_config", snap1.get("bot_config", {}), flat1)
+        _flatten("mode_config", snap1.get("mode_config", {}), flat1)
+        _flatten("bot_config", snap2.get("bot_config", {}), flat2)
+        _flatten("mode_config", snap2.get("mode_config", {}), flat2)
+
+        keys = sorted(set(flat1) | set(flat2))
+        diff_rows = []
+        for key in keys:
+            v1 = flat1.get(key)
+            v2 = flat2.get(key)
+            if v1 != v2:
+                diff_rows.append([key, json.dumps(v1, ensure_ascii=False), json.dumps(v2, ensure_ascii=False)])
+
+        if not diff_rows:
+            print("no config differences")
+        else:
+            _print_ascii_table(["параметр", data1['run_dir'].name, data2['run_dir'].name], diff_rows)
+    finally:
+        _close_data(data1)
+        _close_data(data2)
+
+
+def _print_single_run(data: dict, top: int) -> None:
+    cur = data["cur"]
+    cur2 = data["cur2"]
+    m = data["metrics"]
+
+    print(f"run_dir={data['run_dir']}")
+    print(f"positions_db={data['positions_db']}")
+    print(f"paper_db={data['paper_db']}")
+    print(f"summary_file={data['summary_file'] if data['summary_file'] else 'n/a'}")
+
     _print_section("quick summary")
-    _metric("universe", _fmt_int(universe), "кол-во просмотренных market/token pairs")
-    _metric("passed_screener", _fmt_int(passed_screener), "сколько кандидатов прошли screener")
-    _metric("entry_fills", _fmt_int(entry_fills), "сколько entry fills произошло")
-    _metric("tp_fills", _fmt_int(tp_fills), "сколько TP fills произошло")
-    _metric("fill_rate", _fmt_float(fill_rate_pct, 1, pct=True), "entry fills / passed screener")
-    _metric("positions", _fmt_int(overall.get('positions')), "сколько позиций открылось")
-    _metric("resolved", _fmt_int(resolved_positions), "сколько позиций уже закрыто")
-    _metric("open", _fmt_int(open_positions), "сколько позиций осталось открыто")
-    _metric("winners", _fmt_int(winners), "сколько позиций дало плюс")
-    _metric("losers", _fmt_int(losers), "сколько позиций дало ноль/минус")
-    _metric("win_rate", _fmt_float(win_rate_pct, 1, pct=True), "доля winners среди resolved")
-    _metric("distinct_markets", _fmt_int(distinct_markets), "уникальные рынки с позицией")
-    _metric("distinct_tokens", _fmt_int(distinct_tokens), "уникальные токены с позицией")
-    _metric("stake", _fmt_float(overall.get('stake')), "суммарный вложенный stake")
-    _metric("pnl", _fmt_float(overall.get('pnl')), "суммарный realized pnl")
-    _metric("roi_on_stake", _fmt_float((overall.get('roi_on_stake') or 0.0) * 100.0 if overall.get('roi_on_stake') is not None else None, 1, pct=True), "pnl / total stake")
-    _metric("initial_balance", _fmt_float(initial_balance), "стартовый paper balance")
-    _metric("final_equity", _fmt_float(final_equity), "cash плюс cost basis open positions")
-    _metric("bankroll_return_pct", _fmt_float(bankroll_return_pct, 1, pct=True), "доходность на стартовый bankroll")
-    _metric("avg_stake", _fmt_float(overall.get('avg_stake')), "средний stake на позицию")
-    _metric("avg_entry_price", _fmt_float(overall.get('avg_entry_price'), 6), "средняя цена входа")
-    _metric("avg_peak_x", _fmt_float(overall.get('avg_peak_x')), "средний достигнутый peak_x")
-    _metric("max_peak_x", _fmt_float(overall.get('max_peak_x')), "максимальный peak_x в run")
+    desc = {
+        "universe": "кол-во просмотренных market/token pairs",
+        "passed_screener": "сколько кандидатов прошли screener",
+        "entry_fills": "сколько entry fills произошло",
+        "tp_fills": "сколько TP fills произошло",
+        "fill_rate_pct": "entry fills / passed screener",
+        "positions": "сколько позиций открылось",
+        "resolved_positions": "сколько позиций уже закрыто",
+        "open_positions": "сколько позиций осталось открыто",
+        "winners": "сколько позиций дало плюс",
+        "losers": "сколько позиций дало ноль/минус",
+        "win_rate_pct": "доля winners среди resolved",
+        "distinct_markets": "уникальные рынки с позицией",
+        "distinct_tokens": "уникальные токены с позицией",
+        "stake": "суммарный вложенный stake",
+        "pnl": "суммарный realized pnl",
+        "roi_on_stake_pct": "pnl / total stake",
+        "initial_balance": "стартовый paper balance",
+        "final_equity": "cash плюс cost basis open positions",
+        "bankroll_return_pct": "доходность на стартовый bankroll",
+        "avg_stake": "средний stake на позицию",
+        "avg_entry_price": "средняя цена входа",
+        "avg_peak_x": "средний достигнутый peak_x",
+        "max_peak_x": "максимальный peak_x в run",
+    }
+    kind_by_key = {key: kind for _, key, kind in QUICK_ROWS}
+    for _, key, kind in QUICK_ROWS:
+        _metric(key, _fmt(m.get(key), kind), desc[key])
 
     _print_section("overall")
     print({
-        **overall,
-        'initial_balance': round(initial_balance, 6),
-        'final_equity': round(final_equity, 6),
-        'bankroll_return_pct': round(bankroll_return_pct, 6) if bankroll_return_pct is not None else None,
-        'passed_screener': passed_screener,
-        'entry_fills': entry_fills,
-        'tp_fills': tp_fills,
-        'universe': universe,
-        'distinct_markets': distinct_markets,
-        'distinct_tokens': distinct_tokens,
-        'winners': winners,
-        'losers': losers,
+        **data["overall"],
+        **m,
     })
+
+    _print_section("config snapshot")
+    print(data.get("config_snapshot") or {"note": "config_snapshot.json not found"})
 
     _print_section("winners / losers")
     _print_rows(cur.execute('''
@@ -234,16 +409,7 @@ def main() -> None:
 
     _print_section("cash balance")
     _print_rows(cur.execute('select * from paper_balance'))
-    print({
-        'final_balance_from_events': round(bal, 6),
-        'open_position_cost_basis': round(float(open_cost), 6),
-        'final_equity': round(final_equity, 6),
-        'bankroll_return_pct': round(bankroll_return_pct, 6) if bankroll_return_pct is not None else None,
-        'min_balance': round(min_bal[0], 6),
-        'min_at': min_bal[1],
-        'max_balance': round(max_bal[0], 6),
-        'max_at': max_bal[1],
-    })
+    print(data["balance"])
 
     _print_section("balance event classes")
     _print_rows(cur.execute('''
@@ -324,7 +490,7 @@ def main() -> None:
         group by market_id
         having pnl > 0
         order by pnl desc
-        limit {int(args.top)}
+        limit {int(top)}
     '''))
 
     _print_section("top losing markets")
@@ -335,7 +501,7 @@ def main() -> None:
         from positions
         group by market_id
         order by pnl asc
-        limit {int(args.top)}
+        limit {int(top)}
     '''))
 
     _print_section("top winners")
@@ -344,7 +510,7 @@ def main() -> None:
                entry_price, entry_size_usdc, realized_pnl, peak_x, is_winner
         from positions
         order by realized_pnl desc
-        limit {int(args.top)}
+        limit {int(top)}
     '''))
 
     _print_section("top losers")
@@ -353,11 +519,27 @@ def main() -> None:
                entry_price, entry_size_usdc, realized_pnl, peak_x, is_winner
         from positions
         order by realized_pnl asc
-        limit {int(args.top)}
+        limit {int(top)}
     '''))
 
-    con.close()
-    con2.close()
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Analyze an honest replay run directory")
+    group = ap.add_mutually_exclusive_group(required=True)
+    group.add_argument("--run-dir", help="Replay run directory containing positions.db and paper_trades.db")
+    group.add_argument("--compare", nargs=2, metavar=("RUN1", "RUN2"), help="Compare two replay run directories")
+    ap.add_argument("--top", type=int, default=12, help="How many top winners/losers/markets to show")
+    args = ap.parse_args()
+
+    if args.compare:
+        _compare_runs(Path(args.compare[0]), Path(args.compare[1]))
+        return
+
+    data = _collect_run_data(Path(args.run_dir))
+    try:
+        _print_single_run(data, args.top)
+    finally:
+        _close_data(data)
 
 
 if __name__ == "__main__":

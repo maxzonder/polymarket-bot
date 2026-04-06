@@ -53,6 +53,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -798,6 +799,26 @@ def run_honest_replay(
 
     config = BotConfig(mode=mode, dry_run=True)
     mc     = config.mode_config
+    config_snapshot = {
+        "mode": mode,
+        "bot_config": {
+            "mode": config.mode,
+            "dry_run": config.dry_run,
+            "paper_initial_balance_usdc": config.paper_initial_balance_usdc,
+            "private_key_present": bool(config.private_key),
+            "screener_interval": config.screener_interval,
+            "monitor_interval": config.monitor_interval,
+            "resting_cleanup_interval": config.resting_cleanup_interval,
+            "min_volume_usdc": config.min_volume_usdc,
+            "max_volume_usdc": config.max_volume_usdc,
+            "dead_market_hours": config.dead_market_hours,
+            "scorer_entry_price_max": config.scorer_entry_price_max,
+            "scorer_min_samples": config.scorer_min_samples,
+            "category_weights": config.category_weights,
+        },
+        "mode_config": asdict(mc),
+    }
+    (output_dir / "config_snapshot.json").write_text(json.dumps(config_snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     clob   = ClobClient(private_key="replay_dummy", dry_run=True, paper_db_path=paper_db)
     risk   = RiskManager(mc, balance_usdc=config.paper_initial_balance_usdc)
     om     = OrderManager(config, clob, risk)
