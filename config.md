@@ -2,227 +2,403 @@
 
 ## Обзор
 
-`config.py` определяет все параметры торговой стратегии. Два класса конфигурации:
+`config.py` описывает весь конфиг бота:
+- структуры `TPLevel`, `ModeConfig`, `BotConfig`
+- предустановленные режимы `fast_tp_mode`, `balanced_mode`, `big_swan_mode`, `small_swan_mode`
+- словарь `MODES`
+- глобальные swan-константы
+- runtime-валидацию активного режима
 
-- **`ModeConfig`** — неизменяемая конфигурация стратегии для одного режима
-- **`BotConfig`** — runtime-конфигурация из `.env` / переменных окружения
+Активный режим выбирается через `BOT_MODE`. По умолчанию используется `big_swan_mode`.
 
-Активный режим выбирается через переменную `BOT_MODE` (по умолчанию: `big_swan_mode`).
+`.env` загружается из корня репозитория. Если `python-dotenv` не установлен, файл всё равно парсится вручную, построчно.
 
----
+## TPLevel
 
-## Торговые режимы
+`TPLevel` описывает одну ступень тейк-профита:
+- `progress` — прогресс от цены входа до `$1.00`, диапазон `0.0–1.0`
+- `fraction` — какая доля позиции продаётся на этой ступени, диапазон `0.0–1.0`
 
-### `big_swan_mode` ← активный
+Пример:
+- `TPLevel(progress=0.50, fraction=0.20)` значит: продать 20% позиции на середине пути от цены входа к `$1.00`.
 
-Resting bids на глубоком флоре, удержание до резолюции.
+## ModeConfig
 
-| Параметр | Значение |
-|---|---|
-| `entry_price_levels` | `(0.001, 0.005, 0.01)` — resting bids на трёх уровнях |
-| `entry_price_max` | `0.20` — рынки выше пропускаются |
-| `use_resting_bids` | `True` |
-| `scanner_entry` | `False` — только resting, не гоняться за дипами |
-| `tp_levels` | 10× → 10%, 20× → 10% |
-| `moonbag_fraction` | `0.80` — 80% удерживается до резолюции |
-| `min_hours_to_close` | `0.25` (15 мин) |
-| `max_hours_to_close` | `24.0` |
-| `optimize_metric` | `tail_ev` |
-| `max_open_positions` | `500` |
-| `max_resting_markets` | `5000` |
-| `max_resting_per_cluster` | `10` |
-| `max_capital_deployed_pct` | `0.99` |
-| `max_exposure_per_market` | `$2.00` (на один токен) |
-| `min_market_score` | `0.25` — рынки ниже отклоняются |
+`ModeConfig` это полный профиль одного торгового режима.
 
-**Ставки (market_score_tiers):**
+### Поля входа
 
-| market_score | ставка за уровень |
-|---|---|
-| ≥ 0.60 | $0.50 |
-| ≥ 0.40 | $0.25 |
-| ≥ 0.25 | $0.10 |
-| < 0.25 | reject |
+- `name`
+  - имя режима
+- `entry_price_levels`
+  - tuple ценовых уровней для входа
+  - это **максимально допустимые цены покупки**, а не только уровни для resting bid ниже рынка
+  - если текущая цена уже лучше уровня, бот может купить по этой лучшей цене
+- `entry_price_max`
+  - максимальная текущая цена рынка, при которой рынок вообще попадает в покрытие режима
+- `use_resting_bids`
+  - выставлять ли resting bids заранее
+- `scanner_entry`
+  - разрешён ли вход через scanner, если цена уже находится в зоне входа
 
----
+### Поля выхода
 
-### `small_swan_mode`
+- `tp_levels`
+  - tuple ступеней `TPLevel`
+  - сумма всех `fraction` должна быть не больше `1 - moonbag_fraction`
+- `moonbag_fraction`
+  - доля позиции, которая держится до резолюции
 
-Resting bids на умеренных дипах, ставка зависит от глубины входа.
+### Поля scoring и фильтров
 
-| Параметр | Значение |
-|---|---|
-| `entry_price_levels` | `(0.05, 0.10, 0.15, 0.20)` |
-| `entry_price_max` | `0.50` |
-| `use_resting_bids` | `True` |
-| `scanner_entry` | `False` |
-| `tp_levels` | 2× → 30%, 5× → 30% |
-| `moonbag_fraction` | `0.40` |
-| `min_hours_to_close` | `1.0` |
-| `max_hours_to_close` | `120.0` |
-| `optimize_metric` | `ev_total` |
-| `max_open_positions` | `100` |
-| `max_resting_per_cluster` | `1` |
+- `min_entry_fill_score`
+  - legacy-порог вероятности того, что рынок когда-либо дойдёт до зоны входа
+  - оставлен для обратной совместимости
+- `min_resolution_score`
+  - legacy-порог score на резолюцию
+- `min_real_x_historical`
+  - минимальный исторический `real_x`, ниже которого рынок режиму не подходит
+- `min_market_score`
+  - современный нижний порог композитного `market_score`
+  - `0.0` означает, что фильтр отключён
+- `scoring_weights`
+  - веса компонент screener score
+  - доступны компоненты: `market_score`, `liq`, `duration`, `category`
+  - пустой tuple означает fallback на legacy scoring formula
+- `prefer_long_duration`
+  - `True` значит, что режим предпочитает длинные рынки
+  - `False` значит, что режим предпочитает более короткие рынки
 
-**Ставки (stake_tiers по цене входа):**
+### Поля размера позиции и риска
 
-| цена входа | ставка |
-|---|---|
-| ≤ 0.05 | $0.20 |
-| ≤ 0.10 | $0.10 |
-| ≤ 0.15 | $0.05 |
-| ≤ 0.20 | $0.05 |
+- `stake_usdc`
+  - базовый fallback stake, если ни один tier не совпал
+- `stake_tiers`
+  - legacy-сетка сайзинга по цене входа
+  - формат: `(max_entry_price, stake_usdc)`
+  - применяется по первому совпавшему tier, где `fill_price <= max_entry_price`
+- `market_score_tiers`
+  - современная сетка сайзинга по `market_score`
+  - формат: `(min_market_score_threshold, stake_usdc)`
+  - имеет приоритет над `stake_tiers`
+- `max_exposure_per_market`
+  - потолок суммарного USDC на один `(market_id, token_id)`
+  - `0.0` означает, что cap отключён
+- `max_open_positions`
+  - максимальное число одновременно открытых позиций
+- `max_resting_markets`
+  - максимальное число рынков с живыми resting bids
+- `max_resting_per_cluster`
+  - максимальное число рынков на один neg-risk cluster
+- `max_capital_deployed_pct`
+  - верхняя доля капитала, которую режим теоретически готов держать в позиции
+  - это часть профиля риска режима, а не отдельный полнофункциональный portfolio engine
 
----
+### Поля временного окна
 
-### `balanced_mode`
+- `min_hours_to_close`
+  - рынок закрывается слишком скоро, если меньше этого значения
+- `max_hours_to_close`
+  - рынок слишком дальний, если больше этого значения
+- `hours_to_close_null_default`
+  - fallback, если Gamma не вернул дедлайн и `hours_to_close = None`
 
-Resting bids + scanner, умеренный moonbag.
+### Поле оптимизации
 
-| Параметр | Значение |
-|---|---|
-| `entry_price_levels` | `(0.002, 0.005, 0.01, 0.02, 0.05)` |
-| `entry_price_max` | `0.10` |
-| `use_resting_bids` | `True` |
-| `scanner_entry` | `True` |
-| `tp_levels` | 5× → 35%, 10× → 25%, 20× → 20% |
-| `moonbag_fraction` | `0.20` |
-| `stake_usdc` | `$0.05` (flat) |
-| `max_open_positions` | `20` |
+- `optimize_metric`
+  - целевая метрика режима
+  - допустимые значения из кода: `tail_ev`, `ev_total`, `roi_pct`
 
----
+## Предустановленные режимы
 
 ### `fast_tp_mode`
 
-Scanner-вход, быстрый выход, нет moonbag.
+Быстрый scanner-driven режим без moonbag.
 
-| Параметр | Значение |
-|---|---|
-| `entry_price_levels` | `(0.005, 0.01, 0.02, 0.03, 0.05)` |
-| `entry_price_max` | `0.05` |
-| `use_resting_bids` | `False` |
-| `scanner_entry` | `True` |
-| `tp_levels` | 5× → 70%, 10× → 30% |
-| `moonbag_fraction` | `0.0` |
-| `stake_usdc` | `$0.05` (flat) |
-| `max_open_positions` | `30` |
+- вход
+  - `entry_price_levels=(0.005, 0.01, 0.02, 0.03, 0.05)`
+  - `entry_price_max=0.05`
+  - `use_resting_bids=False`
+  - `scanner_entry=True`
+- выход
+  - `tp_levels=`
+    - `progress=0.50, fraction=0.70`
+    - `progress=0.80, fraction=0.30`
+  - `moonbag_fraction=0.0`
+- фильтры
+  - `min_entry_fill_score=0.0`
+  - `min_resolution_score=0.0`
+  - `min_real_x_historical=5.0`
+- риск и размер
+  - `stake_usdc=0.05`
+  - `max_open_positions=30`
+  - `max_resting_markets=0`
+  - `max_resting_per_cluster=0`
+  - `max_capital_deployed_pct=0.40`
+  - `stake_tiers=()`
+  - `min_market_score=0.0`
+  - `market_score_tiers=()`
+  - `max_exposure_per_market=0.0`
+- время и оптимизация
+  - `min_hours_to_close=1.0`
+  - `max_hours_to_close=48.0`
+  - `hours_to_close_null_default=48.0`
+  - `optimize_metric='ev_total'`
+  - `scoring_weights=(('market_score', 0.40), ('duration', 0.35), ('liq', 0.15), ('category', 0.10))`
+  - `prefer_long_duration=False`
 
----
+### `balanced_mode`
 
-## Поля ModeConfig (справочник)
+Смешанный режим: resting bids плюс scanner, частичный TP, небольшой moonbag.
 
-### Вход
+- вход
+  - `entry_price_levels=(0.002, 0.005, 0.01, 0.02, 0.05)`
+  - `entry_price_max=0.10`
+  - `use_resting_bids=True`
+  - `scanner_entry=True`
+- выход
+  - `tp_levels=`
+    - `progress=0.25, fraction=0.35`
+    - `progress=0.50, fraction=0.25`
+    - `progress=0.75, fraction=0.20`
+  - `moonbag_fraction=0.20`
+- фильтры
+  - `min_entry_fill_score=0.05`
+  - `min_resolution_score=0.10`
+  - `min_real_x_historical=5.0`
+- риск и размер
+  - `stake_usdc=0.05`
+  - `max_open_positions=20`
+  - `max_resting_markets=1000`
+  - `max_resting_per_cluster=3`
+  - `max_capital_deployed_pct=0.35`
+  - `stake_tiers=()`
+  - `min_market_score=0.0`
+  - `market_score_tiers=()`
+  - `max_exposure_per_market=0.0`
+- время и оптимизация
+  - `min_hours_to_close=1.0`
+  - `max_hours_to_close=120.0`
+  - `hours_to_close_null_default=48.0`
+  - `optimize_metric='ev_total'`
+  - `scoring_weights=(('market_score', 0.50), ('duration', 0.25), ('liq', 0.15), ('category', 0.10))`
+  - `prefer_long_duration=False`
 
-| Поле | Тип | Описание |
-|---|---|---|
-| `entry_price_levels` | `tuple[float, ...]` | Ценовые уровни для resting-заявок. Screener выставляет только уровни **ниже** текущей цены рынка. |
-| `entry_price_max` | `float` | Максимальная текущая цена для скрининга. |
-| `use_resting_bids` | `bool` | Выставлять ли ордера заранее, до падения цены к уровню. |
-| `scanner_entry` | `bool` | Входить ли, если scanner видит цену уже в зоне входа. |
+### `big_swan_mode`
 
-### Выход
+Широкий tail-risk режим. Только resting bids, большой moonbag, score-based sizing.
 
-| Поле | Тип | Описание |
-|---|---|---|
-| `tp_levels` | `tuple[TPLevel, ...]` | Лестница тейк-профита. `TPLevel(x, fraction)` продаёт `fraction` позиции при достижении `entry_price * x`. |
-| `moonbag_fraction` | `float` | Доля позиции, удерживаемая до резолюции. |
+Важные derived-константы:
+- `_BIG_SWAN_BUDGET = 2.0`
+- `_BIG_SWAN_LEVELS = (0.01, 0.10, 0.15)`
+- `_bsm_s = _BIG_SWAN_BUDGET / len(_BIG_SWAN_LEVELS) = 0.666666...`
 
-### Фильтры scoring
+Из них автоматически строятся `entry_price_levels`, `market_score_tiers` и `max_exposure_per_market`.
 
-| Поле | Тип | Описание |
-|---|---|---|
-| `min_entry_fill_score` | `float` | Мин. P(рынок когда-либо достигнет зоны входа). |
-| `min_resolution_score` | `float` | Мин. resolution score для принятия кандидата. |
-| `min_real_x_historical` | `float` | Мин. наблюдаемый множитель цены в исторических данных. |
-| `min_market_score` | `float` | Мин. композитный `market_score`. `0.0` = отключено. |
+- вход
+  - `entry_price_levels=(0.01, 0.10, 0.15)`
+  - `entry_price_max=0.20`
+  - `use_resting_bids=True`
+  - `scanner_entry=False`
+- выход
+  - `tp_levels=`
+    - `progress=0.10, fraction=0.10`
+    - `progress=0.50, fraction=0.20`
+  - `moonbag_fraction=0.70`
+- фильтры
+  - `min_entry_fill_score=0.02`
+  - `min_resolution_score=0.15`
+  - `min_real_x_historical=10.0`
+  - `min_market_score=0.25`
+- риск и размер
+  - `stake_usdc=0.05`
+  - `max_open_positions=500`
+  - `max_resting_markets=5000`
+  - `max_resting_per_cluster=10`
+  - `max_capital_deployed_pct=0.99`
+  - `stake_tiers=()`
+  - `market_score_tiers=`
+    - `score >= 0.60 -> stake = _bsm_s`
+    - `score >= 0.40 -> stake = _bsm_s * 0.50`
+    - `score >= 0.25 -> stake = _bsm_s * 0.25`
+  - в текущих числах это:
+    - `score >= 0.60 -> 0.666666... USDC на уровень`
+    - `score >= 0.40 -> 0.333333... USDC на уровень`
+    - `score >= 0.25 -> 0.166666... USDC на уровень`
+  - `max_exposure_per_market=2.0`
+- время и оптимизация
+  - `min_hours_to_close=0.25`
+  - `max_hours_to_close=168.0`
+  - `hours_to_close_null_default=48.0`
+  - `optimize_metric='tail_ev'`
+  - `scoring_weights=(('market_score', 0.70), ('liq', 0.20), ('category', 0.10))`
+  - `prefer_long_duration=True`
 
-### Размер позиции
+### `small_swan_mode`
 
-| Поле | Тип | Описание |
-|---|---|---|
-| `stake_usdc` | `float` | Fallback-стейк. Используется если ни один тир не совпал. |
-| `max_open_positions` | `int` | Жёсткий лимит одновременно открытых позиций. |
-| `max_resting_markets` | `int` | Макс. число рынков с живыми resting-заявками. |
-| `max_resting_per_cluster` | `int` | Макс. рынков на neg-risk группу. |
-| `max_capital_deployed_pct` | `float` | Зарезервировано. Поле существует, но `RiskManager` его не читает при сайзинге. Реальный капитальный лимит обеспечивается paper balance gate + `max_open_positions`. |
-| `max_exposure_per_market` | `float` | Lifetime cap: макс. суммарный USDC на один `(market_id, token_id)` за всё время жизни БД. Проверяется `ExposureManager.can_add()` перед каждым ордером. `0.0` = отключено. |
+Режим для умеренных dip/recovery-сценариев с price-based sizing.
 
-### Стейк-тиры
+- вход
+  - `entry_price_levels=(0.05, 0.10, 0.15, 0.20)`
+  - `entry_price_max=0.50`
+  - `use_resting_bids=True`
+  - `scanner_entry=False`
+- выход
+  - `tp_levels=`
+    - `progress=0.20, fraction=0.30`
+    - `progress=0.50, fraction=0.30`
+  - `moonbag_fraction=0.40`
+- фильтры
+  - `min_entry_fill_score=0.05`
+  - `min_resolution_score=0.10`
+  - `min_real_x_historical=2.0`
+- риск и размер
+  - `stake_usdc=0.10`
+  - `max_open_positions=100`
+  - `max_resting_markets=1000`
+  - `max_resting_per_cluster=1`
+  - `max_capital_deployed_pct=0.50`
+  - `stake_tiers=`
+    - `fill_price <= 0.05 -> 0.20`
+    - `fill_price <= 0.10 -> 0.10`
+    - `fill_price <= 0.15 -> 0.05`
+    - `fill_price <= 0.20 -> 0.05`
+  - `min_market_score=0.0`
+  - `market_score_tiers=()`
+  - `max_exposure_per_market=0.0`
+- время и оптимизация
+  - `min_hours_to_close=1.0`
+  - `max_hours_to_close=48.0`
+  - `hours_to_close_null_default=48.0`
+  - `optimize_metric='ev_total'`
+  - `scoring_weights=(('market_score', 0.50), ('duration', 0.25), ('liq', 0.15), ('category', 0.10))`
+  - `prefer_long_duration=False`
 
-Два взаимоисключающих расписания — `market_score_tiers` имеет приоритет:
+## MODES
 
-#### `market_score_tiers` (по score, v1.1) — используется в `big_swan_mode`
+`MODES` это словарь:
+- `fast_tp_mode -> FAST_TP_MODE`
+- `balanced_mode -> BALANCED_MODE`
+- `big_swan_mode -> BIG_SWAN_MODE`
+- `small_swan_mode -> SMALL_SWAN_MODE`
 
-```python
-# формат: ((min_score_threshold, stake_usdc), ...)
-market_score_tiers: tuple[tuple[float, float], ...] = ()
-```
+Он используется как единственный registry режимов. `BotConfig.mode_config` берёт активный режим именно отсюда.
 
-Для каждого фила: найти наивысший порог ≤ score → использовать его стейк. Полностью заменяет `stake_tiers`.
+## Swan-константы и защитные проверки
 
-#### `stake_tiers` (по цене, legacy) — используется в `small_swan_mode`
+### Глобальные константы
 
-```python
-# формат: ((max_entry_price, stake_usdc), ...)
-stake_tiers: tuple[tuple[float, float], ...] = ()
-```
+- `SWAN_BUY_PRICE_THRESHOLD = 0.20`
+  - потолок цены, до которой исторически собирались `swans_v2`
+  - бот не должен ставить выше этого порога без пересбора истории
+- `SWAN_ENTRY_MAX = SWAN_BUY_PRICE_THRESHOLD`
+  - единый buy ceiling для swan-анализа
+- `SWAN_MIN_BUY_VOLUME = 1.0`
+  - минимальный объём на флоре
+- `SWAN_MIN_SELL_VOLUME = 30.0`
+  - минимальный объём на выходе
+- `SWAN_MIN_REAL_X = 5.0`
+  - минимальный множитель, чтобы движение считалось реальным swan
 
-Для каждого фила: найти первый тир где `fill_price <= max_entry_price` → использовать его стейк. Идея: глубже флор = больше стейк.
+### `check_swan_buy_price_threshold(mode_config)`
 
-### Временное окно
+Эта функция проверяет, что `entry_price_levels` активного режима не выходят выше `SWAN_BUY_PRICE_THRESHOLD`.
 
-| Поле | Тип | Описание |
-|---|---|---|
-| `min_hours_to_close` | `float` | Отклонять рынки, закрывающиеся раньше этого. |
-| `max_hours_to_close` | `float` | Отклонять рынки, закрывающиеся позже этого. |
-| `hours_to_close_null_default` | `float` | Если Gamma вернул `None` для дедлайна — считать это количество часов. По умолчанию: 48h. |
+Если выходят, код не падает, а поднимает warning с инструкцией:
+- пересобрать swan-историю с новым `--buy-price-threshold`
+- затем поднять `SWAN_BUY_PRICE_THRESHOLD`
 
----
+## BotConfig
 
-## Поля BotConfig (Runtime)
+`BotConfig` это runtime-конфигурация процесса.
 
-Загружается из окружения / `.env`. Запуск: `BOT_MODE=big_swan_mode DRY_RUN=false python main.py`.
+### Поля, читаемые из env
 
-| Поле | Env var | По умолчанию | Описание |
-|---|---|---|---|
-| `mode` | `BOT_MODE` | `big_swan_mode` | Активный торговый режим |
-| `dry_run` | `DRY_RUN` | `true` | Бумажная торговля |
-| `private_key` | `POLY_PRIVATE_KEY` | — | Приватный ключ CLOB-кошелька |
-| `api_key` | `POLY_API_KEY` | — | API-ключ Polymarket |
-| `api_secret` | `POLY_API_SECRET` | — | API-секрет Polymarket |
-| `api_passphrase` | `POLY_PASSPHRASE` | — | Passphrase Polymarket |
-| `screener_interval` | — | 300с | Интервал запуска screener |
-| `monitor_interval` | — | 90с | Интервал проверки открытых позиций |
-| `resting_cleanup_interval` | — | 3600с | Интервал очистки устаревших resting-заявок |
-| `min_volume_usdc` | — | 50 | Мин. суммарный объём рынка для скрининга |
-| `max_volume_usdc` | — | 300 000 | Макс. суммарный объём рынка для скрининга |
-| `dead_market_hours` | — | 48h | Отклонять рынки без трейдов за это время |
-| `scorer_entry_price_max` | — | 0.02 | Использовать только строки `swans_v2` с ценой ≤ этого значения для scoring |
-| `scorer_min_samples` | — | 5 | Мин. число сэмплов для надёжного resolution score |
+- `mode`
+  - env: `BOT_MODE`
+  - default: `big_swan_mode`
+- `dry_run`
+  - env: `DRY_RUN`
+  - default: `true`
+  - значения `false`, `0`, `no` отключают dry-run
+- `paper_initial_balance_usdc`
+  - env: `PAPER_INITIAL_BALANCE_USDC`
+  - default: `100.0`
+- `private_key`
+  - env: `POLY_PRIVATE_KEY`
+  - default: `""`
+- `api_key`
+  - env: `POLY_API_KEY`
+  - default: `""`
+- `api_secret`
+  - env: `POLY_API_SECRET`
+  - default: `""`
+- `api_passphrase`
+  - env: `POLY_PASSPHRASE`
+  - default: `""`
 
-### `category_weights`
+### Поля runtime с кодовыми дефолтами
 
-Множитель EV на категорию, применяется к market score. Нормализован к crypto = 1.0:
+- `screener_interval = 300`
+  - интервал запуска screener, секунды
+- `monitor_interval = 90`
+  - интервал мониторинга позиций, секунды
+- `resting_cleanup_interval = 3600`
+  - интервал housekeeping по resting orders, секунды
+- `resting_order_ttl = 0`
+  - deprecated
+  - больше не используется как trigger для отмены ордеров
+  - поле оставлено для backward compatibility со старой схемой БД
+- `min_volume_usdc = 50.0`
+  - минимальный объём рынка для screener
+- `max_volume_usdc = 300_000.0`
+  - максимальный объём рынка для screener
+- `dead_market_hours = 48.0`
+  - рынок считается мёртвым, если не было трейдов столько часов
+- `scorer_entry_price_max = 0.02`
+  - ограничение по цене входа для выборки `swans_v2`, используемой в scoring
+- `scorer_min_samples = 5`
+  - минимальное число исторических сэмплов для score
+- `category_weights`
+  - словарь весов по категориям:
+    - `geopolitics: 1.5`
+    - `politics: 1.5`
+    - `crypto: 1.0`
+    - `weather: 1.0`
+    - `health: 1.0`
+    - `esports: 1.0`
+    - `sports: 0.8`
+    - `tech: 0.6`
+    - `entertainment: 0.5`
 
-| Категория | Вес |
-|---|---|
-| geopolitics | 1.5 |
-| politics | 1.5 |
-| crypto | 1.0 |
-| weather | 1.0 |
-| health | 1.0 |
-| esports | 1.0 |
-| sports | 0.8 |
-| tech | 0.6 |
-| entertainment | 0.5 |
+## `BotConfig.mode_config`
 
----
+Property `mode_config` возвращает `MODES[self.mode]`.
 
-## Глобальные константы
+Это основной способ получить активный `ModeConfig` из runtime-конфига.
 
-| Константа | Значение | Описание |
-|---|---|---|
-| `SWAN_BUY_PRICE_THRESHOLD` | `0.20` | Фиксированная константа — потолок цены при сборе данных в swan_analyzer. История первична: бот не должен ставить выше этого уровня. |
-| `SWAN_MIN_BUY_VOLUME` | 1.0 USDC | Мин. объём на флоре (проверка ликвидности) |
-| `SWAN_MIN_SELL_VOLUME` | 30.0 USDC | Мин. объём на выходе (качество фила) |
-| `SWAN_MIN_REAL_X` | 5.0× | Мин. множитель для учёта события как настоящего swan |
+## `BotConfig.validate()`
+
+Валидация делает две вещи:
+- проверяет, что `mode` существует в `MODES`
+- проверяет, что сумма `tp_levels` и `moonbag_fraction` не превышает `1.0`
+- дополнительно запускает `check_swan_buy_price_threshold()` и поднимает warning, если режим пытается ставить выше исторического потолка
+
+## `load_config()`
+
+`load_config()` создаёт `BotConfig`, читая:
+- `BOT_MODE`
+- `DRY_RUN`
+
+Потом вызывает `validate()` и возвращает готовый runtime-config.
+
+## Коротко: что сейчас важно помнить
+
+- `big_swan_mode` больше не использует старый стек `(0.001, 0.005, 0.01)`
+- текущий `big_swan_mode` это `(0.01, 0.10, 0.15)`
+- текущий первый-step ladder для `big_swan_mode` это:
+  - `10%` продажи на `progress=0.10`
+  - `20%` продажи на `progress=0.50`
+  - `70%` moonbag до резолюции
+- `small_swan_mode.max_hours_to_close = 48.0`, не `120.0`
+- `entry_price_levels` нужно понимать как ceiling допустимой цены входа, а не как "ставим только ниже рынка"
