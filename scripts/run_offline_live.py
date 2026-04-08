@@ -23,6 +23,7 @@ def main() -> None:
         choices=["big_swan_mode", "balanced_mode", "fast_tp_mode", "small_swan_mode"],
     )
     ap.add_argument("--limit", type=int, default=None, help="Max markets to load after filtering out already-closed markets")
+    ap.add_argument("--market-offset", type=int, default=0, help="Skip this many eligible markets before applying --limit")
     ap.add_argument("--out", default=None, help="Output dir (default: data/replay_runs/offline_live_<timestamp>)")
     ap.add_argument("--summary", action="store_true", help="Suppress per-tick logs")
     ap.add_argument("--trade-cache-size", type=int, default=512)
@@ -41,6 +42,7 @@ def main() -> None:
         mode=args.mode,
         output_dir=output_dir,
         limit=args.limit,
+        market_offset=args.market_offset,
         summary_only=args.summary,
         trade_cache_size=args.trade_cache_size,
     )

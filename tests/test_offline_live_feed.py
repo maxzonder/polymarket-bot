@@ -55,6 +55,28 @@ class OfflineLiveFeedTests(unittest.TestCase):
         self.assertIn("active_after_start", filtered.markets)
         self.assertNotIn("closed_at_start", filtered.markets)
 
+        rows.append(
+            {
+                "market_id": "later_active",
+                "question": "Later market?",
+                "category": "crypto",
+                "volume": 1000.0,
+                "end_date": 1_700_172_800,
+                "start_date": 1_699_999_000,
+                "neg_risk": 0,
+                "neg_risk_market_id": None,
+                "comment_count": 0,
+                "token_id": "later_yes",
+                "outcome_name": "Yes",
+                "is_winner": 0,
+            }
+        )
+        feed2 = HistoricalMarketFeed.from_rows(rows, {}, trade_cache_size=8)
+        offset_filtered = feed2.filtered(start_ts=1_700_000_000, market_offset=1, limit_markets=1)
+        self.assertEqual(offset_filtered.market_count, 1)
+        self.assertIn("later_active", offset_filtered.markets)
+        self.assertNotIn("active_after_start", offset_filtered.markets)
+
     def test_feed_exposes_tick_based_market_snapshot(self) -> None:
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

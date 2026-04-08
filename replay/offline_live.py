@@ -202,17 +202,23 @@ class HistoricalMarketFeed:
         *,
         start_ts: Optional[int] = None,
         end_ts: Optional[int] = None,
+        market_offset: int = 0,
         limit_markets: Optional[int] = None,
     ) -> "HistoricalMarketFeed":
-        selected_market_ids: list[str] = []
+        eligible_market_ids: list[str] = []
         for market_id, market in self.markets.items():
             if start_ts is not None and market.end_date_ts is not None and market.end_date_ts <= start_ts:
                 continue
             if end_ts is not None and market.start_date_ts is not None and market.start_date_ts > end_ts:
                 continue
-            selected_market_ids.append(market_id)
-            if limit_markets is not None and len(selected_market_ids) >= limit_markets:
-                break
+            eligible_market_ids.append(market_id)
+
+        if market_offset > 0:
+            eligible_market_ids = eligible_market_ids[market_offset:]
+        if limit_markets is not None:
+            eligible_market_ids = eligible_market_ids[:limit_markets]
+
+        selected_market_ids = eligible_market_ids
 
         selected_market_set = set(selected_market_ids)
         markets = {
@@ -446,6 +452,7 @@ class OfflineLiveRunner:
         mode: str,
         output_dir: Path,
         limit: Optional[int] = None,
+        market_offset: int = 0,
         summary_only: bool = False,
         trade_cache_size: int = 512,
     ):
@@ -455,6 +462,7 @@ class OfflineLiveRunner:
         self.output_dir = output_dir
         self.limit = limit
         self.summary_only = summary_only
+        self.market_offset = max(0, int(market_offset))
         self.trade_cache_size = trade_cache_size
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -523,6 +531,7 @@ class OfflineLiveRunner:
         self.feed = raw_feed.filtered(
             start_ts=self.start_ts,
             end_ts=self.end_ts,
+            market_offset=self.market_offset,
             limit_markets=limit,
         )
         self.total_markets = self.feed.market_count
@@ -536,7 +545,8 @@ class OfflineLiveRunner:
     def run(self) -> None:
         logger.info(
             f"Offline live replay: {self.start} → {self.end} | mode={self.mode} | "
-            f"markets={self.total_markets}/{self.raw_market_count} tokens={self.total_tokens}/{self.raw_token_count} | output={self.output_dir}"
+            f"markets={self.total_markets}/{self.raw_market_count} tokens={self.total_tokens}/{self.raw_token_count} "
+            f"offset={self.market_offset} | output={self.output_dir}"
         )
         t0 = time.monotonic()
 
