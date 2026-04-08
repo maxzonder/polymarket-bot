@@ -124,6 +124,14 @@ class HistoricalMarketFeed:
         self._trade_cache: OrderedDict[str, TradeSeries] = OrderedDict()
         self._resolved_markets: set[str] = set()
 
+    @property
+    def market_count(self) -> int:
+        return len(self.markets)
+
+    @property
+    def token_count(self) -> int:
+        return len(self.tokens)
+
     @classmethod
     def from_rows(
         cls,
@@ -188,6 +196,39 @@ class HistoricalMarketFeed:
                 )
 
         return cls(markets, tokens, trade_cache_size=trade_cache_size)
+
+    def filtered(
+        self,
+        *,
+        start_ts: Optional[int] = None,
+        end_ts: Optional[int] = None,
+        limit_markets: Optional[int] = None,
+    ) -> "HistoricalMarketFeed":
+        selected_market_ids: list[str] = []
+        for market_id, market in self.markets.items():
+            if start_ts is not None and market.end_date_ts is not None and market.end_date_ts <= start_ts:
+                continue
+            if end_ts is not None and market.start_date_ts is not None and market.start_date_ts > end_ts:
+                continue
+            selected_market_ids.append(market_id)
+            if limit_markets is not None and len(selected_market_ids) >= limit_markets:
+                break
+
+        selected_market_set = set(selected_market_ids)
+        markets = {
+            market_id: self.markets[market_id]
+            for market_id in selected_market_ids
+        }
+        tokens = {
+            token_id: token
+            for token_id, token in self.tokens.items()
+            if token.market_id in selected_market_set
+        }
+        return HistoricalMarketFeed(
+            markets,
+            tokens,
+            trade_cache_size=self.trade_cache_size,
+        )
 
     @staticmethod
     def _outcome_sort_key(outcome_name: str) -> tuple[int, str]:
@@ -460,25 +501,42 @@ class OfflineLiveRunner:
 
         db_conn = sqlite3.connect(DB_PATH)
         db_conn.row_factory = sqlite3.Row
-        rows = load_all_markets(db_conn, self.start_ts, self.end_ts, self.config)
+        try:
+            rows = load_all_markets(db_conn, self.start_ts, self.end_ts, self.config)
+        except sqlite3.OperationalError as exc:
+            db_conn.close()
+            raise RuntimeError(
+                f"Failed to load historical markets from {DB_PATH}. "
+                "Set POLYMARKET_DATA_DIR to a real dataset directory with polymarket_dataset.db."
+            ) from exc
         db_conn.close()
-        if limit is not None:
-            rows = rows[:limit]
 
         logger.info("Building historical trade index...")
         trade_index = _build_trade_file_index()
-        self.feed = HistoricalMarketFeed.from_rows(
+        raw_feed = HistoricalMarketFeed.from_rows(
             rows,
             trade_index,
             trade_cache_size=trade_cache_size,
         )
-        self.total_markets = len(self.feed.markets)
-        self.total_tokens = len(self.feed.tokens)
+        self.raw_market_count = raw_feed.market_count
+        self.raw_token_count = raw_feed.token_count
+        self.feed = raw_feed.filtered(
+            start_ts=self.start_ts,
+            end_ts=self.end_ts,
+            limit_markets=limit,
+        )
+        self.total_markets = self.feed.market_count
+        self.total_tokens = self.feed.token_count
+        if self.total_markets == 0:
+            raise RuntimeError(
+                "Offline live runner has no active markets in the requested window. "
+                "Check POLYMARKET_DATA_DIR / dataset coverage, or widen the date range."
+            )
 
     def run(self) -> None:
         logger.info(
             f"Offline live replay: {self.start} → {self.end} | mode={self.mode} | "
-            f"markets={self.total_markets} tokens={self.total_tokens} | output={self.output_dir}"
+            f"markets={self.total_markets}/{self.raw_market_count} tokens={self.total_tokens}/{self.raw_token_count} | output={self.output_dir}"
         )
         t0 = time.monotonic()
 

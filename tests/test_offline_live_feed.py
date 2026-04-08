@@ -18,6 +18,43 @@ from strategy.screener import EntryCandidate
 
 
 class OfflineLiveFeedTests(unittest.TestCase):
+    def test_filtered_feed_skips_markets_closed_at_start_before_limit(self) -> None:
+        rows = [
+            {
+                "market_id": "closed_at_start",
+                "question": "Closed already?",
+                "category": "crypto",
+                "volume": 1000.0,
+                "end_date": 1_700_000_000,
+                "start_date": 1_699_999_000,
+                "neg_risk": 0,
+                "neg_risk_market_id": None,
+                "comment_count": 0,
+                "token_id": "closed_yes",
+                "outcome_name": "Yes",
+                "is_winner": 0,
+            },
+            {
+                "market_id": "active_after_start",
+                "question": "Still live?",
+                "category": "crypto",
+                "volume": 1000.0,
+                "end_date": 1_700_086_400,
+                "start_date": 1_699_999_000,
+                "neg_risk": 0,
+                "neg_risk_market_id": None,
+                "comment_count": 0,
+                "token_id": "active_yes",
+                "outcome_name": "Yes",
+                "is_winner": 1,
+            },
+        ]
+        feed = HistoricalMarketFeed.from_rows(rows, {}, trade_cache_size=8)
+        filtered = feed.filtered(start_ts=1_700_000_000, limit_markets=1)
+        self.assertEqual(filtered.market_count, 1)
+        self.assertIn("active_after_start", filtered.markets)
+        self.assertNotIn("closed_at_start", filtered.markets)
+
     def test_feed_exposes_tick_based_market_snapshot(self) -> None:
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
