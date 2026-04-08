@@ -346,6 +346,37 @@ def load_all_markets(
     return [dict(r) for r in rows]
 
 
+def slice_rows_by_market(
+    rows: list[dict],
+    *,
+    market_offset: int = 0,
+    market_limit: Optional[int] = None,
+    skip_closed_at_start_ts: Optional[int] = None,
+) -> list[dict]:
+    """Slice replay input by whole markets instead of raw token rows."""
+    grouped: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for row in rows:
+        market_id = str(row["market_id"])
+        if market_id not in grouped:
+            end_date = int(row.get("end_date") or 0) if row.get("end_date") is not None else None
+            if skip_closed_at_start_ts is not None and end_date is not None and end_date <= skip_closed_at_start_ts:
+                continue
+            grouped[market_id] = []
+            order.append(market_id)
+        grouped[market_id].append(row)
+
+    if market_offset > 0:
+        order = order[market_offset:]
+    if market_limit is not None:
+        order = order[:market_limit]
+
+    sliced: list[dict] = []
+    for market_id in order:
+        sliced.extend(grouped[market_id])
+    return sliced
+
+
 # ── Replay adapters: reuse OrderManager entry path ───────────────────────────
 
 def _synthetic_replay_orderbook(token_id: str, current_price: float) -> Orderbook:
@@ -873,6 +904,8 @@ def run_honest_replay(
     mode: str,
     output_dir: Path,
     limit: Optional[int] = None,
+    market_offset: int = 0,
+    market_limit: Optional[int] = None,
     activation_delay: int = 0,
     fill_fraction: float = 1.0,
     summary_only: bool = False,
@@ -930,13 +963,22 @@ def run_honest_replay(
     all_rows = load_all_markets(db_conn, start_ts, end_ts, config)
     db_conn.close()
 
-    if limit:
+    if market_offset > 0 or market_limit is not None:
+        all_rows = slice_rows_by_market(
+            all_rows,
+            market_offset=market_offset,
+            market_limit=market_limit,
+            skip_closed_at_start_ts=start_ts,
+        )
+    elif limit:
         all_rows = all_rows[:limit]
 
     logger.info(
         f"Honest replay: {start} → {end} | mode={mode} | "
         f"market/token pairs loaded: {len(all_rows)}"
         + (f" (limit={limit})" if limit else "")
+        + (f" (market_offset={market_offset})" if market_offset else "")
+        + (f" (market_limit={market_limit})" if market_limit is not None else "")
     )
     logger.info(
         f"Fill model: activation_delay={activation_delay}s "
@@ -1022,7 +1064,11 @@ def main() -> None:
     ap.add_argument("--mode",   default="big_swan_mode",
                     choices=["big_swan_mode", "balanced_mode", "fast_tp_mode", "small_swan_mode"])
     ap.add_argument("--limit",  type=int, default=None,
-                    help="Max market/token pairs to process (default: all)")
+                    help="Max market/token pairs to process (legacy row-based limit; default: all)")
+    ap.add_argument("--market-offset", type=int, default=0,
+                    help="Skip this many eligible markets before replaying")
+    ap.add_argument("--market-limit", type=int, default=None,
+                    help="Max whole markets to process after market offset filtering")
     ap.add_argument("--out",    default=None,
                     help="Output dir (default: data/replay_runs/honest_<timestamp>)")
     ap.add_argument("--pessimistic", action="store_true",
@@ -1051,6 +1097,8 @@ def main() -> None:
         mode=args.mode,
         output_dir=output_dir,
         limit=args.limit,
+        market_offset=args.market_offset,
+        market_limit=args.market_limit,
         activation_delay=activation_delay,
         fill_fraction=fill_fraction,
         summary_only=args.summary,
