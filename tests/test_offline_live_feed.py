@@ -264,6 +264,111 @@ class OfflineLiveFeedTests(unittest.TestCase):
             conn.close()
             self.assertEqual(status_after, "cancelled")
 
+    def test_finalize_window_force_resolves_open_positions(self) -> None:
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            positions_db = tmp_path / "positions.db"
+            paper_db = tmp_path / "paper.db"
+            trades_path = tmp_path / "tok.json"
+            base_ts = 1_700_000_000
+
+            trades_path.write_text(
+                json.dumps(
+                    [
+                        {"timestamp": base_ts, "price": 0.10, "size": 100.0, "side": "SELL"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            rows = [
+                {
+                    "market_id": "mkt1",
+                    "question": "Finalize later?",
+                    "category": "crypto",
+                    "volume": 1000.0,
+                    "end_date": base_ts + 86_400,
+                    "start_date": base_ts - 3600,
+                    "neg_risk": 0,
+                    "neg_risk_market_id": None,
+                    "comment_count": 0,
+                    "token_id": "tok1",
+                    "outcome_name": "Yes",
+                    "is_winner": 1,
+                }
+            ]
+            trade_index = {("mkt1", "tok1"): str(trades_path)}
+            feed = HistoricalMarketFeed.from_rows(rows, trade_index, trade_cache_size=8)
+
+            cfg = BotConfig(
+                mode="big_swan_mode",
+                dry_run=True,
+                private_key="fake",
+                paper_initial_balance_usdc=1000.0,
+            )
+            clob = ClobClient(private_key="fake", dry_run=True, paper_db_path=paper_db)
+            risk = RiskManager(cfg.mode_config, balance_usdc=cfg.paper_initial_balance_usdc)
+            om_module.POSITIONS_DB = positions_db
+            order_manager = OrderManager(cfg, clob, risk)
+
+            candidate = EntryCandidate(
+                market_info=MarketInfo(
+                    market_id="mkt1",
+                    condition_id="mkt1",
+                    question="Finalize later?",
+                    category="crypto",
+                    token_ids=["tok1"],
+                    outcome_names=["Yes"],
+                    best_ask=0.10,
+                    best_bid=0.095,
+                    last_trade_price=0.10,
+                    volume_usdc=1000.0,
+                    liquidity_usdc=0.0,
+                    comment_count=0,
+                    fees_enabled=False,
+                    end_date_ts=base_ts + 86_400,
+                    hours_to_close=24.0,
+                    neg_risk=False,
+                    neg_risk_group_id=None,
+                ),
+                token_id="tok1",
+                outcome_name="Yes",
+                current_price=0.10,
+                entry_fill_score=0.0,
+                resolution_score=0.0,
+                total_score=1.0,
+                suggested_entry_levels=[0.10],
+                candidate_id="cand2",
+                rationale="test",
+                market_score=None,
+            )
+
+            synthetic_book = Orderbook(
+                token_id="tok1",
+                bids=[OrderbookLevel(price=0.095, size=100.0)],
+                asks=[OrderbookLevel(price=0.10, size=100.0)],
+                best_bid=0.095,
+                best_ask=0.10,
+            )
+            with patch("execution.order_manager.get_orderbook", return_value=synthetic_book):
+                results = order_manager.process_candidate(candidate)
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].status, "matched")
+
+            cancelled_resting, forced_markets, forced_tokens = feed.finalize_window(order_manager)
+            self.assertEqual(cancelled_resting, 0)
+            self.assertEqual(forced_markets, 1)
+            self.assertEqual(forced_tokens, 1)
+
+            conn = sqlite3.connect(positions_db)
+            pos = conn.execute(
+                "SELECT status, realized_pnl FROM positions WHERE token_id='tok1'"
+            ).fetchone()
+            conn.close()
+            self.assertIsNotNone(pos)
+            self.assertEqual(pos[0], "resolved")
+            self.assertGreater(float(pos[1]), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

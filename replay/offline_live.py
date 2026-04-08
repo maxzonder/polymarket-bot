@@ -107,6 +107,9 @@ class OfflineRunStats:
     orders_placed: int = 0
     markets_resolved: int = 0
     tokens_resolved: int = 0
+    window_forced_markets: int = 0
+    window_forced_tokens: int = 0
+    window_cancelled_resting: int = 0
 
 
 class HistoricalMarketFeed:
@@ -427,20 +430,67 @@ class HistoricalMarketFeed:
 
         return resolved_markets, resolved_tokens
 
-    def _cancel_live_resting(self, order_manager: OrderManager, market_id: str, token_id: str) -> None:
+    def _cancel_live_resting(self, order_manager: OrderManager, market_id: str, token_id: str) -> int:
         conn = sqlite3.connect(str(om_module.POSITIONS_DB))
         live_orders = conn.execute(
             "SELECT order_id FROM resting_orders WHERE market_id=? AND token_id=? AND status='live'",
             (market_id, token_id),
         ).fetchall()
+        cancelled = 0
         for row in live_orders:
             order_manager.clob.cancel_order(row[0])
             conn.execute(
                 "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
                 (row[0],),
             )
+            cancelled += 1
         conn.commit()
         conn.close()
+        return cancelled
+
+    def finalize_window(self, order_manager: OrderManager) -> tuple[int, int, int]:
+        """
+        Force-settle replay state at the end of a truncated replay window.
+
+        Current honest replay resolves accepted tokens at simulation end even when
+        the market's real end_date is later. To make short-window comparisons less
+        misleading, the offline runner explicitly:
+        - cancels every remaining live resting BUY order;
+        - resolves every still-active market/token using the stored historical winner.
+        """
+        cancelled_resting = 0
+        forced_markets = 0
+        forced_tokens = 0
+
+        conn = sqlite3.connect(str(om_module.POSITIONS_DB))
+        conn.row_factory = sqlite3.Row
+        live_rows = conn.execute(
+            "SELECT order_id, market_id, token_id FROM resting_orders WHERE status='live'"
+        ).fetchall()
+        conn.close()
+
+        for row in live_rows:
+            order_manager.clob.cancel_order(str(row["order_id"]))
+            conn = sqlite3.connect(str(om_module.POSITIONS_DB))
+            conn.execute(
+                "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
+                (str(row["order_id"]),),
+            )
+            conn.commit()
+            conn.close()
+            cancelled_resting += 1
+
+        for market in self.markets.values():
+            if market.market_id in self._resolved_markets:
+                continue
+            for token_id in market.token_ids:
+                token = self.tokens[token_id]
+                order_manager.on_market_resolved(token_id, token.is_winner)
+                forced_tokens += 1
+            self._resolved_markets.add(market.market_id)
+            forced_markets += 1
+
+        return cancelled_resting, forced_markets, forced_tokens
 
 
 class OfflineLiveRunner:
@@ -570,6 +620,10 @@ class OfflineLiveRunner:
         self.feed.set_now(self.end_ts)
         with self._patched_runtime(self.end_ts):
             self._run_monitor_cycle(self.end_ts)
+            cancelled_resting, forced_markets, forced_tokens = self.feed.finalize_window(self.order_manager)
+        self.stats.window_cancelled_resting = cancelled_resting
+        self.stats.window_forced_markets = forced_markets
+        self.stats.window_forced_tokens = forced_tokens
 
         elapsed = time.monotonic() - t0
         logger.info(f"Offline live replay finished in {elapsed:.1f}s")
@@ -651,6 +705,9 @@ class OfflineLiveRunner:
         print(f"  Orders placed                 : {self.stats.orders_placed}")
         print(f"  Markets resolved              : {self.stats.markets_resolved}")
         print(f"  Tokens resolved               : {self.stats.tokens_resolved}")
+        print(f"  Window-forced markets         : {self.stats.window_forced_markets}")
+        print(f"  Window-forced tokens          : {self.stats.window_forced_tokens}")
+        print(f"  Window-cancelled resting      : {self.stats.window_cancelled_resting}")
         print()
         print(f"  Positions opened              : {len(positions)}")
         print(f"    Resolved                    : {len(resolved)}  (winners={winners} losers={len(resolved)-winners})")
