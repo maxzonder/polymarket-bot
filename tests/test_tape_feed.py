@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from replay.tape_feed import discover_trade_files, iter_global_tape, iter_tape_batches
+from replay.tape_feed import discover_trade_files, iter_global_tape, iter_tape_batches, iter_tape_batches_db
 
 
 class TapeFeedTests(unittest.TestCase):
@@ -77,6 +78,53 @@ class TapeFeedTests(unittest.TestCase):
             self.assertEqual(len(refs), 1)
             self.assertEqual(refs[0].market_id, "999")
             self.assertEqual(refs[0].token_id, "abc")
+
+    def test_tape_batches_db_orders_and_filters(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "historical_tape.db"
+            conn = sqlite3.connect(db_path)
+            conn.executescript(
+                """
+                CREATE TABLE tape (
+                    source_file_id INTEGER NOT NULL,
+                    seq INTEGER NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    market_id TEXT NOT NULL,
+                    token_id TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    size REAL NOT NULL,
+                    side TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (source_file_id, seq)
+                );
+                CREATE INDEX idx_tape_ts ON tape (timestamp);
+                """
+            )
+            conn.executemany(
+                "INSERT INTO tape(source_file_id, seq, timestamp, market_id, token_id, price, size, side) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (1, 0, 100, "m1", "tokA", 0.1, 1.0, "BUY"),
+                    (1, 1, 130, "m1", "tokA", 0.2, 1.0, "SELL"),
+                    (2, 0, 110, "m1", "tokB", 0.3, 2.0, "BUY"),
+                    (2, 1, 120, "m2", "tokC", 0.4, 2.0, "SELL"),
+                ],
+            )
+            conn.commit()
+            conn.close()
+
+            batches = list(
+                iter_tape_batches_db(
+                    batch_seconds=50,
+                    start_ts=100,
+                    end_ts=150,
+                    tape_db_path=db_path,
+                    selected_markets={"m1"},
+                    selected_tokens={"tokA", "tokB"},
+                )
+            )
+            self.assertEqual(len(batches), 2)
+            self.assertEqual([t.timestamp for t in batches[0].trades], [100, 110, 130])
+            self.assertEqual([t.token_id for t in batches[0].trades], ["tokA", "tokB", "tokA"])
+            self.assertEqual(len(batches[1].trades), 0)
 
 
 if __name__ == "__main__":

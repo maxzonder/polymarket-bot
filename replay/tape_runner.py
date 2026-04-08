@@ -17,7 +17,7 @@ from config import BotConfig
 from execution.order_manager import OrderManager
 from execution.position_monitor import PositionMonitor
 from replay.offline_dryrun import OfflineDryRunState
-from replay.tape_feed import iter_tape_batches
+from replay.tape_feed import DEFAULT_TAPE_DB_PATH, iter_tape_batches, iter_tape_batches_db
 from scripts.run_honest_replay import load_all_markets
 from strategy.market_scorer import MarketScorer
 from strategy.risk_manager import RiskManager
@@ -48,6 +48,7 @@ class TapeDrivenDryRunRunner:
         output_dir: Path,
         limit_markets: Optional[int] = None,
         batch_seconds: int = 300,
+        tape_db_path: Optional[Path] = None,
     ):
         self.start = start
         self.end = end
@@ -55,6 +56,7 @@ class TapeDrivenDryRunRunner:
         self.output_dir = output_dir
         self.limit_markets = limit_markets
         self.batch_seconds = batch_seconds
+        self.tape_db_path = tape_db_path if tape_db_path is not None else DEFAULT_TAPE_DB_PATH
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.positions_db = self.output_dir / "positions.db"
@@ -119,18 +121,33 @@ class TapeDrivenDryRunRunner:
 
     def run(self) -> dict:
         t0 = time.monotonic()
+        use_tape_db = self.tape_db_path.exists()
         logger.info(
             f"Tape-driven dryrun: {self.start} -> {self.end} | mode={self.mode} | "
-            f"markets={len(self.market_ids)} tokens={len(self.token_ids)} batch_seconds={self.batch_seconds}"
+            f"markets={len(self.market_ids)} tokens={len(self.token_ids)} batch_seconds={self.batch_seconds} "
+            f"source={'sqlite' if use_tape_db else 'json'}"
         )
 
-        for batch in iter_tape_batches(
-            batch_seconds=self.batch_seconds,
-            start_ts=self.start_ts,
-            end_ts=self.end_ts,
-            selected_markets=self.market_ids,
-            selected_tokens=self.token_ids,
-        ):
+        batch_iter = (
+            iter_tape_batches_db(
+                batch_seconds=self.batch_seconds,
+                start_ts=self.start_ts,
+                end_ts=self.end_ts,
+                tape_db_path=self.tape_db_path,
+                selected_markets=self.market_ids,
+                selected_tokens=self.token_ids,
+            )
+            if use_tape_db
+            else iter_tape_batches(
+                batch_seconds=self.batch_seconds,
+                start_ts=self.start_ts,
+                end_ts=self.end_ts,
+                selected_markets=self.market_ids,
+                selected_tokens=self.token_ids,
+            )
+        )
+
+        for batch in batch_iter:
             self.state.apply_batch(batch)
             self.stats.batches += 1
             self.stats.trades += len(batch.trades)

@@ -28,8 +28,11 @@ class TapeRunnerSmokeTests(unittest.TestCase):
                     "outcome_name": "Yes",
                 }
             ]
+            out.mkdir(parents=True, exist_ok=True)
+            tape_db = out / "historical_tape.db"
+            tape_db.write_text("", encoding="utf-8")
             with patch("replay.tape_runner.load_all_markets", return_value=fake_rows), patch(
-                "replay.tape_runner.iter_tape_batches", return_value=[]
+                "replay.tape_runner.iter_tape_batches_db", return_value=[]
             ):
                 runner = TapeDrivenDryRunRunner(
                     start=date(2026, 1, 1),
@@ -38,6 +41,7 @@ class TapeRunnerSmokeTests(unittest.TestCase):
                     output_dir=out,
                     limit_markets=1,
                     batch_seconds=300,
+                    tape_db_path=tape_db,
                 )
                 result = runner.run()
 

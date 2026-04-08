@@ -23,6 +23,7 @@ def main() -> None:
     ap.add_argument("--limit-markets", type=int, default=None)
     ap.add_argument("--batch-seconds", type=int, default=300)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--tape-db", default=None, help="Path to historical_tape.db (default: auto-detect in data dir)")
     args = ap.parse_args()
 
     if args.out:
@@ -38,6 +39,7 @@ def main() -> None:
         output_dir=output_dir,
         limit_markets=args.limit_markets,
         batch_seconds=args.batch_seconds,
+        tape_db_path=Path(args.tape_db).expanduser() if args.tape_db else None,
     )
     result = runner.run()
     print(result)
