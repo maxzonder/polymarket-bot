@@ -26,6 +26,7 @@ from api.data_api import get_last_trade_ts, get_recent_trades
 from config import BotConfig
 from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.market_scorer import MarketScore, MarketScorer
+from strategy.entry_levels import suggested_entry_levels
 from utils.logger import setup_logger
 from utils.paths import DATA_DIR
 from utils.telegram import send_message as tg_alert
@@ -299,10 +300,14 @@ class Screener:
 
             total_score = self._compute_total_score(m, ef_s, res_s, ms_obj, hours=hours) * group_boost
 
-            # Determine resting bid levels for this token
-            entry_levels = [lvl for lvl in self.mc.entry_price_levels if lvl < price]
-            if not entry_levels and self.mc.scanner_entry:
-                entry_levels = [price]
+            # Entry tiers are MAX acceptable prices, not strictly-below-current bids.
+            # If the market is already cheaper than a tier, that tier remains valid and
+            # should be executed at the better available price rather than rejected.
+            entry_levels = suggested_entry_levels(
+                current_price=price,
+                configured_levels=self.mc.entry_price_levels,
+                scanner_entry=self.mc.scanner_entry,
+            )
             if not entry_levels:
                 _log("rejected_no_entry_levels", token_id=token_id, price=price,
                      ef=ef_s, res=res_s)

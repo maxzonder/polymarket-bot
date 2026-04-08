@@ -28,6 +28,7 @@ from api.gamma_client import fetch_market
 from config import BotConfig
 from execution import paper_balance as pb
 from execution.exposure_manager import ExposureManager
+from strategy.entry_levels import partition_entry_levels
 from strategy.screener import EntryCandidate
 from strategy.risk_manager import RiskManager, SizedPosition, TPOrder
 from utils.logger import setup_logger
@@ -44,6 +45,7 @@ POSITIONS_DB = DATA_DIR / "positions.db"
 # because resting bids are placed BELOW current price — ask depth at our
 # price level will naturally be zero until the market dips there.
 MIN_TOP_BOOK_TOKENS = 1.0
+EPS = 1e-9
 
 
 def _init_positions_db(conn: sqlite3.Connection) -> None:
@@ -297,22 +299,114 @@ class OrderManager:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
+    @staticmethod
+    def _clone_ask_book(book) -> list[list[float]]:
+        return [[float(level.price), float(level.size)] for level in sorted(book.asks, key=lambda lv: lv.price)]
+
+    @staticmethod
+    def _consume_ask_liquidity(
+        asks_state: list[list[float]],
+        max_price: float,
+        budget_usdc: float,
+    ) -> tuple[float, float, float]:
+        """
+        Spend up to budget_usdc against visible asks priced <= max_price.
+
+        Returns:
+          filled_qty_tokens,
+          filled_cost_usdc,
+          avg_fill_price
+
+        Also mutates asks_state in-place to avoid double-counting the same visible
+        liquidity across multiple immediately marketable entry tiers.
+        """
+        remaining_budget = float(budget_usdc)
+        filled_qty = 0.0
+        filled_cost = 0.0
+
+        for level in asks_state:
+            ask_price, ask_size = level
+            if ask_size <= EPS:
+                continue
+            if ask_price > max_price + EPS:
+                break
+            if remaining_budget <= EPS:
+                break
+
+            affordable_qty = remaining_budget / max(ask_price, EPS)
+            take_qty = min(ask_size, affordable_qty)
+            if take_qty <= EPS:
+                continue
+
+            take_cost = take_qty * ask_price
+            level[1] -= take_qty
+            remaining_budget -= take_cost
+            filled_qty += take_qty
+            filled_cost += take_cost
+
+        avg_fill_price = (filled_cost / filled_qty) if filled_qty > EPS else 0.0
+        asks_state[:] = [level for level in asks_state if level[1] > EPS]
+        return filled_qty, filled_cost, avg_fill_price
+
     # ── Entry ─────────────────────────────────────────────────────────────────
 
     def process_candidate(self, candidate: EntryCandidate) -> list[OrderResult]:
         """
-        Place resting limit BUY orders for a candidate.
-        Skips levels where we already have an active order.
-        Returns list of OrderResult (one per placed order).
+        Place BUY orders for a candidate using "max acceptable price" tier semantics.
+
+        For each configured entry tier:
+        - if tier < current best ask → place a normal resting bid below market;
+        - if tier >= current best ask → the tier is marketable now, so we are willing
+          to buy immediately at the better available ask prices, subject to visible
+          ask-side liquidity and per-market capital limits.
         """
         results: list[OrderResult] = []
         now = int(time.time())
-        # expires_at deprecated: resting bids are GTC (commit 7855cac).
-        # Kept in DB schema for historical rows but no longer used as cancellation trigger.
         expires_at = 0
 
         conn = self._conn()
         active_prices = self._get_active_resting_prices(conn, candidate.token_id)
+        marketable_levels, _resting_levels = partition_entry_levels(
+            candidate.current_price,
+            candidate.suggested_entry_levels,
+        )
+        marketable_level_set = set(marketable_levels)
+
+        try:
+            book = get_orderbook(candidate.token_id)
+            if book.best_ask is None or book.best_bid is None:
+                for price_level in candidate.suggested_entry_levels:
+                    self._log_scan(conn, candidate, price_level, "depth_gate_dead_book")
+                conn.commit()
+                conn.close()
+                return results
+
+            top_bid_depth = book.bid_depth_at(book.best_bid)
+            if top_bid_depth < MIN_TOP_BOOK_TOKENS:
+                for price_level in candidate.suggested_entry_levels:
+                    self._log_scan(conn, candidate, price_level, "depth_gate_thin")
+                conn.commit()
+                conn.close()
+                return results
+
+            mid = (book.best_bid + book.best_ask) / 2.0
+            max_spread = 0.30 if mid >= 0.05 else 0.80
+            spread_pct = (book.best_ask - book.best_bid) / mid if mid > 0 else 1.0
+            if spread_pct > max_spread:
+                for price_level in candidate.suggested_entry_levels:
+                    self._log_scan(conn, candidate, price_level, "spread_gate")
+                conn.commit()
+                conn.close()
+                return results
+        except Exception as e:
+            logger.debug(f"Orderbook check failed for {candidate.token_id[:16]}: {e}")
+            for price_level in candidate.suggested_entry_levels:
+                self._log_scan(conn, candidate, price_level, "depth_gate_error")
+            conn.commit()
+            conn.close()
+            return results
+
+        asks_state = self._clone_ask_book(book)
 
         for price_level in candidate.suggested_entry_levels:
             if price_level in active_prices:
@@ -320,8 +414,6 @@ class OrderManager:
                 self._log_scan(conn, candidate, price_level, "duplicate")
                 continue
 
-            # Gauge position size for this specific price level
-            res_score = None  # we don't have it here easily — use a default
             from strategy.scorer import ResolutionScore
             dummy_res = ResolutionScore(
                 category=candidate.market_info.category,
@@ -346,18 +438,11 @@ class OrderManager:
                 self._log_scan(conn, candidate, price_level, "risk_rejected")
                 continue
 
-            logger.debug(
-                f"Sized: {candidate.token_id[:16]} @ ${price_level:.5f} "
-                f"stake=${sized.stake_usdc:.2f} qty={sized.token_quantity:.2f} "
-                f"ms_tier={candidate.market_score.tier if candidate.market_score else 'n/a'}"
-            )
-
             if self._count_open_positions(conn) >= self.mc.max_open_positions:
                 logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping")
                 self._log_scan(conn, candidate, price_level, "max_positions")
                 break
 
-            # ── Resting markets cap ────────────────────────────────────────
             if self.mc.max_resting_markets > 0:
                 n_resting_markets = conn.execute(
                     "SELECT COUNT(DISTINCT market_id) FROM resting_orders WHERE status='live'"
@@ -371,7 +456,6 @@ class OrderManager:
                     conn.close()
                     return results
 
-            # ── Cluster cap ────────────────────────────────────────────────
             if self.mc.max_resting_per_cluster > 0:
                 cluster_key = candidate.market_info.neg_risk_group_id
                 if cluster_key is not None:
@@ -388,7 +472,6 @@ class OrderManager:
                         self._log_scan(conn, candidate, price_level, "cluster_cap")
                         continue
 
-            # ── Paper balance gate (dry_run only) ─────────────────────────
             if self.config.dry_run:
                 bal = pb.get_balance(conn)
                 if bal["free_balance"] < sized.stake_usdc:
@@ -402,54 +485,40 @@ class OrderManager:
                     conn.close()
                     return results
 
-            # ── Depth / liquidity gate ─────────────────────────────────────
-            # Fetch real per-token orderbook. Reject dead / garbage books.
-            # We check top-of-book activity, NOT depth at our bid price level:
-            # resting bids are placed below current price, so ask depth at the
-            # bid level is normally zero — that is expected, not a rejection signal.
-            try:
-                book = get_orderbook(candidate.token_id)
-                if book.best_ask is None or book.best_bid is None:
+            is_marketable_now = price_level in marketable_level_set and book.best_ask is not None
+            order_qty = sized.token_quantity
+            estimated_fill_cost = sized.stake_usdc
+            estimated_fill_price = price_level
+
+            if is_marketable_now:
+                available_visible_depth = book.ask_depth_at(price_level)
+                if available_visible_depth <= EPS:
                     logger.debug(
-                        f"Depth gate: dead book (no asks or bids) for "
-                        f"{candidate.token_id[:16]} @ ${price_level:.5f}"
+                        f"Immediate tier has no visible ask depth: {candidate.token_id[:16]} "
+                        f"max_price=${price_level:.5f}"
                     )
-                    self._log_scan(conn, candidate, price_level, "depth_gate_dead_book")
-                    continue
-                top_bid_depth = book.bid_depth_at(book.best_bid)
-                if top_bid_depth < MIN_TOP_BOOK_TOKENS:
-                    logger.debug(
-                        f"Depth gate: thin top-of-book for {candidate.token_id[:16]} "
-                        f"top_bid_depth={top_bid_depth:.2f} < {MIN_TOP_BOOK_TOKENS}"
-                    )
-                    self._log_scan(conn, candidate, price_level, "depth_gate_thin")
+                    self._log_scan(conn, candidate, price_level, "marketable_no_depth")
                     continue
 
-                # Spread gate: reject if bid-ask spread is too wide.
-                # Adaptive threshold: low-price tokens always have wide spreads
-                # due to tick constraints, so we allow up to 80% below $0.05.
-                mid = (book.best_bid + book.best_ask) / 2.0
-                max_spread = 0.30 if mid >= 0.05 else 0.80
-                spread_pct = (book.best_ask - book.best_bid) / mid if mid > 0 else 1.0
-                if spread_pct > max_spread:
-                    logger.debug(
-                        f"Spread gate: {candidate.token_id[:16]} spread={spread_pct:.2%} "
-                        f"> {max_spread:.0%} (mid={mid:.4f})"
-                    )
-                    self._log_scan(conn, candidate, price_level, "spread_gate")
+                fill_qty, fill_cost, avg_fill_price = self._consume_ask_liquidity(
+                    asks_state=asks_state,
+                    max_price=price_level,
+                    budget_usdc=sized.stake_usdc,
+                )
+                if fill_qty <= EPS or fill_cost <= EPS:
+                    self._log_scan(conn, candidate, price_level, "marketable_no_depth")
                     continue
-            except Exception as e:
-                logger.debug(f"Orderbook check failed for {candidate.token_id[:16]}: {e}")
-                self._log_scan(conn, candidate, price_level, "depth_gate_error")
-                continue
 
-            # ── Exposure cap gate ──────────────────────────────────────────
+                order_qty = fill_qty
+                estimated_fill_cost = fill_cost
+                estimated_fill_price = avg_fill_price
+
             if self.mc.max_exposure_per_market > 0 and not self.em.can_add(
-                candidate.market_info.market_id, candidate.token_id, sized.stake_usdc
+                candidate.market_info.market_id, candidate.token_id, estimated_fill_cost
             ):
                 logger.debug(
                     f"Exposure cap: {candidate.token_id[:16]} market={candidate.market_info.market_id[:16]} "
-                    f"stake=${sized.stake_usdc:.2f} would exceed max_exposure_per_market=${self.mc.max_exposure_per_market:.2f}"
+                    f"stake=${estimated_fill_cost:.2f} would exceed max_exposure_per_market=${self.mc.max_exposure_per_market:.2f}"
                 )
                 self._log_scan(conn, candidate, price_level, "exposure_cap")
                 continue
@@ -459,7 +528,7 @@ class OrderManager:
                 token_id=candidate.token_id,
                 side="BUY",
                 price=price_level,
-                size=sized.token_quantity,
+                size=order_qty,
                 label=label,
             )
 
@@ -470,7 +539,7 @@ class OrderManager:
                     token_id=candidate.token_id,
                     market_id=candidate.market_info.market_id,
                     price=price_level,
-                    size=sized.token_quantity,
+                    size=order_qty,
                     expires_at=expires_at,
                     mode=self.mc.name,
                     candidate_id=candidate.candidate_id or None,
@@ -478,18 +547,49 @@ class OrderManager:
                     neg_risk_group_id=candidate.market_info.neg_risk_group_id,
                 )
                 self._log_scan(conn, candidate, price_level, "placed", order_id=result.order_id)
+                active_prices.add(price_level)
+
                 neg_risk_tag = (
                     f" [neg-risk grp={candidate.market_info.neg_risk_group_id[:12]}]"
                     if candidate.market_info.neg_risk_group_id else ""
                 )
                 ms_tier = candidate.market_score.tier if candidate.market_score else "n/a"
-                logger.info(
-                    f"Placed resting BUY: {candidate.market_info.question[:50]!r} "
-                    f"token={candidate.token_id[:16]} @ ${price_level:.5f} "
-                    f"stake=${sized.stake_usdc:.2f} qty={sized.token_quantity:.2f} "
-                    f"tier={ms_tier} score={candidate.total_score:.3f} "
-                    f"order_id={result.order_id}{neg_risk_tag}"
-                )
+
+                if is_marketable_now and self.config.dry_run:
+                    self.clob.paper_simulate_fill(
+                        result.order_id,
+                        estimated_fill_price,
+                        fill_size=order_qty,
+                    )
+                    conn.execute(
+                        "UPDATE resting_orders SET filled_quantity=?, status='matched' WHERE order_id=?",
+                        (order_qty, result.order_id),
+                    )
+                    conn.commit()
+                    self.on_entry_filled(
+                        order_id=result.order_id,
+                        token_id=candidate.token_id,
+                        market_id=candidate.market_info.market_id,
+                        fill_price=estimated_fill_price,
+                        fill_quantity=order_qty,
+                        outcome_name=candidate.outcome_name or "",
+                    )
+                    result.status = "matched"
+                    result.filled_size = order_qty
+                    logger.info(
+                        f"Immediate BUY from max-price tier: {candidate.market_info.question[:50]!r} "
+                        f"token={candidate.token_id[:16]} max=${price_level:.5f} "
+                        f"avg_fill=${estimated_fill_price:.5f} cost=${estimated_fill_cost:.4f} qty={order_qty:.2f} "
+                        f"tier={ms_tier} score={candidate.total_score:.3f} order_id={result.order_id}{neg_risk_tag}"
+                    )
+                else:
+                    logger.info(
+                        f"Placed BUY tier: {candidate.market_info.question[:50]!r} "
+                        f"token={candidate.token_id[:16]} max=${price_level:.5f} "
+                        f"stake=${estimated_fill_cost:.2f} qty={order_qty:.2f} "
+                        f"tier={ms_tier} score={candidate.total_score:.3f} order_id={result.order_id}{neg_risk_tag}"
+                    )
+
                 results.append(result)
             else:
                 self._log_scan(conn, candidate, price_level, "order_failed")

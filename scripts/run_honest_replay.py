@@ -6,11 +6,11 @@ this script simulates the bot running from day 1 over ALL downloaded markets:
 
   1. Load every market in the date range from polymarket_dataset.db.
   2. Apply screener static filters (volume, category, duration).
-  3. At the "discovery time" for each market (= simulation start or first trade,
-     whichever is later), check price-dependent filters (current_price, hours_to_close).
+  3. Re-check token eligibility on a screener-like poll grid using the configured
+     screener interval and the latest trade already observed by each poll.
   4. Score the market with MarketScorer (offline, reads feature_mart_v1_1 from SQLite).
-  5. Place resting bids at configured levels for markets that pass.
-  6. Replay trades chronologically: fill bids, fire TP orders, resolve.
+  5. Place resting bids at configured levels for markets that first pass.
+  6. Replay trades chronologically from that accepted poll time: fill bids, fire TP orders, resolve.
 
 Most resting bids will never fill — the bot scatters bids across hundreds of markets
 and only earns on the fraction that actually dip. That's the honest cost of the strategy.
@@ -69,6 +69,7 @@ from config import BotConfig, ModeConfig
 from strategy.market_scorer import MarketScore, MarketScorer
 from strategy.risk_manager import RiskManager
 from strategy.screener import EntryCandidate
+from strategy.entry_levels import suggested_entry_levels
 from utils.logger import setup_logger
 from utils.paths import DATABASE_DIR, DB_PATH, DATA_DIR
 
@@ -130,6 +131,51 @@ def _price_at(trades: list[dict], ts: int) -> Optional[float]:
         else:
             break
     return p
+
+
+def _snap_to_next_poll_ts(base_ts: int, target_ts: int, interval_s: int) -> int:
+    """Snap an event timestamp to the next screener poll time at/after it."""
+    if target_ts <= base_ts:
+        return base_ts
+    delta = target_ts - base_ts
+    steps = (delta + interval_s - 1) // interval_s
+    return base_ts + steps * interval_s
+
+
+def _build_recheck_timestamps(
+    trades: list[dict],
+    base_ts: int,
+    sim_end: int,
+    interval_s: int,
+    max_hours_to_close: float,
+    end_date_ts: int,
+) -> list[int]:
+    """
+    Build candidate screener re-check timestamps for one token.
+
+    We emulate periodic screener polls using the configured screener interval, but
+    avoid naive dense wall-clock loops. Instead, we only evaluate at:
+    - the initial discovery seed;
+    - the next poll tick after any new trade timestamp;
+    - the next poll tick after the market enters the allowed max-hours window.
+
+    At each timestamp, the current replay snapshot uses the latest trade already
+    observed by that moment (same principle as a live poll seeing only past data).
+    """
+    interval_s = max(1, int(interval_s))
+    checkpoints: set[int] = {base_ts}
+
+    for trade in trades:
+        trade_ts = int(trade["timestamp"])
+        if trade_ts < base_ts or trade_ts > sim_end:
+            continue
+        checkpoints.add(_snap_to_next_poll_ts(base_ts, trade_ts, interval_s))
+
+    max_hours_boundary_ts = end_date_ts - int(max_hours_to_close * 3600.0)
+    if base_ts < max_hours_boundary_ts <= sim_end:
+        checkpoints.add(_snap_to_next_poll_ts(base_ts, max_hours_boundary_ts, interval_s))
+
+    return sorted(ts for ts in checkpoints if base_ts <= ts <= sim_end)
 
 
 # ── Neg-risk group boost pre-computation ──────────────────────────────────────
@@ -303,6 +349,37 @@ def load_all_markets(
     return [dict(r) for r in rows]
 
 
+def slice_rows_by_market(
+    rows: list[dict],
+    *,
+    market_offset: int = 0,
+    market_limit: Optional[int] = None,
+    skip_closed_at_start_ts: Optional[int] = None,
+) -> list[dict]:
+    """Slice replay input by whole markets instead of raw token rows."""
+    grouped: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for row in rows:
+        market_id = str(row["market_id"])
+        if market_id not in grouped:
+            end_date = int(row.get("end_date") or 0) if row.get("end_date") is not None else None
+            if skip_closed_at_start_ts is not None and end_date is not None and end_date <= skip_closed_at_start_ts:
+                continue
+            grouped[market_id] = []
+            order.append(market_id)
+        grouped[market_id].append(row)
+
+    if market_offset > 0:
+        order = order[market_offset:]
+    if market_limit is not None:
+        order = order[:market_limit]
+
+    sliced: list[dict] = []
+    for market_id in order:
+        sliced.extend(grouped[market_id])
+    return sliced
+
+
 # ── Replay adapters: reuse OrderManager entry path ───────────────────────────
 
 def _synthetic_replay_orderbook(token_id: str, current_price: float) -> Orderbook:
@@ -408,16 +485,17 @@ def simulate_token(
     activation_delay: int = 0,
     fill_fraction: float = 1.0,
     group_boost: float = 1.0,
+    screener_interval: int = 300,
 ) -> dict:
     """
     Simulate one market/token pair through the bot's full entry → TP → resolution path.
 
     Key honest-replay properties:
-    - Discovery time = max(start_ts, first trade timestamp, market start_date)
-    - Current price determined from trades at discovery time (no future knowledge)
-    - Bid levels placed only where current_price > bid_level (pre-position below market)
-    - Fills checked only for trades after discovery time
-    - Most tokens produce status='no_fill' — that is correct and expected
+    - Replay re-checks token eligibility on a screener-like poll grid
+    - Each poll sees only the latest trade that already happened by that moment
+    - Once a token first becomes eligible, shared OrderManager execution is reused
+    - Fills checked only for trades after the accepted replay screener timestamp
+    - Most tokens still produce non-fill / reject statuses — that is correct
     """
     token_id    = row["token_id"]
     market_id   = row["market_id"]
@@ -429,7 +507,6 @@ def simulate_token(
     comment_count = int(row.get("comment_count") or 0)
     neg_risk    = bool(row.get("neg_risk", False))
 
-    # ── Load trades (index lookup — no filesystem scan) ────────────────────────
     fpath = trade_index.get((market_id, token_id))
     if fpath is None:
         return {"status": "no_trade_file", "token_id": token_id, "market_id": market_id}
@@ -438,89 +515,176 @@ def simulate_token(
     if not trades:
         return {"status": "no_trades", "token_id": token_id, "market_id": market_id}
 
-    # ── Discovery time: when screener would first see this token ───────────────
-    # max(sim_start, first_trade, market_start_date) — all three gates required
-    first_trade_ts = trades[0]["timestamp"]
+    first_trade_ts = int(trades[0]["timestamp"])
     market_start_ts = int(row.get("start_date") or 0)
-    discovery_ts = max(start_ts, first_trade_ts, market_start_ts)
+    discovery_seed_ts = max(start_ts, first_trade_ts, market_start_ts)
 
-    # Skip if market already closed before simulation window
     if end_date <= start_ts:
         return {"status": "rejected_closed_before_start", "token_id": token_id, "market_id": market_id}
 
-    # ── Dead market filter: was the market dormant at discovery? ──────────────
-    trades_before = [t for t in trades if t["timestamp"] <= discovery_ts]
-    if trades_before:
-        last_trade_ts = int(trades_before[-1]["timestamp"])
-        hours_since_last = (discovery_ts - last_trade_ts) / 3600.0
-        if hours_since_last > dead_market_hours:
-            return {"status": "rejected_dead_market", "token_id": token_id, "market_id": market_id}
-
-    # ── Hours-to-close check at DISCOVERY time (not at start_ts) ─────────────
-    # Critical: a market appearing on Jan 15 with end_date Feb 14 has 30 days
-    # at discovery — valid for max_hours_to_close=720h. Using start_ts (Dec 1)
-    # would compute 75 days and wrongly reject it.
-    hours_at_discovery = (end_date - discovery_ts) / 3600.0
-    if hours_at_discovery < mc.min_hours_to_close:
-        return {"status": "rejected_hours_min", "token_id": token_id, "market_id": market_id}
-    if hours_at_discovery > mc.max_hours_to_close:
-        return {"status": "rejected_hours_max", "token_id": token_id, "market_id": market_id}
-
-    # ── Current price at discovery time ───────────────────────────────────────
-    current_price = _price_at(trades, discovery_ts)
-    if current_price is None:
-        return {"status": "rejected_no_price_at_discovery", "token_id": token_id, "market_id": market_id}
-
-    # ── Price screener gates ───────────────────────────────────────────────────
-    if current_price <= 0:
-        return {"status": "rejected_price_le_zero", "token_id": token_id, "market_id": market_id}
-    if current_price > mc.entry_price_max:
-        return {"status": "rejected_price_above_max", "token_id": token_id, "market_id": market_id}
-    if current_price >= 0.99:
-        return {"status": "rejected_price_ge_099", "token_id": token_id, "market_id": market_id}
-
-    # ── Determine entry levels: only levels BELOW current price ───────────────
-    # This is honest: we pre-position below market, not at current price.
-    # (scanner_entry = True would also enter at current price — we respect that here)
-    entry_levels = [lvl for lvl in mc.entry_price_levels if lvl < current_price]
-    if not entry_levels and mc.scanner_entry:
-        entry_levels = [current_price]
-    if not entry_levels:
-        return {"status": "rejected_no_entry_levels", "token_id": token_id, "market_id": market_id,
-                "current_price": current_price}
-
-    # ── MarketScorer gate (offline, reads feature_mart_v1_1 from SQLite) ──────
-    market_score: Optional[MarketScore] = None
-    if scorer is not None:
-        market_score = scorer.score_from_db(
-            market_id=market_id,
-            volume=volume,
-            comment_count=comment_count,
-            hours_to_close=hours_at_discovery,
-            category=category,
-            neg_risk=neg_risk,
-        )
-        if market_score.tier == "reject":
-            return {"status": "rejected_market_score", "token_id": token_id, "market_id": market_id,
-                    "market_score": market_score.total}
-
-    candidate = _build_replay_candidate(
-        row=row,
-        current_price=current_price,
-        hours_at_discovery=hours_at_discovery,
-        entry_levels=entry_levels,
-        market_score=market_score,
-        group_boost=group_boost,
+    sim_end = min(end_ts, end_date)
+    recheck_ts_list = _build_recheck_timestamps(
+        trades=trades,
+        base_ts=discovery_seed_ts,
+        sim_end=sim_end,
+        interval_s=screener_interval,
+        max_hours_to_close=mc.max_hours_to_close,
+        end_date_ts=end_date,
     )
+    if not recheck_ts_list:
+        return {"status": "no_recheck_points", "token_id": token_id, "market_id": market_id}
 
-    synthetic_book = _synthetic_replay_orderbook(token_id, current_price)
-    with patch("execution.order_manager.get_orderbook", return_value=synthetic_book):
-        if mc.scanner_entry and current_price <= mc.entry_price_max:
-            placement_results = om.process_scanner_entry(candidate)
-            used_scanner_entry = True
-        else:
-            placement_results = om.process_candidate(candidate)
-            used_scanner_entry = False
+    current_price: Optional[float] = None
+    entry_levels: list[float] = []
+    market_score: Optional[MarketScore] = None
+    placement_results = []
+    used_scanner_entry = False
+    accepted_recheck_ts: Optional[int] = None
+    last_rejection = {"status": "rejected_no_price_at_discovery", "token_id": token_id, "market_id": market_id}
+
+    trade_ptr = -1
+    last_seen_trade_ts: Optional[int] = None
+    last_seen_trade_price: Optional[float] = None
+
+    for recheck_ts in recheck_ts_list:
+        while trade_ptr + 1 < len(trades) and int(trades[trade_ptr + 1]["timestamp"]) <= recheck_ts:
+            trade_ptr += 1
+            last_seen_trade_ts = int(trades[trade_ptr]["timestamp"])
+            last_seen_trade_price = float(trades[trade_ptr]["price"])
+
+        if last_seen_trade_price is None or last_seen_trade_ts is None:
+            last_rejection = {
+                "status": "rejected_no_price_at_discovery",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+            }
+            continue
+
+        hours_since_last = (recheck_ts - last_seen_trade_ts) / 3600.0
+        if hours_since_last > dead_market_hours:
+            last_rejection = {
+                "status": "rejected_dead_market",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+            }
+            continue
+
+        hours_at_discovery = (end_date - recheck_ts) / 3600.0
+        if hours_at_discovery < mc.min_hours_to_close:
+            last_rejection = {
+                "status": "rejected_hours_min",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+            }
+            break
+        if hours_at_discovery > mc.max_hours_to_close:
+            last_rejection = {
+                "status": "rejected_hours_max",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+            }
+            continue
+
+        current_price = last_seen_trade_price
+        if current_price <= 0:
+            last_rejection = {
+                "status": "rejected_price_le_zero",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+            }
+            continue
+        if current_price > mc.entry_price_max:
+            last_rejection = {
+                "status": "rejected_price_above_max",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+                "current_price": current_price,
+            }
+            continue
+        if current_price >= 0.99:
+            last_rejection = {
+                "status": "rejected_price_ge_099",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+                "current_price": current_price,
+            }
+            continue
+
+        entry_levels = suggested_entry_levels(
+            current_price=current_price,
+            configured_levels=mc.entry_price_levels,
+            scanner_entry=mc.scanner_entry,
+        )
+        if not entry_levels:
+            last_rejection = {
+                "status": "rejected_no_entry_levels",
+                "token_id": token_id,
+                "market_id": market_id,
+                "recheck_ts": recheck_ts,
+                "current_price": current_price,
+            }
+            continue
+
+        market_score = None
+        if scorer is not None:
+            market_score = scorer.score_from_db(
+                market_id=market_id,
+                volume=volume,
+                comment_count=comment_count,
+                hours_to_close=hours_at_discovery,
+                category=category,
+                neg_risk=neg_risk,
+            )
+            if market_score.tier == "reject":
+                last_rejection = {
+                    "status": "rejected_market_score",
+                    "token_id": token_id,
+                    "market_id": market_id,
+                    "recheck_ts": recheck_ts,
+                    "market_score": market_score.total,
+                }
+                continue
+
+        candidate = _build_replay_candidate(
+            row=row,
+            current_price=current_price,
+            hours_at_discovery=hours_at_discovery,
+            entry_levels=entry_levels,
+            market_score=market_score,
+            group_boost=group_boost,
+        )
+
+        synthetic_book = _synthetic_replay_orderbook(token_id, current_price)
+        with patch("execution.order_manager.get_orderbook", return_value=synthetic_book):
+            if mc.scanner_entry and current_price <= mc.entry_price_max:
+                placement_results = om.process_scanner_entry(candidate)
+                used_scanner_entry = True
+            else:
+                placement_results = om.process_candidate(candidate)
+                used_scanner_entry = False
+
+        if placement_results:
+            accepted_recheck_ts = recheck_ts
+            break
+
+        last_rejection = {
+            "status": "no_orders_placed",
+            "token_id": token_id,
+            "market_id": market_id,
+            "recheck_ts": recheck_ts,
+            "current_price": current_price,
+        }
+
+    if accepted_recheck_ts is None:
+        last_rejection.setdefault("recheck_count", len(recheck_ts_list))
+        return last_rejection
 
     pending_buys: dict[str, dict] = {
         result.order_id: {
@@ -529,27 +693,28 @@ def simulate_token(
             "filled_qty": 0.0,
         }
         for result in placement_results
-        if result.status in ("live", "matched")
+        if result.status == "live"
     }
 
-    if not pending_buys:
+    immediate_matches = [result for result in placement_results if result.status == "matched"]
+    if not pending_buys and not immediate_matches:
         return {"status": "no_orders_placed", "token_id": token_id, "market_id": market_id}
 
-    filled_entries = 0
+    filled_entries = len(immediate_matches)
     filled_tps = 0
 
-    def _dispatch_fill(order_id: str, order: dict, fill_qty: float) -> None:
+    def _dispatch_fill(order_id: str, order: dict, fill_qty: float, fill_price: float) -> None:
         """Dispatch a single incremental fill immediately so TP ladder is live."""
         nonlocal filled_entries
         if fill_qty <= 1e-9:
             return
-        clob.paper_simulate_fill(order_id, order["price"], max(order["filled_qty"], fill_qty))
+        clob.paper_simulate_fill(order_id, fill_price, max(order["filled_qty"], fill_qty))
         try:
             om.on_entry_filled(
                 order_id=order_id,
                 token_id=token_id,
                 market_id=market_id,
-                fill_price=order["price"],
+                fill_price=fill_price,
                 fill_quantity=fill_qty,
                 outcome_name=outcome,
             )
@@ -561,17 +726,16 @@ def simulate_token(
     # (synthetic best_ask == current_price), so replay them as immediate fills.
     if used_scanner_entry:
         for order_id, order in list(pending_buys.items()):
-            _dispatch_fill(order_id, order, order["remaining_qty"])
+            _dispatch_fill(order_id, order, order["remaining_qty"], current_price)
             del pending_buys[order_id]
 
-    # ── Replay trades after discovery time ────────────────────────────────────
-    fill_gate = discovery_ts + activation_delay
-    sim_end = min(end_ts, end_date)  # stop at either sim end or market close
+    # ── Replay trades after the accepted re-check time ───────────────────────
+    fill_gate = accepted_recheck_ts + activation_delay
 
     for trade in trades:
         trade_ts = int(trade["timestamp"])
-        if trade_ts < discovery_ts:
-            continue  # before we discovered the market
+        if trade_ts < accepted_recheck_ts:
+            continue  # before this token re-entered replay scope
         if trade_ts > sim_end:
             break     # simulation window ended
 
@@ -593,7 +757,7 @@ def simulate_token(
                     trade_budget     -= fill_qty
                     order["remaining_qty"] -= fill_qty
                     order["filled_qty"]    += fill_qty
-                    _dispatch_fill(order_id, order, fill_qty)
+                    _dispatch_fill(order_id, order, fill_qty, trade_price)
                     if order["remaining_qty"] <= 1e-9:
                         del pending_buys[order_id]
 
@@ -655,6 +819,8 @@ def simulate_token(
         "is_winner": is_winner,
         "market_score": market_score.total if market_score else None,
         "group_boost": group_boost,
+        "accepted_recheck_ts": accepted_recheck_ts,
+        "recheck_count": len(recheck_ts_list),
     }
 
 
@@ -739,9 +905,10 @@ def print_summary(
     print()
     print(f"  ⚠  Limitations (see module docstring):")
     print(f"     1. Price = last_trade_price, not CLOB best_ask (optimistic fills)")
-    print(f"     2. Volume filter uses final total, not volume-at-discovery")
-    print(f"     3. Spread gate not implemented (no historical orderbook)")
-    print(f"     4. Neg-risk group boost not simulated")
+    print(f"     2. Replay scope re-check is discretized by screener_interval poll buckets")
+    print(f"     3. Volume filter uses final total, not volume-at-discovery")
+    print(f"     4. Spread gate not implemented (no historical orderbook)")
+    print(f"     5. Neg-risk group boost not simulated")
     print(sep)
 
 
@@ -775,6 +942,8 @@ def run_honest_replay(
     mode: str,
     output_dir: Path,
     limit: Optional[int] = None,
+    market_offset: int = 0,
+    market_limit: Optional[int] = None,
     activation_delay: int = 0,
     fill_fraction: float = 1.0,
     summary_only: bool = False,
@@ -852,17 +1021,27 @@ def run_honest_replay(
     all_rows = load_all_markets(db_conn, start_ts, end_ts, config)
     db_conn.close()
 
-    if limit:
+    if market_offset > 0 or market_limit is not None:
+        all_rows = slice_rows_by_market(
+            all_rows,
+            market_offset=market_offset,
+            market_limit=market_limit,
+            skip_closed_at_start_ts=start_ts,
+        )
+    elif limit:
         all_rows = all_rows[:limit]
 
     logger.info(
         f"Honest replay: {start} → {end} | mode={mode} | "
         f"market/token pairs loaded: {len(all_rows)}"
         + (f" (limit={limit})" if limit else "")
+        + (f" (market_offset={market_offset})" if market_offset else "")
+        + (f" (market_limit={market_limit})" if market_limit is not None else "")
     )
     logger.info(
         f"Fill model: activation_delay={activation_delay}s "
         f"fill_fraction={fill_fraction:.2f} "
+        f"recheck_interval={config.screener_interval}s "
         f"({'pessimistic' if fill_fraction < 1.0 or activation_delay > 0 else 'oracle'})"
     )
     logger.info(f"Output: {output_dir}")
@@ -901,6 +1080,7 @@ def run_honest_replay(
             activation_delay=activation_delay,
             fill_fraction=fill_fraction,
             group_boost=group_boost,
+            screener_interval=config.screener_interval,
         )
         results.append(result)
 
@@ -952,7 +1132,11 @@ def main() -> None:
     ap.add_argument("--mode",   default="big_swan_mode",
                     choices=["big_swan_mode", "balanced_mode", "fast_tp_mode", "small_swan_mode"])
     ap.add_argument("--limit",  type=int, default=None,
-                    help="Max market/token pairs to process (default: all)")
+                    help="Max market/token pairs to process (legacy row-based limit; default: all)")
+    ap.add_argument("--market-offset", type=int, default=0,
+                    help="Skip this many eligible markets before replaying")
+    ap.add_argument("--market-limit", type=int, default=None,
+                    help="Max whole markets to process after market offset filtering")
     ap.add_argument("--out",    default=None,
                     help="Output dir (default: data/replay_runs/honest_<timestamp>)")
     ap.add_argument("--history-root", default=None,
@@ -988,6 +1172,8 @@ def main() -> None:
         mode=args.mode,
         output_dir=output_dir,
         limit=args.limit,
+        market_offset=args.market_offset,
+        market_limit=args.market_limit,
         activation_delay=activation_delay,
         fill_fraction=fill_fraction,
         summary_only=args.summary,
