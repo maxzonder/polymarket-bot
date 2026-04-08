@@ -18,7 +18,7 @@ from utils.paths import DATA_DIR, DATABASE_DIR, DB_PATH, ensure_runtime_dirs
 logger = setup_logger("historical_tape_migration")
 
 DEFAULT_DB_PATH = DATA_DIR / "historical_tape.db"
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -222,23 +222,7 @@ def import_file(conn: sqlite3.Connection, ref, *, database_dir: Path) -> tuple[i
     return len(rows), int(min_ts or 0), int(max_ts or 0)
 
 
-def build_latest_trade_file_index(database_dir: Path) -> dict[tuple[str, str], Path]:
-    refs = discover_trade_files(database_dir)
-    latest: dict[tuple[str, str], Path] = {}
-    for ref in refs:
-        key = (ref.market_id, ref.token_id)
-        current = latest.get(key)
-        if current is None or ref.path > current:
-            latest[key] = ref.path
-    return latest
-
-
-def load_dataset_token_refs(
-    *,
-    dataset_db_path: Path,
-    latest_file_index: dict[tuple[str, str], Path],
-    limit_files: int | None = None,
-) -> list[TradeFileRef]:
+def load_dataset_universe(dataset_db_path: Path) -> dict[str, set[str]]:
     conn = sqlite3.connect(dataset_db_path)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
@@ -252,16 +236,39 @@ def load_dataset_token_refs(
     ).fetchall()
     conn.close()
 
-    refs: list[TradeFileRef] = []
+    market_tokens: dict[str, set[str]] = {}
     for row in rows:
-        key = (str(row["market_id"]), str(row["token_id"]))
-        path = latest_file_index.get(key)
-        if path is None:
+        market_id = str(row["market_id"])
+        token_id = str(row["token_id"])
+        market_tokens.setdefault(market_id, set()).add(token_id)
+    return market_tokens
+
+
+
+def load_dataset_trade_refs(
+    *,
+    dataset_db_path: Path,
+    database_dir: Path,
+    limit_files: int | None = None,
+) -> tuple[list[TradeFileRef], int, int]:
+    market_tokens = load_dataset_universe(dataset_db_path)
+    allowed_markets = set(market_tokens)
+
+    refs: list[TradeFileRef] = []
+    skipped_outside_universe = 0
+    for ref in discover_trade_files(database_dir):
+        token_ids = market_tokens.get(ref.market_id)
+        if token_ids is None:
+            skipped_outside_universe += 1
             continue
-        refs.append(TradeFileRef(market_id=key[0], token_id=key[1], path=path))
+        if ref.token_id not in token_ids:
+            skipped_outside_universe += 1
+            continue
+        refs.append(ref)
         if limit_files is not None and len(refs) >= limit_files:
             break
-    return refs
+
+    return refs, len(allowed_markets), skipped_outside_universe
 
 
 
@@ -278,14 +285,15 @@ def build_historical_tape_db(
     logger.info(
         f"Historical tape migration starting | db={db_path} | database_dir={database_dir} | dataset_db={dataset_db_path}"
     )
-    latest_file_index = build_latest_trade_file_index(database_dir)
-    logger.info(f"Indexed {len(latest_file_index)} latest token trade files")
-    refs = load_dataset_token_refs(
+    refs, market_count, skipped_outside_universe = load_dataset_trade_refs(
         dataset_db_path=dataset_db_path,
-        latest_file_index=latest_file_index,
+        database_dir=database_dir,
         limit_files=limit_files,
     )
-    logger.info(f"Selected {len(refs)} canonical trade files from dataset universe")
+    logger.info(
+        "Selected %s trade files from parsed dataset universe | markets=%s | skipped_outside_universe=%s"
+        % (len(refs), market_count, skipped_outside_universe)
+    )
 
     conn = sqlite3.connect(db_path)
     try:
