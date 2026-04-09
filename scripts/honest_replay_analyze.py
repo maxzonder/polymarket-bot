@@ -55,9 +55,41 @@ def _print_section(title: str) -> None:
     print(f"\n== {title} ==")
 
 
-def _print_rows(rows) -> None:
-    for row in rows:
-        print(dict(row))
+def _labelize(key: str) -> str:
+    return str(key).replace("_", " ")
+
+
+def _format_value(value) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text if text else "0"
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _print_mapping(mapping: dict, *, order: list[str] | None = None, indent: str = "- ") -> None:
+    keys = order or list(mapping.keys())
+    for key in keys:
+        if key not in mapping:
+            continue
+        print(f"{indent}{_labelize(key)}: {_format_value(mapping[key])}")
+
+
+def _print_rows(rows, *, order: list[str] | None = None) -> None:
+    rows = list(rows)
+    if not rows:
+        print("- none")
+        return
+    for idx, row in enumerate(rows, 1):
+        data = dict(row)
+        keys = order or list(data.keys())
+        parts = [f"{_labelize(key)}={_format_value(data[key])}" for key in keys if key in data]
+        print(f"- [{idx}] " + ", ".join(parts))
 
 
 def _one(cur: sqlite3.Cursor, sql: str, params: tuple = ()) -> dict:
@@ -295,19 +327,19 @@ def _compare_runs(run1: Path, run2: Path) -> None:
         print()
 
         _print_section("compare")
-        print(f"run1_name: {data1['run_dir'].name}")
-        print(f"run2_name: {data2['run_dir'].name}")
+        print(f"- run1 name: {data1['run_dir'].name}")
+        print(f"- run2 name: {data2['run_dir'].name}")
         print()
         for label, key, kind in QUICK_ROWS:
             v1 = _fmt(data1['metrics'].get(key), kind)
             v2 = _fmt(data2['metrics'].get(key), kind)
-            print(f"{label}: {v1} | {v2}")
+            print(f"- {label}: run1={v1}, run2={v2}")
 
         _print_section("differing config values")
         snap1 = data1.get("config_snapshot") or {}
         snap2 = data2.get("config_snapshot") or {}
         if not snap1 or not snap2:
-            print({
+            _print_mapping({
                 "run1_has_snapshot": bool(snap1),
                 "run2_has_snapshot": bool(snap2),
                 "note": "config_snapshot.json missing in one or both runs",
@@ -336,11 +368,11 @@ def _compare_runs(run1: Path, run2: Path) -> None:
         if not diff_rows:
             print("no config differences")
         else:
-            print(f"run1_name: {data1['run_dir'].name}")
-            print(f"run2_name: {data2['run_dir'].name}")
+            print(f"- run1 name: {data1['run_dir'].name}")
+            print(f"- run2 name: {data2['run_dir'].name}")
             print()
             for key, v1, v2 in diff_rows:
-                print(f"{key}: {v1} | {v2}")
+                print(f"- {key}: run1={v1}, run2={v2}")
     finally:
         _close_data(data1)
         _close_data(data2)
@@ -387,13 +419,46 @@ def _print_single_run(data: dict, top: int) -> None:
         _metric(key, _fmt(m.get(key), kind), desc[key])
 
     _print_section("overall")
-    print({
+    _print_mapping({
         **data["overall"],
         **m,
-    })
+    }, order=[
+        "positions",
+        "resolved_positions",
+        "open_positions",
+        "winners",
+        "losers",
+        "win_rate_pct",
+        "distinct_markets",
+        "distinct_tokens",
+        "universe",
+        "passed_screener",
+        "entry_fills",
+        "tp_fills",
+        "fill_rate_pct",
+        "stake",
+        "pnl",
+        "roi_on_stake_pct",
+        "initial_balance",
+        "final_equity",
+        "bankroll_return_pct",
+        "avg_stake",
+        "avg_entry_price",
+        "avg_peak_x",
+        "max_peak_x",
+    ])
 
     _print_section("config snapshot")
-    print(data.get("config_snapshot") or {"note": "config_snapshot.json not found"})
+    config_snapshot = data.get("config_snapshot") or {}
+    if not config_snapshot:
+        _print_mapping({"note": "config_snapshot.json not found"})
+    else:
+        run_meta = config_snapshot.get("run") or {}
+        bot_config = config_snapshot.get("bot_config") or {}
+        _print_mapping(run_meta, order=list(run_meta.keys()))
+        if bot_config:
+            print("- bot config:")
+            _print_mapping(bot_config, order=list(bot_config.keys()), indent="  - ")
 
     _print_section("winners / losers")
     _print_rows(cur.execute('''
@@ -406,7 +471,7 @@ def _print_single_run(data: dict, top: int) -> None:
         from positions
         group by is_winner
         order by is_winner
-    '''))
+    '''), order=["is_winner", "c", "stake", "pnl", "avg_pnl"])
 
     _print_section("entry price breakdown")
     _print_rows(cur.execute('''
@@ -422,11 +487,20 @@ def _print_single_run(data: dict, top: int) -> None:
         from positions
         group by entry_price
         order by entry_price
-    '''))
+    '''), order=["entry_price", "c", "winners", "win_rate", "stake", "pnl", "roi_on_stake", "avg_pnl"])
 
     _print_section("cash balance")
-    _print_rows(cur.execute('select * from paper_balance'))
-    print(data["balance"])
+    _print_rows(cur.execute('select * from paper_balance'), order=["id", "cash_balance", "updated_at"])
+    _print_mapping(data["balance"], order=[
+        "final_balance_from_events",
+        "open_position_cost_basis",
+        "final_equity",
+        "bankroll_return_pct",
+        "min_balance",
+        "min_at",
+        "max_balance",
+        "max_at",
+    ])
 
     _print_section("balance event classes")
     _print_rows(cur.execute('''
@@ -445,7 +519,7 @@ def _print_single_run(data: dict, top: int) -> None:
         from paper_balance_events
         group by cls
         order by c desc
-    '''))
+    '''), order=["cls", "c", "delta", "avg_delta"])
 
     _print_section("tp orders by label/status")
     _print_rows(cur.execute('''
@@ -456,7 +530,7 @@ def _print_single_run(data: dict, top: int) -> None:
         from tp_orders
         group by label, status
         order by label, status
-    '''))
+    '''), order=["label", "status", "c", "qty", "avg_price", "filled_qty"])
 
     _print_section("paper orders by side/status")
     _print_rows(cur2.execute('''
@@ -466,17 +540,17 @@ def _print_single_run(data: dict, top: int) -> None:
         from paper_orders
         group by side, status
         order by side, status
-    '''))
+    '''), order=["side", "status", "c", "size", "filled"])
 
     _print_section("paper pnl")
-    print(_one(cur2, '''
+    _print_mapping(_one(cur2, '''
         select count(*) c,
                round(sum(pnl_usdc),6) pnl,
                round(avg(pnl_usdc),6) avg_pnl,
                round(min(pnl_usdc),6) min_pnl,
                round(max(pnl_usdc),6) max_pnl
         from paper_pnl
-    '''))
+    '''), order=["c", "pnl", "avg_pnl", "min_pnl", "max_pnl"])
 
     _print_section("resting orders by status")
     _print_rows(cur.execute('''
@@ -486,10 +560,10 @@ def _print_single_run(data: dict, top: int) -> None:
         from resting_orders
         group by status
         order by status
-    '''))
+    '''), order=["status", "c", "qty", "filled"])
 
     _print_section("cleanup consistency")
-    print({
+    _print_mapping({
         'resting_live': cur.execute("select count(*) from resting_orders where status='live'").fetchone()[0],
         'resting_cancelled': cur.execute("select count(*) from resting_orders where status='cancelled'").fetchone()[0],
         'resting_matched': cur.execute("select count(*) from resting_orders where status='matched'").fetchone()[0],
@@ -508,7 +582,7 @@ def _print_single_run(data: dict, top: int) -> None:
         having pnl > 0
         order by pnl desc
         limit {int(top)}
-    '''))
+    '''), order=["market_id", "c", "winners", "stake", "pnl"])
 
     _print_section("top losing markets")
     _print_rows(cur.execute(f'''
@@ -519,7 +593,7 @@ def _print_single_run(data: dict, top: int) -> None:
         group by market_id
         order by pnl asc
         limit {int(top)}
-    '''))
+    '''), order=["market_id", "c", "winners", "stake", "pnl"])
 
     _print_section("top winners")
     _print_rows(cur.execute(f'''
@@ -528,7 +602,7 @@ def _print_single_run(data: dict, top: int) -> None:
         from positions
         order by realized_pnl desc
         limit {int(top)}
-    '''))
+    '''), order=["position_id", "market_id", "token_id", "outcome_name", "entry_price", "entry_size_usdc", "realized_pnl", "peak_x", "is_winner"])
 
     _print_section("top losers")
     _print_rows(cur.execute(f'''
@@ -537,7 +611,7 @@ def _print_single_run(data: dict, top: int) -> None:
         from positions
         order by realized_pnl asc
         limit {int(top)}
-    '''))
+    '''), order=["position_id", "market_id", "token_id", "outcome_name", "entry_price", "entry_size_usdc", "realized_pnl", "peak_x", "is_winner"])
 
 
 def main() -> None:
