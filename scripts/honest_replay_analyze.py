@@ -1057,149 +1057,401 @@ def _capture_compare_text(run1: Path, run2: Path) -> str:
     return buf.getvalue().rstrip() + "\n"
 
 
-def _text_report_to_html(text: str, title: str) -> str:
-    lines = text.splitlines()
-    body: list[str] = []
-    list_stack: list[int] = []
-    current_card_open = False
+def _split_label_value(text: str) -> tuple[str | None, str]:
+    if ": " not in text:
+        return None, text
+    label, value = text.split(": ", 1)
+    return label.strip(), value.strip()
 
-    def close_lists(to_level: int = 0) -> None:
-        while len(list_stack) > to_level:
-            body.append("</ul>")
-            list_stack.pop()
 
-    def close_card() -> None:
-        nonlocal current_card_open
-        if current_card_open:
-            close_lists(0)
-            body.append("</div>")
-            current_card_open = False
+def _parse_text_report(text: str) -> tuple[str, list[str], list[tuple[str, list[str]]]]:
+    report_name = "Replay report"
+    header_lines: list[str] = []
+    sections: list[tuple[str, list[str]]] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
 
-    for raw_line in lines:
+    for raw_line in text.splitlines():
         line = raw_line.rstrip()
         stripped = line.strip()
-
         if not stripped:
-            close_lists(0)
-            if current_card_open:
-                body.append('<div class="spacer"></div>')
             continue
-
         if stripped.startswith("report_for:"):
-            close_card()
             report_name = stripped.split(":", 1)[1].strip()
-            body.append(f"<header><h1>{escape(report_name)}</h1><p>{escape(title)}</p></header>")
             continue
-
         if stripped.startswith("==") and stripped.endswith("=="):
-            close_card()
-            section_title = stripped.strip("=").strip()
-            body.append(f'<section class="section"><h2>{escape(section_title)}</h2>')
-            current_card_open = True
+            if current_title is not None:
+                sections.append((current_title, current_lines))
+            current_title = stripped.strip("=").strip()
+            current_lines = []
             continue
+        if current_title is None:
+            header_lines.append(line)
+        else:
+            current_lines.append(line)
 
+    if current_title is not None:
+        sections.append((current_title, current_lines))
+
+    return report_name, header_lines, sections
+
+
+def _parse_section_items(lines: list[str]) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
         indent = len(line) - len(line.lstrip(" "))
-        level = 1 if indent == 0 else 2
-
         if stripped.startswith("- "):
             content = stripped[2:]
-            while len(list_stack) < level:
-                body.append('<ul class="report-list">')
-                list_stack.append(level)
-            close_lists(level)
-            item_html = escape(content)
-            if content.startswith("[") and "]" in content:
-                idx, rest = content.split("]", 1)
-                item_html = f'<span class="badge">{escape(idx[1:])}</span> {escape(rest.strip())}'
-            body.append(f"<li>{item_html}</li>")
+            if indent == 0:
+                current = {"text": content, "children": []}
+                items.append(current)
+            else:
+                if current is None:
+                    current = {"text": "", "children": []}
+                    items.append(current)
+                current.setdefault("children", []).append(content)
         else:
-            close_lists(0)
-            body.append(f'<p class="plain">{escape(stripped)}</p>')
+            if current is None:
+                current = {"text": stripped, "children": []}
+                items.append(current)
+            else:
+                current.setdefault("children", []).append(stripped)
 
-    close_card()
+    return items
+
+
+def _render_kv_table(rows: list[tuple[str, str]], extra_class: str = "") -> str:
+    if not rows:
+        return ""
+    cls = f"kv-table {extra_class}".strip()
+    parts = [f'<table class="{cls}"><tbody>']
+    for key, value in rows:
+        parts.append(
+            "<tr>"
+            f"<th>{escape(key)}</th>"
+            f"<td>{escape(value)}</td>"
+            "</tr>"
+        )
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _render_detail_rows(lines: list[str]) -> str:
+    rows = []
+    for line in lines:
+        key, value = _split_label_value(line)
+        if key is None:
+            rows.append(("detail", line))
+        else:
+            rows.append((key, value))
+    return _render_kv_table(rows, "detail-table")
+
+
+def _render_subgroup(item: dict[str, object]) -> str:
+    title = str(item.get("text") or "").rstrip(":")
+    children = [str(child) for child in item.get("children", [])]
+    html = [f'<div class="subcard"><h3>{escape(title)}</h3>']
+    if children:
+        html.append(_render_detail_rows(children))
+    html.append("</div>")
+    return "".join(html)
+
+
+def _render_market_card(item: dict[str, object]) -> str:
+    header = str(item.get("text") or "")
+    children = [str(child) for child in item.get("children", [])]
+
+    badge_html = ""
+    title = header
+    if header.startswith("[") and "]" in header:
+        idx, rest = header.split("]", 1)
+        badge_html = f'<span class="badge">{escape(idx[1:])}</span>'
+        title = rest.strip()
+
+    path_line = ""
+    spark_line = ""
+    detail_lines: list[str] = []
+    for child in children:
+        key, value = _split_label_value(child)
+        if key == "price path":
+            path_line = value
+        elif key == "sparkline":
+            spark_line = value
+        else:
+            detail_lines.append(child)
+
+    html = [
+        '<article class="market-card">',
+        f'<div class="market-title">{badge_html}<span>{escape(title)}</span></div>',
+    ]
+    if detail_lines:
+        html.append(_render_detail_rows(detail_lines))
+    if path_line:
+        html.append(
+            '<div class="mono-box">'
+            '<div class="mono-label">price path</div>'
+            f'<div class="mono-value">{escape(path_line)}</div>'
+            '</div>'
+        )
+    if spark_line:
+        html.append(
+            '<div class="spark-box">'
+            '<div class="mono-label">sparkline</div>'
+            f'<div class="sparkline">{escape(spark_line)}</div>'
+            '</div>'
+        )
+    html.append("</article>")
+    return "".join(html)
+
+
+def _render_section_html(title: str, lines: list[str]) -> str:
+    items = _parse_section_items(lines)
+    html = [f'<section class="section"><h2>{escape(title)}</h2>']
+
+    if "markets" in title.lower():
+        html.append('<div class="market-grid">')
+        for item in items:
+            html.append(_render_market_card(item))
+        html.append("</div>")
+        html.append("</section>")
+        return "".join(html)
+
+    kv_rows: list[tuple[str, str]] = []
+    blocks: list[str] = []
+
+    for item in items:
+        text_value = str(item.get("text") or "")
+        children = [str(child) for child in item.get("children", [])]
+        if children:
+            blocks.append(_render_subgroup(item))
+        else:
+            key, value = _split_label_value(text_value)
+            if key is None:
+                blocks.append(f'<p class="plain">{escape(text_value)}</p>')
+            else:
+                kv_rows.append((key, value))
+
+    if kv_rows:
+        html.append(_render_kv_table(kv_rows))
+    html.extend(blocks)
+    html.append("</section>")
+    return "".join(html)
+
+
+def _text_report_to_html(text: str, title: str) -> str:
+    report_name, header_lines, sections = _parse_text_report(text)
+
+    header_rows: list[tuple[str, str]] = []
+    for line in header_lines:
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            key, value = _split_label_value(stripped[2:])
+            if key is not None:
+                header_rows.append((key, value))
+
+    body = [
+        f"<header><h1>{escape(report_name)}</h1><p>{escape(title)}</p></header>",
+    ]
+    if header_rows:
+        body.append('<section class="section hero-meta"><h2>run meta</h2>')
+        body.append(_render_kv_table(header_rows, "hero-table"))
+        body.append("</section>")
+
+    for section_title, section_lines in sections:
+        body.append(_render_section_html(section_title, section_lines))
 
     css = """
+    :root {
+      --bg: #0b1020;
+      --panel: #11192d;
+      --panel-2: #16223d;
+      --panel-3: #0e1630;
+      --text: #e8ecf3;
+      --muted: #9fb0d0;
+      --line: rgba(255,255,255,0.08);
+      --blue: #8ec5ff;
+      --blue-2: #5ea9ff;
+      --accent: #9bffd0;
+      --shadow: 0 12px 32px rgba(0,0,0,0.25);
+    }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 32px;
-      background: #0b1020;
-      color: #e8ecf3;
-      font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      padding: 28px;
+      background:
+        radial-gradient(circle at top right, rgba(94,169,255,0.12), transparent 28%),
+        linear-gradient(180deg, #0a0f1d 0%, var(--bg) 100%);
+      color: var(--text);
+      font: 15px/1.6 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
     .wrap {
-      max-width: 1180px;
+      max-width: 1280px;
       margin: 0 auto;
     }
     header {
-      margin-bottom: 24px;
-      padding: 24px 28px;
-      border-radius: 18px;
-      background: linear-gradient(135deg, #17203a 0%, #0f172a 100%);
-      box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+      margin-bottom: 22px;
+      padding: 28px 32px;
+      border-radius: 22px;
+      background: linear-gradient(135deg, #192542 0%, #0d1528 100%);
+      box-shadow: var(--shadow);
+      border: 1px solid rgba(255,255,255,0.08);
     }
     h1 {
-      margin: 0 0 6px;
-      font-size: 30px;
-      line-height: 1.15;
+      margin: 0 0 8px;
+      font-size: 34px;
+      line-height: 1.12;
+      letter-spacing: -0.02em;
     }
     header p {
       margin: 0;
-      color: #9fb0d0;
+      font-size: 15px;
+      color: var(--muted);
     }
     .section {
       margin: 18px 0;
-      padding: 18px 22px 20px;
-      border-radius: 18px;
-      background: #11192d;
-      box-shadow: 0 10px 24px rgba(0,0,0,0.22);
-      border: 1px solid rgba(255,255,255,0.06);
+      padding: 20px 22px 22px;
+      border-radius: 20px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+    .hero-meta {
+      background: linear-gradient(180deg, rgba(94,169,255,0.08), rgba(255,255,255,0.02));
     }
     h2 {
-      margin: 0 0 12px;
-      font-size: 18px;
-      letter-spacing: 0.01em;
-      color: #8ec5ff;
+      margin: 0 0 14px;
+      font-size: 20px;
+      line-height: 1.2;
+      letter-spacing: -0.01em;
+      color: var(--blue);
+      text-transform: none;
     }
-    .report-list {
-      margin: 0;
-      padding-left: 20px;
+    h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+      line-height: 1.3;
+      color: var(--accent);
+      font-weight: 700;
     }
-    .report-list .report-list {
-      margin-top: 8px;
-      padding-left: 22px;
+    .kv-table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.02);
     }
-    li {
-      margin: 6px 0;
+    .kv-table th,
+    .kv-table td {
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .kv-table tr:last-child th,
+    .kv-table tr:last-child td {
+      border-bottom: 0;
+    }
+    .kv-table th {
+      width: 30%;
+      text-align: left;
+      color: #c9d8f3;
+      font-weight: 700;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      background: rgba(255,255,255,0.025);
+    }
+    .kv-table td {
+      color: var(--text);
+      font-size: 14px;
+    }
+    .subcard {
+      margin-top: 16px;
+      padding: 16px 16px 14px;
+      border-radius: 16px;
+      background: var(--panel-3);
+      border: 1px solid var(--line);
+    }
+    .detail-table th { width: 26%; }
+    .market-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 16px;
+    }
+    .market-card {
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.015));
+      border: 1px solid var(--line);
+      box-shadow: 0 8px 22px rgba(0,0,0,0.20);
+    }
+    .market-title {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 14px;
+      font-size: 17px;
+      line-height: 1.35;
+      font-weight: 800;
+      color: #f3f7ff;
+    }
+    .badge {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 2rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #2a4676, #21375b);
+      color: #ecf4ff;
+      font-size: 0.83rem;
+      font-weight: 800;
+    }
+    .mono-box, .spark-box {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(94,169,255,0.07);
+      border: 1px solid rgba(94,169,255,0.15);
+    }
+    .mono-label {
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 700;
+    }
+    .mono-value, .sparkline {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       white-space: pre-wrap;
       word-break: break-word;
     }
-    .badge {
-      display: inline-block;
-      min-width: 1.7em;
-      padding: 0.05em 0.45em;
-      margin-right: 0.45em;
-      border-radius: 999px;
-      background: #223252;
-      color: #d8e6ff;
-      text-align: center;
-      font-weight: 700;
-      font-size: 0.88em;
+    .sparkline {
+      font-size: 18px;
+      line-height: 1.2;
+      letter-spacing: 0.08em;
+      color: #cfe4ff;
     }
     .plain {
       margin: 8px 0 0;
-      color: #d7deea;
-      white-space: pre-wrap;
+      color: var(--text);
     }
-    .spacer {
-      height: 4px;
-    }
-    code, pre, .mono {
-      font-family: 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
-    }
-    @media (max-width: 720px) {
+    strong { font-weight: 800; }
+    @media (max-width: 900px) {
       body { padding: 14px; }
-      header, .section { padding: 16px; border-radius: 14px; }
-      h1 { font-size: 24px; }
+      header { padding: 22px 18px; border-radius: 18px; }
+      .section { padding: 16px; border-radius: 16px; }
+      .kv-table th, .kv-table td { display: block; width: 100%; }
+      .kv-table th { border-bottom: 0; padding-bottom: 4px; }
+      .kv-table td { padding-top: 0; }
+      h1 { font-size: 28px; }
+      .market-grid { grid-template-columns: 1fr; }
     }
     """
 
