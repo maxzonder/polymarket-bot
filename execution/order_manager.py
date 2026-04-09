@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from api.clob_client import ClobClient, OrderResult, get_orderbook
@@ -56,6 +56,8 @@ class ExecutionCycleContext:
     live_resting_tokens: set[str]
     cluster_live_markets: dict[str, set[str]]
     free_balance: Optional[float] = None
+    dead_book_tokens: set[str] = field(default_factory=set)
+    balance_exhausted: bool = False
 
     @property
     def open_position_count(self) -> int:
@@ -249,13 +251,14 @@ class OrderManager:
     6. Periodically cancel stale/orphaned resting bids
     """
 
-    def __init__(self, config: BotConfig, clob: ClobClient, risk_manager: RiskManager):
+    def __init__(self, config: BotConfig, clob: ClobClient, risk_manager: RiskManager, *, disable_scan_log: bool = False):
         self.config = config
         self.mc = config.mode_config
         self.clob = clob
         self.risk = risk_manager
         self._db_path = str(POSITIONS_DB)
         self._last_balance_alert_ts: int = 0
+        self._disable_scan_log = disable_scan_log
         self.em = ExposureManager(
             db_path=self._db_path,
             max_per_market=self.mc.max_exposure_per_market or float("inf"),
@@ -338,6 +341,8 @@ class OrderManager:
         order_id: Optional[str] = None,
     ) -> None:
         """Write one row to scan_log for observability / paper-trading report."""
+        if self._disable_scan_log:
+            return
         conn.execute(
             """
             INSERT INTO scan_log
@@ -441,6 +446,9 @@ class OrderManager:
         if context is None:
             context = self.build_cycle_context()
 
+        if candidate.token_id in context.dead_book_tokens:
+            return results
+
         conn = self._conn()
         active_prices = self._get_active_resting_prices(conn, candidate.token_id)
         marketable_levels, _resting_levels = partition_entry_levels(
@@ -452,6 +460,7 @@ class OrderManager:
         try:
             book = get_orderbook(candidate.token_id)
             if book.best_ask is None or book.best_bid is None:
+                context.dead_book_tokens.add(candidate.token_id)
                 for price_level in candidate.suggested_entry_levels:
                     self._log_scan(conn, candidate, price_level, "depth_gate_dead_book")
                 conn.commit()
@@ -557,6 +566,7 @@ class OrderManager:
                     )
                     self._log_scan(conn, candidate, price_level, "balance_exhausted")
                     self._maybe_send_balance_alert(bal)
+                    context.balance_exhausted = True
                     conn.commit()
                     conn.close()
                     return results

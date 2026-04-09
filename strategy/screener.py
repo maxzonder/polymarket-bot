@@ -92,6 +92,7 @@ class Screener:
         resolution_scorer: ResolutionScorer,
         db_path: Optional[Path] = None,
         market_scorer: Optional[MarketScorer] = None,
+        skip_logging: bool = False,
     ):
         self.config = config
         self.mc = config.mode_config
@@ -99,8 +100,9 @@ class Screener:
         self.res_scorer = resolution_scorer
         self.market_scorer = market_scorer
         self._db_path = str(db_path or DATA_DIR / "positions.db")
+        self._skip_logging = skip_logging
 
-    def scan(self) -> list[EntryCandidate]:
+    def scan(self, allowed_market_ids: Optional[set[str]] = None) -> list[EntryCandidate]:
         """
         Fetch open markets, apply filters, score, return candidates sorted by total_score desc.
         All rejection reasons are recorded in screener_log for funnel analysis.
@@ -120,6 +122,9 @@ class Screener:
             )
         except RuntimeError:
             return []  # network error — skip this cycle
+
+        if allowed_market_ids is not None:
+            markets = [m for m in markets if m.market_id in allowed_market_ids]
 
         candidates: list[EntryCandidate] = []
         log_entries: list[tuple] = []
@@ -161,6 +166,8 @@ class Screener:
 
     def _flush_screener_log(self, entries: list[tuple]) -> None:
         """Batch-write screener_log rows. One connection per scan cycle."""
+        if self._skip_logging:
+            return
         try:
             conn = sqlite3.connect(self._db_path)
             conn.execute("PRAGMA journal_mode=WAL")

@@ -93,7 +93,7 @@ class TapeDrivenDryRunRunner:
 
         self.clob = ClobClient(private_key="tape_dummy", dry_run=True, paper_db_path=self.paper_db)
         risk = RiskManager(self.mc, balance_usdc=self.config.paper_initial_balance_usdc)
-        self.order_manager = OrderManager(self.config, self.clob, risk)
+        self.order_manager = OrderManager(self.config, self.clob, risk, disable_scan_log=True)
         self.monitor = PositionMonitor(self.config, self.clob, self.order_manager)
 
         ef_price_max = max(self.mc.entry_price_levels) if self.mc.entry_price_levels else self.config.scorer_entry_price_max
@@ -108,6 +108,7 @@ class TapeDrivenDryRunRunner:
             resolution_scorer=self.res_scorer,
             db_path=self.positions_db,
             market_scorer=self.market_scorer,
+            skip_logging=True,
         )
 
         self.stats = TapeRunnerStats()
@@ -168,12 +169,14 @@ class TapeDrivenDryRunRunner:
 
             with self._patched_runtime(batch.batch_end_ts):
                 cycle_context = self.order_manager.build_cycle_context()
-                candidates = self.screener.scan()
+                candidates = self.screener.scan(allowed_market_ids=self.state.dirty_markets)
                 self.stats.screener_cycles += 1
                 self.stats.candidates_seen += len(candidates)
 
                 placed = 0
                 for candidate in candidates:
+                    if cycle_context.balance_exhausted:
+                        break
                     if self.mc.scanner_entry and candidate.current_price <= self.mc.entry_price_max:
                         placed += len(self.order_manager.process_scanner_entry(candidate, context=cycle_context))
                     elif self.mc.use_resting_bids:
