@@ -102,16 +102,17 @@ def _fmt_pct(value, places: int = 1) -> str:
 def _fmt_price(value) -> str:
     if value is None:
         return "n/a"
-    cents = float(value) * 100.0
-    if cents >= 10:
-        text = f"{cents:.1f}c"
-    elif cents >= 1:
-        text = f"{cents:.2f}c"
-    elif cents >= 0.1:
-        text = f"{cents:.3f}c"
+    numeric = float(value)
+    text = f"{numeric:.6f}".rstrip("0")
+    if text.endswith("."):
+        text += "0"
+    if "." not in text:
+        text += ".00"
     else:
-        text = f"{cents:.4f}c"
-    return text.rstrip("0").rstrip(".")
+        decimals = len(text.split(".", 1)[1])
+        if decimals < 2:
+            text += "0" * (2 - decimals)
+    return text
 
 
 def _fmt_ts(ts) -> str:
@@ -199,11 +200,15 @@ def _sparkline(values: list[float], width: int = 14) -> str:
     return "".join(chars)
 
 
+def _fmt_progress(value: float) -> str:
+    return f"{float(value):.6f}".rstrip("0").rstrip(".")
+
+
 def _fmt_tp_levels(levels: tuple[TPLevel, ...], moonbag_fraction: float) -> str:
     if not levels and moonbag_fraction <= 0:
         return "none"
-    parts = [f"{tp.fraction * 100:.0f}% @ {tp.progress * 100:.0f}% пути к $1" for tp in levels]
-    parts.append(f"moonbag {moonbag_fraction * 100:.0f}%")
+    parts = [f"{tp.fraction * 100:.0f}% at {_fmt_progress(tp.progress)}" for tp in levels]
+    parts.append(f"moonbag{moonbag_fraction * 100:.0f}%")
     return ", ".join(parts)
 
 
@@ -725,8 +730,8 @@ def _print_headline(data: dict) -> None:
         f"{_fmt_int(m.get('winners'))} / {_fmt_int(m.get('losers'))} (resolved win rate {_fmt_pct(m.get('win_rate_pct'), 1)})",
     )
     _print_key_value(
-        "screener / fills",
-        f"passed {_fmt_int(m.get('passed_screener'))}, entry fills {_fmt_int(m.get('entry_fills'))}, tp fills {_fmt_int(m.get('tp_fills'))}",
+        "screener / matched fills",
+        f"passed screener candidates {_fmt_int(m.get('passed_screener'))}, matched entry fills {_fmt_int(m.get('entry_fills'))}, matched tp fills {_fmt_int(m.get('tp_fills'))}",
     )
 
 
@@ -781,15 +786,17 @@ def _print_capital_path(data: dict) -> None:
         "min cash",
         f"{_fmt_money(balance.get('min_balance'))} at {_fmt_ts((balance.get('min_at') or {}).get('ts'))}",
     )
+    max_at = balance.get('max_at') or {}
+    max_cash_note = "run init" if str(max_at.get('note') or '').startswith('initial balance') else _fmt_ts(max_at.get('ts'))
     _print_key_value(
         "max cash",
-        f"{_fmt_money(balance.get('max_balance'))} at {_fmt_ts((balance.get('max_at') or {}).get('ts'))}",
+        f"{_fmt_money(balance.get('max_balance'))} at {max_cash_note}",
     )
 
     if classes:
-        print("- balance event mix:")
+        print("- cash ledger event mix:")
         for row in classes:
-            print(f"  - {row['cls']}: {_fmt_int(row['c'])} events, delta {_fmt_money(row['delta'])}")
+            print(f"  - {row['cls']}: {_fmt_int(row['c'])} events, net cash delta {_fmt_money(row['delta'])}")
 
 
 def _print_execution_breakdown(data: dict) -> None:
@@ -828,15 +835,15 @@ def _print_execution_breakdown(data: dict) -> None:
     if resting:
         print("- resting orders:")
         for row in resting:
-            print(f"  - {row['status']}: {_fmt_int(row['c'])} orders, qty {_fmt_number(row['qty'], 4)}")
+            print(f"  - {row['status']}: {_fmt_int(row['c'])} orders, token qty {_fmt_number(row['qty'], 4)}")
     if paper_orders:
         print("- paper orders:")
         for row in paper_orders:
-            print(f"  - {row['side']} {row['status']}: {_fmt_int(row['c'])} orders, qty {_fmt_number(row['qty'], 4)}")
+            print(f"  - {row['side']} {row['status']}: {_fmt_int(row['c'])} orders, token qty {_fmt_number(row['qty'], 4)}")
     if tp_orders:
         print("- tp orders:")
         for row in tp_orders:
-            print(f"  - {row['label']} / {row['status']}: {_fmt_int(row['c'])} orders, qty {_fmt_number(row['qty'], 4)}")
+            print(f"  - {row['label']} / {row['status']}: {_fmt_int(row['c'])} orders, sell token qty {_fmt_number(row['qty'], 4)}")
 
 
 def _print_entry_price_analysis(data: dict) -> None:
