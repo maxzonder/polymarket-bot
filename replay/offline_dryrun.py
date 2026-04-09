@@ -18,6 +18,7 @@ class TokenSnapshot:
     last_trade_ts: Optional[int] = None
     last_price: Optional[float] = None
     recent_trades: deque[dict] = field(default_factory=lambda: deque(maxlen=128))
+    is_winner: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -109,10 +110,12 @@ class OfflineDryRunState:
                 end_events.append((market_meta.end_date_ts, market_id))
             for row in ordered:
                 token_id = str(row["token_id"])
+                raw_winner = row.get("is_winner")
                 tokens[token_id] = TokenSnapshot(
                     token_id=token_id,
                     market_id=market_id,
                     outcome_name=str(row.get("outcome_name") or ""),
+                    is_winner=bool(raw_winner) if raw_winner is not None else None,
                 )
 
         return cls(

@@ -40,8 +40,10 @@ class TapeRunnerStats:
     empty_batches: int = 0
     trades: int = 0
     screener_cycles: int = 0
+    screener_skipped: int = 0
     candidates_seen: int = 0
     orders_placed: int = 0
+    resolutions: int = 0
 
 
 class TapeDrivenDryRunRunner:
@@ -112,6 +114,29 @@ class TapeDrivenDryRunRunner:
         )
 
         self.stats = TapeRunnerStats()
+        self._resolved_market_ids: set[str] = set()
+
+    def _resolve_expired_markets(self, now_ts: int) -> int:
+        """
+        Resolve markets whose end_date_ts has passed using dataset is_winner labels.
+        Called each batch so positions are closed and capital returned as simulation advances.
+        Returns count of token resolutions triggered.
+        """
+        resolved = 0
+        for market_id, market in self.state.markets.items():
+            if market_id in self._resolved_market_ids:
+                continue
+            if market.end_date_ts is None or now_ts < market.end_date_ts:
+                continue
+            self._resolved_market_ids.add(market_id)
+            for token_id in market.token_ids:
+                snap = self.state.tokens.get(token_id)
+                if snap is None:
+                    continue
+                is_winner = snap.is_winner or False
+                self.order_manager.on_market_resolved(token_id, is_winner=is_winner)
+                resolved += 1
+        return resolved
 
     def _patched_runtime(self, ts: int):
         _noop = lambda *a, **kw: None
@@ -158,6 +183,8 @@ class TapeDrivenDryRunRunner:
             )
         )
 
+        screener_blocked = False
+
         for batch in batch_iter:
             self.state.apply_batch(batch)
             self.stats.batches += 1
@@ -168,6 +195,24 @@ class TapeDrivenDryRunRunner:
                 continue
 
             with self._patched_runtime(batch.batch_end_ts):
+                # 1. Fills first: TP fills credit balance before screener sees it.
+                had_fills = self.monitor._check_fills_dry_run(dirty_tokens=self.state.dirty_tokens)
+                self.monitor._update_peak_prices(dirty_tokens=self.state.dirty_tokens)
+
+                # 2. Resolve expired markets: credits capital back to balance.
+                resolved_count = self._resolve_expired_markets(batch.batch_end_ts)
+                if resolved_count > 0:
+                    self.stats.resolutions += resolved_count
+                    screener_blocked = False
+
+                if had_fills:
+                    screener_blocked = False  # TP fills may have freed balance
+
+                # 3. Screener: skip entirely when balance is known exhausted.
+                if screener_blocked:
+                    self.stats.screener_skipped += 1
+                    continue
+
                 cycle_context = self.order_manager.build_cycle_context()
                 candidates = self.screener.scan(allowed_market_ids=self.state.dirty_markets)
                 self.stats.screener_cycles += 1
@@ -183,18 +228,23 @@ class TapeDrivenDryRunRunner:
                         placed += len(self.order_manager.process_candidate(candidate, context=cycle_context))
                 self.stats.orders_placed += placed
 
-                self.monitor._check_fills_dry_run(dirty_tokens=self.state.dirty_tokens)
-                self.monitor._update_peak_prices(dirty_tokens=self.state.dirty_tokens)
+                if cycle_context.balance_exhausted:
+                    screener_blocked = True
 
         elapsed = time.monotonic() - t0
         logger.info(
-            f"Tape runner finished in {elapsed:.1f}s | batches={self.stats.batches} empty_batches={self.stats.empty_batches} "
+            f"Tape runner finished in {elapsed:.1f}s | batches={self.stats.batches} "
+            f"empty={self.stats.empty_batches} screener_cycles={self.stats.screener_cycles} "
+            f"screener_skipped={self.stats.screener_skipped} resolutions={self.stats.resolutions} "
             f"trades={self.stats.trades} candidates={self.stats.candidates_seen} orders={self.stats.orders_placed}"
         )
         return {
             "elapsed_s": elapsed,
             "batches": self.stats.batches,
             "empty_batches": self.stats.empty_batches,
+            "screener_cycles": self.stats.screener_cycles,
+            "screener_skipped": self.stats.screener_skipped,
+            "resolutions": self.stats.resolutions,
             "trades": self.stats.trades,
             "candidates_seen": self.stats.candidates_seen,
             "orders_placed": self.stats.orders_placed,

@@ -149,14 +149,18 @@ class PositionMonitor:
 
         conn.close()
 
-    def _check_fills_dry_run(self, dirty_tokens: Optional[set[str]] = None) -> None:
+    def _check_fills_dry_run(self, dirty_tokens: Optional[set[str]] = None) -> bool:
         """
         Simulate fills by checking current orderbook prices against our orders.
 
         BUY fill: current best_ask <= our bid price
         SELL fill: current best_bid >= our sell price
+
+        Returns True if any fills were processed (relevant for caller to decide
+        whether balance may have changed).
         """
         conn = self._conn()
+        had_fills = False
         try:
             resting_live = conn.execute(
                 "SELECT * FROM resting_orders WHERE status='live'"
@@ -189,6 +193,7 @@ class PositionMonitor:
                     continue
 
                 new_filled = filled_so_far + this_fill
+                had_fills = True
                 self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
                 conn.execute(
                     "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
@@ -235,6 +240,7 @@ class PositionMonitor:
                     if fill_qty < 0.0001:
                         continue
                     new_filled = filled_so_far + fill_qty
+                    had_fills = True
                     self.clob.paper_simulate_fill(tp["order_id"], best_bid, fill_size=new_filled)
                     self.om.on_tp_filled(tp["order_id"], sell_price, fill_qty, conn=conn)
                     logger.info(
@@ -245,6 +251,7 @@ class PositionMonitor:
         finally:
             conn.commit()
             conn.close()
+        return had_fills
 
     # ── Peak price tracking ───────────────────────────────────────────────────
 
