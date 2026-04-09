@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -32,6 +32,39 @@ from utils.logger import setup_logger
 from utils.paths import DB_PATH, DATA_DIR
 
 logger = setup_logger("tape_runner")
+
+
+def _write_runtime_snapshot(
+    output_dir: Path,
+    *,
+    start: date,
+    end: date,
+    mode: str,
+    limit_markets: Optional[int],
+    batch_seconds: int,
+    tape_db_path: Optional[Path],
+    config: BotConfig,
+) -> None:
+    import json
+
+    snapshot = {
+        "run": {
+            "kind": "tape_dryrun",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "mode": mode,
+            "limit_markets": limit_markets,
+            "batch_seconds": batch_seconds,
+            "tape_db_path": str(tape_db_path) if tape_db_path is not None else None,
+            "output_dir": str(output_dir),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        },
+        "bot_config": asdict(config),
+    }
+    (output_dir / "config_snapshot.json").write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 @dataclass
@@ -73,6 +106,16 @@ class TapeDrivenDryRunRunner:
 
         self.config = BotConfig(mode=mode, dry_run=True)
         self.mc = self.config.mode_config
+        _write_runtime_snapshot(
+            self.output_dir,
+            start=start,
+            end=end,
+            mode=mode,
+            limit_markets=limit_markets,
+            batch_seconds=batch_seconds,
+            tape_db_path=self.tape_db_path,
+            config=self.config,
+        )
         self.start_ts = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp())
         self.end_ts = int(datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=timezone.utc).timestamp())
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date
 from pathlib import Path
@@ -50,6 +51,11 @@ class TapeRunnerSmokeTests(unittest.TestCase):
             self.assertEqual(result["trades"], 0)
             self.assertEqual(result["orders_placed"], 0)
             self.assertTrue(out.exists())
+            snapshot = json.loads((out / "config_snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["run"]["kind"], "tape_dryrun")
+            self.assertEqual(snapshot["run"]["batch_seconds"], 300)
+            self.assertEqual(snapshot["run"]["limit_markets"], 1)
+            self.assertEqual(snapshot["run"]["mode"], "big_swan_mode")
 
     def test_runner_falls_back_to_json_batches_for_invalid_tape_db(self) -> None:
         with TemporaryDirectory() as tmp:
