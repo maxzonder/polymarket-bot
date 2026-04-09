@@ -161,6 +161,7 @@ class TapeDrivenDryRunRunner:
         stack.enter_context(patch.object(screener_module, "get_recent_trades", side_effect=self.state.get_recent_trades))
         stack.enter_context(patch("execution.order_manager.get_orderbook", side_effect=self.state.get_orderbook))
         stack.enter_context(patch("execution.position_monitor.get_orderbook", side_effect=self.state.get_orderbook))
+        stack.enter_context(patch("strategy.screener.get_orderbook", side_effect=self.state.get_orderbook))
         stack.enter_context(patch.object(screener_module, "tg_alert", _noop))
         stack.enter_context(patch.object(om_module, "send_message", _noop))
         return stack
