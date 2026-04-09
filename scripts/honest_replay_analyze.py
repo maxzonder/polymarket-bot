@@ -9,11 +9,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
 import sqlite3
 import sys
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Optional
 
@@ -991,6 +994,13 @@ def _print_single_run(data: dict, top: int) -> None:
     _print_market_cards(data, winners=False, top=top)
 
 
+def _capture_single_run_text(data: dict, top: int) -> str:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _print_single_run(data, top)
+    return buf.getvalue().rstrip() + "\n"
+
+
 def _flatten(prefix: str, value, out: dict[str, object]) -> None:
     if isinstance(value, dict):
         for key in sorted(value):
@@ -1040,21 +1050,205 @@ def _compare_runs(run1: Path, run2: Path) -> None:
         _close_data(data2)
 
 
+def _capture_compare_text(run1: Path, run2: Path) -> str:
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _compare_runs(run1, run2)
+    return buf.getvalue().rstrip() + "\n"
+
+
+def _text_report_to_html(text: str, title: str) -> str:
+    lines = text.splitlines()
+    body: list[str] = []
+    list_stack: list[int] = []
+    current_card_open = False
+
+    def close_lists(to_level: int = 0) -> None:
+        while len(list_stack) > to_level:
+            body.append("</ul>")
+            list_stack.pop()
+
+    def close_card() -> None:
+        nonlocal current_card_open
+        if current_card_open:
+            close_lists(0)
+            body.append("</div>")
+            current_card_open = False
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            close_lists(0)
+            if current_card_open:
+                body.append('<div class="spacer"></div>')
+            continue
+
+        if stripped.startswith("report_for:"):
+            close_card()
+            report_name = stripped.split(":", 1)[1].strip()
+            body.append(f"<header><h1>{escape(report_name)}</h1><p>{escape(title)}</p></header>")
+            continue
+
+        if stripped.startswith("==") and stripped.endswith("=="):
+            close_card()
+            section_title = stripped.strip("=").strip()
+            body.append(f'<section class="section"><h2>{escape(section_title)}</h2>')
+            current_card_open = True
+            continue
+
+        indent = len(line) - len(line.lstrip(" "))
+        level = 1 if indent == 0 else 2
+
+        if stripped.startswith("- "):
+            content = stripped[2:]
+            while len(list_stack) < level:
+                body.append('<ul class="report-list">')
+                list_stack.append(level)
+            close_lists(level)
+            item_html = escape(content)
+            if content.startswith("[") and "]" in content:
+                idx, rest = content.split("]", 1)
+                item_html = f'<span class="badge">{escape(idx[1:])}</span> {escape(rest.strip())}'
+            body.append(f"<li>{item_html}</li>")
+        else:
+            close_lists(0)
+            body.append(f'<p class="plain">{escape(stripped)}</p>')
+
+    close_card()
+
+    css = """
+    body {
+      margin: 0;
+      padding: 32px;
+      background: #0b1020;
+      color: #e8ecf3;
+      font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+    }
+    header {
+      margin-bottom: 24px;
+      padding: 24px 28px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, #17203a 0%, #0f172a 100%);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 30px;
+      line-height: 1.15;
+    }
+    header p {
+      margin: 0;
+      color: #9fb0d0;
+    }
+    .section {
+      margin: 18px 0;
+      padding: 18px 22px 20px;
+      border-radius: 18px;
+      background: #11192d;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.22);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+      letter-spacing: 0.01em;
+      color: #8ec5ff;
+    }
+    .report-list {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .report-list .report-list {
+      margin-top: 8px;
+      padding-left: 22px;
+    }
+    li {
+      margin: 6px 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .badge {
+      display: inline-block;
+      min-width: 1.7em;
+      padding: 0.05em 0.45em;
+      margin-right: 0.45em;
+      border-radius: 999px;
+      background: #223252;
+      color: #d8e6ff;
+      text-align: center;
+      font-weight: 700;
+      font-size: 0.88em;
+    }
+    .plain {
+      margin: 8px 0 0;
+      color: #d7deea;
+      white-space: pre-wrap;
+    }
+    .spacer {
+      height: 4px;
+    }
+    code, pre, .mono {
+      font-family: 'SFMono-Regular', ui-monospace, Menlo, Consolas, monospace;
+    }
+    @media (max-width: 720px) {
+      body { padding: 14px; }
+      header, .section { padding: 16px; border-radius: 14px; }
+      h1 { font-size: 24px; }
+    }
+    """
+
+    return (
+        "<!doctype html>\n"
+        "<html lang=\"ru\">\n"
+        "<head>\n"
+        "  <meta charset=\"utf-8\">\n"
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        f"  <title>{escape(title)}</title>\n"
+        f"  <style>{css}</style>\n"
+        "</head>\n"
+        "<body>\n"
+        "  <div class=\"wrap\">\n"
+        f"    {''.join(body)}\n"
+        "  </div>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+def _write_html_report(html_path: Path, text: str, title: str) -> None:
+    html_path.parent.mkdir(parents=True, exist_ok=True)
+    html_path.write_text(_text_report_to_html(text, title), encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Analyze a replay run directory")
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--run-dir", help="Replay run directory containing positions.db and paper_trades.db")
     group.add_argument("--compare", nargs=2, metavar=("RUN1", "RUN2"), help="Compare two replay run directories")
     ap.add_argument("--top", type=int, default=10, help="How many winning/losing markets to show")
+    ap.add_argument("--html-out", help="Optional path to write an HTML version of the report")
     args = ap.parse_args()
 
     if args.compare:
-        _compare_runs(Path(args.compare[0]), Path(args.compare[1]))
+        text = _capture_compare_text(Path(args.compare[0]), Path(args.compare[1]))
+        print(text, end="")
+        if args.html_out:
+            _write_html_report(Path(args.html_out), text, "Replay run comparison")
         return
 
     data = _collect_run_data(Path(args.run_dir))
     try:
-        _print_single_run(data, args.top)
+        text = _capture_single_run_text(data, args.top)
+        print(text, end="")
+        if args.html_out:
+            title = f"Replay report, {data['run_dir'].name}"
+            _write_html_report(Path(args.html_out), text, title)
     finally:
         _close_data(data)
 
