@@ -627,6 +627,28 @@ def _representative_position(cur: sqlite3.Cursor, market_id: str) -> dict:
     )
 
 
+def _chart_token_for_market(cur: sqlite3.Cursor, market_id: str, fallback_token_id: str | None, fallback_outcome_name: str | None) -> dict:
+    row = _one(
+        cur,
+        """
+        select token_id, outcome_name
+        from dataset.tokens
+        where cast(market_id as text) = ?
+          and lower(trim(coalesce(outcome_name, ''))) = 'yes'
+        limit 1
+        """,
+        (market_id,),
+    )
+    if row:
+        row["basis"] = "yes_token"
+        return row
+    return {
+        "token_id": fallback_token_id,
+        "outcome_name": fallback_outcome_name or "n/a",
+        "basis": "position_token",
+    }
+
+
 def _token_price_path(tape_cur: sqlite3.Cursor | None, market_id: str, token_id: str) -> tuple[str, str]:
     if tape_cur is None or not token_id:
         return ("n/a", "n/a")
@@ -954,10 +976,16 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
 
     for idx, row in enumerate(rows, 1):
         rep = _representative_position(cur, str(row["market_id"]))
+        chart_token = _chart_token_for_market(
+            cur,
+            str(row["market_id"]),
+            str(rep.get("token_id") or "") or None,
+            rep.get("outcome_name"),
+        )
         hours_to_close = None
         if row.get("end_date_ts") is not None and row.get("first_opened_at") is not None:
             hours_to_close = (float(row["end_date_ts"]) - float(row["first_opened_at"])) / 3600.0
-        path_summary, spark = _token_price_path(tape_cur, str(row["market_id"]), str(rep.get("token_id") or ""))
+        path_summary, spark = _token_price_path(tape_cur, str(row["market_id"]), str(chart_token.get("token_id") or ""))
         category_weight = category_weights.get(row["category"])
 
         print(f"- [{idx}] {row['market_id']} | {_short_text(row['question'], 120)}")
@@ -982,10 +1010,15 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
             f" | pnl: {_fmt_money(row['pnl'])}"
             f" | avg entry: {_fmt_price(row['avg_entry_price'])}"
             f" | entry range: {_fmt_price(row['min_entry_price'])} → {_fmt_price(row['max_entry_price'])}"
-            f" | representative token: {rep.get('outcome_name') or 'n/a'}"
         )
-        print(f"  - price path: {path_summary}")
-        print(f"  - sparkline: {spark}")
+        print(
+            "  - "
+            f"filled token: {rep.get('outcome_name') or 'n/a'}"
+            f" | chart token: {chart_token.get('outcome_name') or 'n/a'}"
+            f" | chart basis: {chart_token.get('basis') or 'n/a'}"
+        )
+        print(f"  - price path ({chart_token.get('outcome_name') or 'n/a'} token): {path_summary}")
+        print(f"  - sparkline ({chart_token.get('outcome_name') or 'n/a'} token): {spark}")
 
 
 def _print_single_run(data: dict, top: int) -> None:
