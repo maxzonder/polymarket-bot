@@ -17,7 +17,12 @@ from config import BotConfig
 from execution.order_manager import OrderManager
 from execution.position_monitor import PositionMonitor
 from replay.offline_dryrun import OfflineDryRunState
-from replay.tape_feed import DEFAULT_TAPE_DB_PATH, iter_tape_batches, iter_tape_batches_db
+from replay.tape_feed import (
+    DEFAULT_TAPE_DB_PATH,
+    has_valid_tape_db,
+    iter_tape_batches,
+    iter_tape_batches_db,
+)
 from scripts.run_honest_replay import load_all_markets
 from strategy.market_scorer import MarketScorer
 from strategy.risk_manager import RiskManager
@@ -32,6 +37,7 @@ logger = setup_logger("tape_runner")
 @dataclass
 class TapeRunnerStats:
     batches: int = 0
+    empty_batches: int = 0
     trades: int = 0
     screener_cycles: int = 0
     candidates_seen: int = 0
@@ -121,7 +127,11 @@ class TapeDrivenDryRunRunner:
 
     def run(self) -> dict:
         t0 = time.monotonic()
-        use_tape_db = self.tape_db_path.exists()
+        use_tape_db = has_valid_tape_db(self.tape_db_path)
+        if self.tape_db_path.exists() and not use_tape_db:
+            logger.warning(
+                f"Tape DB path exists but is missing required schema, falling back to JSON tape: {self.tape_db_path}"
+            )
         logger.info(
             f"Tape-driven dryrun: {self.start} -> {self.end} | mode={self.mode} | "
             f"markets={len(self.market_ids)} tokens={len(self.token_ids)} batch_seconds={self.batch_seconds} "
@@ -152,7 +162,12 @@ class TapeDrivenDryRunRunner:
             self.stats.batches += 1
             self.stats.trades += len(batch.trades)
 
+            if not batch.trades:
+                self.stats.empty_batches += 1
+                continue
+
             with self._patched_runtime(batch.batch_end_ts):
+                cycle_context = self.order_manager.build_cycle_context()
                 candidates = self.screener.scan()
                 self.stats.screener_cycles += 1
                 self.stats.candidates_seen += len(candidates)
@@ -160,22 +175,23 @@ class TapeDrivenDryRunRunner:
                 placed = 0
                 for candidate in candidates:
                     if self.mc.scanner_entry and candidate.current_price <= self.mc.entry_price_max:
-                        placed += len(self.order_manager.process_scanner_entry(candidate))
+                        placed += len(self.order_manager.process_scanner_entry(candidate, context=cycle_context))
                     elif self.mc.use_resting_bids:
-                        placed += len(self.order_manager.process_candidate(candidate))
+                        placed += len(self.order_manager.process_candidate(candidate, context=cycle_context))
                 self.stats.orders_placed += placed
 
-                self.monitor._check_fills_dry_run()
-                self.monitor._update_peak_prices()
+                self.monitor._check_fills_dry_run(dirty_tokens=self.state.dirty_tokens)
+                self.monitor._update_peak_prices(dirty_tokens=self.state.dirty_tokens)
 
         elapsed = time.monotonic() - t0
         logger.info(
-            f"Tape runner finished in {elapsed:.1f}s | batches={self.stats.batches} trades={self.stats.trades} "
-            f"candidates={self.stats.candidates_seen} orders={self.stats.orders_placed}"
+            f"Tape runner finished in {elapsed:.1f}s | batches={self.stats.batches} empty_batches={self.stats.empty_batches} "
+            f"trades={self.stats.trades} candidates={self.stats.candidates_seen} orders={self.stats.orders_placed}"
         )
         return {
             "elapsed_s": elapsed,
             "batches": self.stats.batches,
+            "empty_batches": self.stats.empty_batches,
             "trades": self.stats.trades,
             "candidates_seen": self.stats.candidates_seen,
             "orders_placed": self.stats.orders_placed,

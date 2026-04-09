@@ -163,6 +163,7 @@ class ExposureManager:
         fill_price: float,
         fill_qty: float,
         fill_ts: Optional[int] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> Exposure:
         """
         Record a new fill for (market_id, token_id).
@@ -197,8 +198,10 @@ class ExposureManager:
             last_fill_at=now,
         )
 
-        conn = sqlite3.connect(self._db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
+        own_conn = conn is None
+        if conn is None:
+            conn = sqlite3.connect(self._db_path)
+            conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             INSERT INTO exposure_v1_1
                 (market_id, token_id, total_stake_usdc, total_qty, fill_count,
@@ -215,8 +218,9 @@ class ExposureManager:
             new_total_stake, new_total_qty, new_count,
             new_avg_price, first_at, now,
         ))
-        conn.commit()
-        conn.close()
+        if own_conn:
+            conn.commit()
+            conn.close()
 
         self._cache[(market_id, token_id)] = exp
         return exp

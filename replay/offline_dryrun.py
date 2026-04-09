@@ -42,10 +42,25 @@ class OfflineDryRunState:
         self,
         markets: dict[str, MarketMeta],
         tokens: dict[str, TokenSnapshot],
+        *,
+        initial_active_market_ids: Optional[set[str]] = None,
+        start_events: tuple[tuple[int, str], ...] = (),
+        end_events: tuple[tuple[int, str], ...] = (),
     ):
         self.markets = markets
         self.tokens = tokens
         self.now_ts: Optional[int] = None
+        self.dirty_tokens: set[str] = set()
+        self.dirty_markets: set[str] = set()
+        self._priced_market_ids: set[str] = set()
+        self._orderbook_cache: dict[str, Orderbook] = {}
+        self._initial_active_market_ids = set(initial_active_market_ids or set())
+        self._start_events = start_events
+        self._end_events = end_events
+        self._active_market_ids: set[str] = set(self._initial_active_market_ids)
+        self._start_event_idx = 0
+        self._end_event_idx = 0
+        self._active_synced_ts: Optional[int] = None
 
     @classmethod
     def from_rows(cls, rows: list[dict]) -> "OfflineDryRunState":
@@ -55,6 +70,9 @@ class OfflineDryRunState:
 
         markets: dict[str, MarketMeta] = {}
         tokens: dict[str, TokenSnapshot] = {}
+        initial_active_market_ids: set[str] = set()
+        start_events: list[tuple[int, str]] = []
+        end_events: list[tuple[int, str]] = []
 
         for market_id, market_rows in grouped.items():
             ordered = sorted(
@@ -64,7 +82,7 @@ class OfflineDryRunState:
             token_ids = tuple(str(row["token_id"]) for row in ordered)
             outcome_names = tuple(str(row.get("outcome_name") or "") for row in ordered)
             sample = ordered[0]
-            markets[market_id] = MarketMeta(
+            market_meta = MarketMeta(
                 market_id=market_id,
                 question=str(sample.get("question") or ""),
                 category=sample.get("category"),
@@ -81,6 +99,14 @@ class OfflineDryRunState:
                 token_ids=token_ids,
                 outcome_names=outcome_names,
             )
+            markets[market_id] = market_meta
+
+            if market_meta.start_date_ts is None:
+                initial_active_market_ids.add(market_id)
+            else:
+                start_events.append((market_meta.start_date_ts, market_id))
+            if market_meta.end_date_ts is not None:
+                end_events.append((market_meta.end_date_ts, market_id))
             for row in ordered:
                 token_id = str(row["token_id"])
                 tokens[token_id] = TokenSnapshot(
@@ -89,7 +115,13 @@ class OfflineDryRunState:
                     outcome_name=str(row.get("outcome_name") or ""),
                 )
 
-        return cls(markets=markets, tokens=tokens)
+        return cls(
+            markets=markets,
+            tokens=tokens,
+            initial_active_market_ids=initial_active_market_ids,
+            start_events=tuple(sorted(start_events)),
+            end_events=tuple(sorted(end_events)),
+        )
 
     @staticmethod
     def _outcome_sort_key(outcome_name: str) -> tuple[int, str]:
@@ -102,13 +134,20 @@ class OfflineDryRunState:
 
     def apply_batch(self, batch: TapeBatch) -> None:
         self.now_ts = batch.batch_end_ts
+        self.dirty_tokens = set()
+        self.dirty_markets = set()
         for trade in batch.trades:
             self.apply_trade(trade)
+        self._sync_active_markets(self.now_ts)
 
     def apply_trade(self, trade: TapeTrade) -> None:
         snap = self.tokens.get(trade.token_id)
         if snap is None:
             return
+        self.dirty_tokens.add(trade.token_id)
+        self.dirty_markets.add(trade.market_id)
+        self._priced_market_ids.add(trade.market_id)
+        self._orderbook_cache.pop(trade.token_id, None)
         snap.last_trade_ts = trade.timestamp
         snap.last_price = trade.price
         snap.recent_trades.append(
@@ -126,19 +165,27 @@ class OfflineDryRunState:
         return snap.last_price if snap is not None else None
 
     def get_orderbook(self, token_id: str) -> Orderbook:
+        cached = self._orderbook_cache.get(token_id)
+        if cached is not None:
+            return cached
+
         price = self.token_price(token_id)
         if price is None:
-            return Orderbook(token_id=token_id, bids=[], asks=[], best_bid=None, best_ask=None)
-        best_ask = float(price)
-        best_bid = max(0.0001, round(best_ask * 0.95, 6))
-        depth = max(50.0, round(10.0 / max(best_ask, 0.0001), 2))
-        return Orderbook(
-            token_id=token_id,
-            bids=[OrderbookLevel(price=best_bid, size=depth)],
-            asks=[OrderbookLevel(price=best_ask, size=depth)],
-            best_bid=best_bid,
-            best_ask=best_ask,
-        )
+            book = Orderbook(token_id=token_id, bids=[], asks=[], best_bid=None, best_ask=None)
+        else:
+            best_ask = float(price)
+            best_bid = max(0.0001, round(best_ask * 0.95, 6))
+            depth = max(50.0, round(10.0 / max(best_ask, 0.0001), 2))
+            book = Orderbook(
+                token_id=token_id,
+                bids=[OrderbookLevel(price=best_bid, size=depth)],
+                asks=[OrderbookLevel(price=best_ask, size=depth)],
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
+
+        self._orderbook_cache[token_id] = book
+        return book
 
     def get_last_trade_ts(self, market_id: str) -> Optional[int]:
         market = self.markets.get(str(market_id))
@@ -172,12 +219,12 @@ class OfflineDryRunState:
         if self.now_ts is None:
             return []
 
+        self._sync_active_markets(self.now_ts)
+        candidate_market_ids = self._active_market_ids & self._priced_market_ids
+
         markets: list[MarketInfo] = []
-        for market in self.markets.values():
-            if market.start_date_ts is not None and market.start_date_ts > self.now_ts:
-                continue
-            if market.end_date_ts is not None and market.end_date_ts <= self.now_ts:
-                continue
+        for market_id in sorted(candidate_market_ids):
+            market = self.markets[market_id]
             if market.volume_usdc < volume_min or market.volume_usdc > volume_max:
                 continue
 
@@ -219,6 +266,26 @@ class OfflineDryRunState:
                 )
             )
         return markets
+
+    def _sync_active_markets(self, ts: int) -> None:
+        ts = int(ts)
+        if self._active_synced_ts is not None and ts < self._active_synced_ts:
+            self._active_market_ids = set(self._initial_active_market_ids)
+            self._start_event_idx = 0
+            self._end_event_idx = 0
+            self._active_synced_ts = None
+
+        while self._start_event_idx < len(self._start_events) and self._start_events[self._start_event_idx][0] <= ts:
+            _start_ts, market_id = self._start_events[self._start_event_idx]
+            self._active_market_ids.add(market_id)
+            self._start_event_idx += 1
+
+        while self._end_event_idx < len(self._end_events) and self._end_events[self._end_event_idx][0] <= ts:
+            _end_ts, market_id = self._end_events[self._end_event_idx]
+            self._active_market_ids.discard(market_id)
+            self._end_event_idx += 1
+
+        self._active_synced_ts = ts
 
     def _derive_yes_price(self, market: MarketMeta) -> Optional[float]:
         for token_id, outcome_name in zip(market.token_ids, market.outcome_names):

@@ -39,6 +39,36 @@ class TradeFileRef:
 DEFAULT_TAPE_DB_PATH = DATA_DIR / "historical_tape.db"
 
 
+def has_valid_tape_db(tape_db_path: Path = DEFAULT_TAPE_DB_PATH) -> bool:
+    if not tape_db_path.exists():
+        return False
+    try:
+        if tape_db_path.stat().st_size <= 0:
+            return False
+    except OSError:
+        return False
+
+    try:
+        conn = sqlite3.connect(tape_db_path)
+        try:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='tape'"
+            ).fetchone()
+            if table is None:
+                return False
+
+            cols = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_info(tape)")
+            }
+            required = {"timestamp", "market_id", "token_id", "price", "size", "side"}
+            return required.issubset(cols)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
 def discover_trade_files(database_dir: Path = DATABASE_DIR) -> list[TradeFileRef]:
     refs: list[TradeFileRef] = []
     if not database_dir.exists():

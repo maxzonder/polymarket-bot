@@ -48,6 +48,50 @@ MIN_TOP_BOOK_TOKENS = 1.0
 EPS = 1e-9
 
 
+@dataclass
+class ExecutionCycleContext:
+    open_position_keys: set[tuple[str, str]]
+    open_position_tokens: set[str]
+    live_resting_market_ids: set[str]
+    live_resting_tokens: set[str]
+    cluster_live_markets: dict[str, set[str]]
+    free_balance: Optional[float] = None
+
+    @property
+    def open_position_count(self) -> int:
+        return len(self.open_position_keys)
+
+    def has_live_or_open_token(self, token_id: str) -> bool:
+        return token_id in self.live_resting_tokens or token_id in self.open_position_tokens
+
+    def live_cluster_count(self, cluster_key: Optional[str]) -> int:
+        if not cluster_key:
+            return 0
+        return len(self.cluster_live_markets.get(cluster_key, set()))
+
+    def note_live_resting_order(
+        self,
+        *,
+        market_id: str,
+        token_id: str,
+        neg_risk_group_id: Optional[str],
+        reserved_usdc: float,
+    ) -> None:
+        self.live_resting_market_ids.add(market_id)
+        self.live_resting_tokens.add(token_id)
+        if neg_risk_group_id:
+            self.cluster_live_markets.setdefault(neg_risk_group_id, set()).add(market_id)
+        if self.free_balance is not None:
+            self.free_balance -= float(reserved_usdc)
+
+    def note_immediate_fill(self, *, market_id: str, token_id: str, stake_usdc: float) -> None:
+        key = (market_id, token_id)
+        self.open_position_keys.add(key)
+        self.open_position_tokens.add(token_id)
+        if self.free_balance is not None:
+            self.free_balance -= float(stake_usdc)
+
+
 def _init_positions_db(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS resting_orders (
@@ -259,6 +303,32 @@ class OrderManager:
         conn.close()
         return float(row["cash_balance"]) if row else self.config.paper_initial_balance_usdc
 
+    def build_cycle_context(self) -> ExecutionCycleContext:
+        conn = self._conn()
+        open_rows = conn.execute(
+            "SELECT market_id, token_id FROM positions WHERE status='open'"
+        ).fetchall()
+        live_rows = conn.execute(
+            "SELECT market_id, token_id, neg_risk_group_id FROM resting_orders WHERE status='live'"
+        ).fetchall()
+        balance = pb.get_balance(conn) if self.config.dry_run else None
+        conn.close()
+
+        cluster_live_markets: dict[str, set[str]] = {}
+        for row in live_rows:
+            cluster_key = row["neg_risk_group_id"]
+            if cluster_key:
+                cluster_live_markets.setdefault(str(cluster_key), set()).add(str(row["market_id"]))
+
+        return ExecutionCycleContext(
+            open_position_keys={(str(row["market_id"]), str(row["token_id"])) for row in open_rows},
+            open_position_tokens={str(row["token_id"]) for row in open_rows},
+            live_resting_market_ids={str(row["market_id"]) for row in live_rows},
+            live_resting_tokens={str(row["token_id"]) for row in live_rows},
+            cluster_live_markets=cluster_live_markets,
+            free_balance=(float(balance["free_balance"]) if balance is not None else None),
+        )
+
     def _log_scan(
         self,
         conn: sqlite3.Connection,
@@ -350,7 +420,11 @@ class OrderManager:
 
     # ── Entry ─────────────────────────────────────────────────────────────────
 
-    def process_candidate(self, candidate: EntryCandidate) -> list[OrderResult]:
+    def process_candidate(
+        self,
+        candidate: EntryCandidate,
+        context: Optional[ExecutionCycleContext] = None,
+    ) -> list[OrderResult]:
         """
         Place BUY orders for a candidate using "max acceptable price" tier semantics.
 
@@ -363,6 +437,9 @@ class OrderManager:
         results: list[OrderResult] = []
         now = int(time.time())
         expires_at = 0
+
+        if context is None:
+            context = self.build_cycle_context()
 
         conn = self._conn()
         active_prices = self._get_active_resting_prices(conn, candidate.token_id)
@@ -430,7 +507,7 @@ class OrderManager:
                 token_id=candidate.token_id,
                 entry_price=price_level,
                 resolution_score=dummy_res,
-                open_positions=self._count_open_positions(conn),
+                open_positions=context.open_position_count,
                 market_score=candidate.market_score,
             )
             if sized is None:
@@ -438,15 +515,13 @@ class OrderManager:
                 self._log_scan(conn, candidate, price_level, "risk_rejected")
                 continue
 
-            if self._count_open_positions(conn) >= self.mc.max_open_positions:
+            if context.open_position_count >= self.mc.max_open_positions:
                 logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping")
                 self._log_scan(conn, candidate, price_level, "max_positions")
                 break
 
             if self.mc.max_resting_markets > 0:
-                n_resting_markets = conn.execute(
-                    "SELECT COUNT(DISTINCT market_id) FROM resting_orders WHERE status='live'"
-                ).fetchone()[0]
+                n_resting_markets = len(context.live_resting_market_ids)
                 if n_resting_markets >= self.mc.max_resting_markets:
                     logger.info(
                         f"Max resting markets reached ({n_resting_markets}/{self.mc.max_resting_markets}), skipping"
@@ -459,11 +534,7 @@ class OrderManager:
             if self.mc.max_resting_per_cluster > 0:
                 cluster_key = candidate.market_info.neg_risk_group_id
                 if cluster_key is not None:
-                    cluster_count = conn.execute(
-                        "SELECT COUNT(DISTINCT market_id) FROM resting_orders "
-                        "WHERE status='live' AND neg_risk_group_id=?",
-                        (cluster_key,),
-                    ).fetchone()[0]
+                    cluster_count = context.live_cluster_count(cluster_key)
                     if cluster_count >= self.mc.max_resting_per_cluster:
                         logger.debug(
                             f"Cluster cap: market {candidate.market_info.market_id} "
@@ -473,10 +544,15 @@ class OrderManager:
                         continue
 
             if self.config.dry_run:
-                bal = pb.get_balance(conn)
-                if bal["free_balance"] < sized.stake_usdc:
+                free_balance = context.free_balance
+                if free_balance is not None and free_balance < sized.stake_usdc:
+                    bal = {
+                        "free_balance": free_balance,
+                        "cash_balance": self.get_cash_balance(),
+                        "reserved_resting": 0.0,
+                    }
                     logger.info(
-                        f"Balance gate: free=${bal['free_balance']:.4f} < "
+                        f"Balance gate: free=${free_balance:.4f} < "
                         f"stake=${sized.stake_usdc:.4f} — skipping"
                     )
                     self._log_scan(conn, candidate, price_level, "balance_exhausted")
@@ -574,6 +650,11 @@ class OrderManager:
                         fill_quantity=order_qty,
                         outcome_name=candidate.outcome_name or "",
                     )
+                    context.note_immediate_fill(
+                        market_id=candidate.market_info.market_id,
+                        token_id=candidate.token_id,
+                        stake_usdc=estimated_fill_cost,
+                    )
                     result.status = "matched"
                     result.filled_size = order_qty
                     logger.info(
@@ -583,6 +664,12 @@ class OrderManager:
                         f"tier={ms_tier} score={candidate.total_score:.3f} order_id={result.order_id}{neg_risk_tag}"
                     )
                 else:
+                    context.note_live_resting_order(
+                        market_id=candidate.market_info.market_id,
+                        token_id=candidate.token_id,
+                        neg_risk_group_id=candidate.market_info.neg_risk_group_id,
+                        reserved_usdc=price_level * order_qty,
+                    )
                     logger.info(
                         f"Placed BUY tier: {candidate.market_info.question[:50]!r} "
                         f"token={candidate.token_id[:16]} max=${price_level:.5f} "
@@ -599,7 +686,11 @@ class OrderManager:
         conn.close()
         return results
 
-    def process_scanner_entry(self, candidate: EntryCandidate) -> list[OrderResult]:
+    def process_scanner_entry(
+        self,
+        candidate: EntryCandidate,
+        context: Optional[ExecutionCycleContext] = None,
+    ) -> list[OrderResult]:
         """
         Immediate BUY for scanner-entry modes (fast_tp, balanced) when the token
         is already inside the valid entry zone.
@@ -607,21 +698,19 @@ class OrderManager:
         Executes at the real per-token best_ask from the orderbook — not at a
         pre-computed resting-bid ladder level. Does NOT iterate suggested_entry_levels.
         """
+        if context is None:
+            context = self.build_cycle_context()
+
         conn = self._conn()
         now = int(time.time())
 
-        if self._count_open_positions(conn) >= self.mc.max_open_positions:
+        if context.open_position_count >= self.mc.max_open_positions:
             logger.info(f"Max open positions reached ({self.mc.max_open_positions}), skipping scanner entry")
             conn.close()
             return []
 
         # Dedupe: skip if there is already a live resting order or open position on this token.
-        existing = conn.execute(
-            "SELECT 1 FROM resting_orders WHERE token_id=? AND status='live' "
-            "UNION SELECT 1 FROM positions WHERE token_id=? AND status='open' LIMIT 1",
-            (candidate.token_id, candidate.token_id),
-        ).fetchone()
-        if existing:
+        if context.has_live_or_open_token(candidate.token_id):
             logger.debug(f"Scanner entry: token {candidate.token_id[:16]} already has live order or open position — skipping")
             conn.close()
             return []
@@ -661,7 +750,7 @@ class OrderManager:
             token_id=candidate.token_id,
             entry_price=execution_price,
             resolution_score=dummy_res,
-            open_positions=self._count_open_positions(conn),
+            open_positions=context.open_position_count,
             market_score=candidate.market_score,
         )
         if sized is None:
@@ -671,10 +760,15 @@ class OrderManager:
 
         # Paper balance gate (dry_run only)
         if self.config.dry_run:
-            bal = pb.get_balance(conn)
-            if bal["free_balance"] < sized.stake_usdc:
+            free_balance = context.free_balance
+            if free_balance is not None and free_balance < sized.stake_usdc:
+                bal = {
+                    "free_balance": free_balance,
+                    "cash_balance": self.get_cash_balance(),
+                    "reserved_resting": 0.0,
+                }
                 logger.info(
-                    f"Balance gate (scanner): free=${bal['free_balance']:.4f} < "
+                    f"Balance gate (scanner): free=${free_balance:.4f} < "
                     f"stake=${sized.stake_usdc:.4f} — skipping"
                 )
                 self._maybe_send_balance_alert(bal)
@@ -714,6 +808,12 @@ class OrderManager:
                 candidate_id=candidate.candidate_id or None,
                 outcome_name=candidate.outcome_name or "",
                 neg_risk_group_id=candidate.market_info.neg_risk_group_id,
+            )
+            context.note_live_resting_order(
+                market_id=candidate.market_info.market_id,
+                token_id=candidate.token_id,
+                neg_risk_group_id=candidate.market_info.neg_risk_group_id,
+                reserved_usdc=execution_price * sized.token_quantity,
             )
             logger.info(
                 f"Scanner BUY: {candidate.market_info.question[:50]!r} "
@@ -895,13 +995,16 @@ class OrderManager:
         fill_price: float,
         fill_quantity: float,
         outcome_name: str = "",
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
         """Apply a BUY fill delta to the accumulated open position."""
         import uuid
 
         now = int(time.time())
         stake_usdc = fill_price * fill_quantity
-        conn = self._conn()
+        own_conn = conn is None
+        if conn is None:
+            conn = self._conn()
 
         resting = conn.execute(
             "SELECT size, filled_quantity, status FROM resting_orders WHERE order_id=?",
@@ -944,10 +1047,11 @@ class OrderManager:
         self._reconcile_tp_orders(conn, position_id, token_id, market_id)
         pos = conn.execute("SELECT * FROM positions WHERE position_id=?", (position_id,)).fetchone()
 
-        conn.commit()
-        conn.close()
+        self.em.record_fill(market_id, token_id, fill_price, fill_quantity, fill_ts=now, conn=conn)
 
-        self.em.record_fill(market_id, token_id, fill_price, fill_quantity, fill_ts=now)
+        if own_conn:
+            conn.commit()
+            conn.close()
 
         logger.info(
             f"Position accumulated: {position_id[:8]} token={token_id[:16]} "
@@ -955,10 +1059,18 @@ class OrderManager:
             f"total_qty={float(pos['token_quantity']):.2f} avg_entry=${float(pos['entry_price']):.5f}"
         )
 
-    def on_tp_filled(self, order_id: str, fill_price: float, fill_quantity: float) -> None:
+    def on_tp_filled(
+        self,
+        order_id: str,
+        fill_price: float,
+        fill_quantity: float,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
         """Called when a TP SELL order gets filled. Accumulates partial PnL into position."""
         now = int(time.time())
-        conn = self._conn()
+        own_conn = conn is None
+        if conn is None:
+            conn = self._conn()
 
         # Determine new cumulative fill and whether the order is fully matched.
         tp_row = conn.execute(
@@ -966,7 +1078,8 @@ class OrderManager:
             (order_id,),
         ).fetchone()
         if tp_row is None:
-            conn.close()
+            if own_conn:
+                conn.close()
             return
         new_filled = float(tp_row["filled_quantity"] or 0) + fill_quantity
         is_done = new_filled >= float(tp_row["sell_quantity"]) * 0.99
@@ -1002,14 +1115,22 @@ class OrderManager:
                 f"cumulative={new_filled:.2f}/{float(tp_row['sell_quantity']):.2f} "
                 f"pnl=${pnl:.4f}"
             )
-        conn.commit()
-        conn.close()
+        if own_conn:
+            conn.commit()
+            conn.close()
 
-    def on_market_resolved(self, token_id: str, is_winner: bool) -> None:
+    def on_market_resolved(
+        self,
+        token_id: str,
+        is_winner: bool,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
         """Called when a market resolves. Close all positions for this token."""
         resolution_price = 1.0 if is_winner else 0.0
         now = int(time.time())
-        conn = self._conn()
+        own_conn = conn is None
+        if conn is None:
+            conn = self._conn()
 
         positions = conn.execute(
             "SELECT * FROM positions WHERE token_id=? AND status='open'",
@@ -1090,8 +1211,9 @@ class OrderManager:
                     (row["order_id"],),
                 )
 
-        conn.commit()
-        conn.close()
+        if own_conn:
+            conn.commit()
+            conn.close()
 
         self.clob.paper_record_resolution(token_id, 1.0 if is_winner else 0.0)
 

@@ -75,6 +75,10 @@ class PositionMonitor:
         self._check_resolutions()
         self._update_peak_prices()
 
+    @staticmethod
+    def _should_check_token(token_id: str, dirty_tokens: Optional[set[str]]) -> bool:
+        return dirty_tokens is None or token_id in dirty_tokens
+
     # ── Fill detection ────────────────────────────────────────────────────────
 
     def _check_fills_real(self) -> None:
@@ -145,7 +149,7 @@ class PositionMonitor:
 
         conn.close()
 
-    def _check_fills_dry_run(self) -> None:
+    def _check_fills_dry_run(self, dirty_tokens: Optional[set[str]] = None) -> None:
         """
         Simulate fills by checking current orderbook prices against our orders.
 
@@ -153,131 +157,133 @@ class PositionMonitor:
         SELL fill: current best_bid >= our sell price
         """
         conn = self._conn()
+        try:
+            resting_live = conn.execute(
+                "SELECT * FROM resting_orders WHERE status='live'"
+            ).fetchall()
 
-        # Check resting BUY orders
-        resting_live = conn.execute(
-            "SELECT * FROM resting_orders WHERE status='live'"
-        ).fetchall()
+            for order in resting_live:
+                token_id = str(order["token_id"])
+                if not self._should_check_token(token_id, dirty_tokens):
+                    continue
 
-        for order in resting_live:
-            token_id = order["token_id"]
-            bid_price = float(order["price"])
-            order_size = float(order["size"])
-            filled_so_far = float(order["filled_quantity"] or 0)
-            remaining = order_size - filled_so_far
-            if remaining < 0.0001:
-                continue  # shouldn't happen but guard anyway
+                bid_price = float(order["price"])
+                order_size = float(order["size"])
+                filled_so_far = float(order["filled_quantity"] or 0)
+                remaining = order_size - filled_so_far
+                if remaining < 0.0001:
+                    continue
 
-            try:
-                book = get_orderbook(token_id)
-            except Exception:
-                continue
+                try:
+                    book = get_orderbook(token_id)
+                except Exception:
+                    continue
 
-            best_ask = book.best_ask
-            if best_ask is None or best_ask > bid_price:
-                continue
+                best_ask = book.best_ask
+                if best_ask is None or best_ask > bid_price:
+                    continue
 
-            available_depth = book.ask_depth_at(bid_price)
-            this_fill = min(remaining, available_depth)
-            if this_fill < 0.0001:
-                continue  # no real depth at this level — skip
+                available_depth = book.ask_depth_at(bid_price)
+                this_fill = min(remaining, available_depth)
+                if this_fill < 0.0001:
+                    continue
 
-            new_filled = filled_so_far + this_fill
+                new_filled = filled_so_far + this_fill
+                self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
+                conn.execute(
+                    "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
+                    (new_filled, order["order_id"]),
+                )
+                self.om.on_entry_filled(
+                    order_id=order["order_id"],
+                    token_id=token_id,
+                    market_id=order["market_id"],
+                    fill_price=bid_price,
+                    fill_quantity=this_fill,
+                    outcome_name=order["outcome_name"] or "",
+                    conn=conn,
+                )
+                logger.info(
+                    f"[DRY] BUY fill: {order['order_id'][:8]} "
+                    f"@ ${bid_price:.5f} delta={this_fill:.2f} cumulative={new_filled:.2f}/{order_size:.2f} "
+                    f"({100*new_filled/order_size:.0f}%)"
+                )
 
-            self.clob.paper_simulate_fill(order["order_id"], best_ask, fill_size=new_filled)
-            conn.execute(
-                "UPDATE resting_orders SET filled_quantity=? WHERE order_id=?",
-                (new_filled, order["order_id"]),
-            )
+            tp_live = conn.execute(
+                "SELECT * FROM tp_orders WHERE status='live'"
+            ).fetchall()
+
+            for tp in tp_live:
+                token_id = str(tp["token_id"])
+                if not self._should_check_token(token_id, dirty_tokens):
+                    continue
+
+                sell_price = float(tp["sell_price"])
+                filled_so_far = float(tp["filled_quantity"] or 0.0)
+                remaining = float(tp["sell_quantity"]) - filled_so_far
+                if remaining < 0.0001:
+                    continue
+                try:
+                    book = get_orderbook(token_id)
+                except Exception:
+                    continue
+
+                best_bid = book.best_bid
+                if best_bid is not None and best_bid >= sell_price:
+                    available_bid_depth = book.bid_depth_at(sell_price)
+                    fill_qty = min(remaining, available_bid_depth)
+                    if fill_qty < 0.0001:
+                        continue
+                    new_filled = filled_so_far + fill_qty
+                    self.clob.paper_simulate_fill(tp["order_id"], best_bid, fill_size=new_filled)
+                    self.om.on_tp_filled(tp["order_id"], sell_price, fill_qty, conn=conn)
+                    logger.info(
+                        f"[DRY] Simulated SELL fill: {tp['order_id'][:8]} "
+                        f"{tp['label']} @ ${sell_price:.5f} qty={fill_qty:.2f} "
+                        f"(bid=${best_bid:.5f} depth={available_bid_depth:.2f})"
+                    )
+        finally:
             conn.commit()
             conn.close()
-            self.om.on_entry_filled(
-                order_id=order["order_id"],
-                token_id=token_id,
-                market_id=order["market_id"],
-                fill_price=bid_price,
-                fill_quantity=this_fill,
-                outcome_name=order["outcome_name"] or "",
-            )
-            logger.info(
-                f"[DRY] BUY fill: {order['order_id'][:8]} "
-                f"@ ${bid_price:.5f} delta={this_fill:.2f} cumulative={new_filled:.2f}/{order_size:.2f} "
-                f"({100*new_filled/order_size:.0f}%)"
-            )
-            conn = self._conn()
-
-        # Check TP SELL orders
-        tp_live = conn.execute(
-            "SELECT * FROM tp_orders WHERE status='live'"
-        ).fetchall()
-
-        for tp in tp_live:
-            token_id = tp["token_id"]
-            sell_price = float(tp["sell_price"])
-            filled_so_far = float(tp["filled_quantity"] or 0.0)
-            remaining = float(tp["sell_quantity"]) - filled_so_far
-            if remaining < 0.0001:
-                continue
-            try:
-                book = get_orderbook(token_id)
-            except Exception:
-                continue
-
-            best_bid = book.best_bid
-            if best_bid is not None and best_bid >= sell_price:
-                # Cap fill quantity at available bid depth — same realism principle as BUY side.
-                available_bid_depth = book.bid_depth_at(sell_price)
-                fill_qty = min(remaining, available_bid_depth)
-                if fill_qty < 0.0001:
-                    continue  # no real bid depth at sell level — skip
-                new_filled = filled_so_far + fill_qty
-                self.clob.paper_simulate_fill(tp["order_id"], best_bid, fill_size=new_filled)
-                conn.close()
-                self.om.on_tp_filled(tp["order_id"], sell_price, fill_qty)
-                logger.info(
-                    f"[DRY] Simulated SELL fill: {tp['order_id'][:8]} "
-                    f"{tp['label']} @ ${sell_price:.5f} qty={fill_qty:.2f} "
-                    f"(bid=${best_bid:.5f} depth={available_bid_depth:.2f})"
-                )
-                conn = self._conn()
-
-        conn.close()
 
     # ── Peak price tracking ───────────────────────────────────────────────────
 
-    def _update_peak_prices(self) -> None:
+    def _update_peak_prices(self, dirty_tokens: Optional[set[str]] = None) -> None:
         """
         For each open position, fetch current best_bid and update peak_price / peak_x
         if the current price exceeds the stored peak.
         Called after every fill-check cycle.
         """
         conn = self._conn()
-        open_pos = conn.execute(
-            "SELECT position_id, token_id, entry_price, peak_price FROM positions WHERE status='open'"
-        ).fetchall()
-        conn.close()
+        try:
+            open_pos = conn.execute(
+                "SELECT position_id, token_id, entry_price, peak_price FROM positions WHERE status='open'"
+            ).fetchall()
 
-        for pos in open_pos:
-            token_id   = pos["token_id"]
-            entry_price = float(pos["entry_price"])
-            current_peak = float(pos["peak_price"] or 0.0)
-            if entry_price <= 0:
-                continue
-            try:
-                book = get_orderbook(token_id)
-                bid  = book.best_bid
-                if bid is None or bid <= current_peak:
+            for pos in open_pos:
+                token_id = str(pos["token_id"])
+                if not self._should_check_token(token_id, dirty_tokens):
                     continue
-                peak_x = bid / entry_price
-                conn = self._conn()
-                conn.execute(
-                    "UPDATE positions SET peak_price=?, peak_x=? WHERE position_id=?",
-                    (bid, round(peak_x, 4), pos["position_id"]),
-                )
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
+
+                entry_price = float(pos["entry_price"])
+                current_peak = float(pos["peak_price"] or 0.0)
+                if entry_price <= 0:
+                    continue
+                try:
+                    book = get_orderbook(token_id)
+                    bid = book.best_bid
+                    if bid is None or bid <= current_peak:
+                        continue
+                    peak_x = bid / entry_price
+                    conn.execute(
+                        "UPDATE positions SET peak_price=?, peak_x=? WHERE position_id=?",
+                        (bid, round(peak_x, 4), pos["position_id"]),
+                    )
+                except Exception:
+                    pass
+        finally:
+            conn.commit()
+            conn.close()
 
     # ── Resolution detection ──────────────────────────────────────────────────
 

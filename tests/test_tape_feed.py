@@ -6,7 +6,13 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from replay.tape_feed import discover_trade_files, iter_global_tape, iter_tape_batches, iter_tape_batches_db
+from replay.tape_feed import (
+    discover_trade_files,
+    has_valid_tape_db,
+    iter_global_tape,
+    iter_tape_batches,
+    iter_tape_batches_db,
+)
 
 
 class TapeFeedTests(unittest.TestCase):
@@ -125,6 +131,23 @@ class TapeFeedTests(unittest.TestCase):
             self.assertEqual([t.timestamp for t in batches[0].trades], [100, 110, 130])
             self.assertEqual([t.token_id for t in batches[0].trades], ["tokA", "tokB", "tokA"])
             self.assertEqual(len(batches[1].trades), 0)
+
+    def test_has_valid_tape_db_rejects_empty_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "historical_tape.db"
+            db_path.write_text("", encoding="utf-8")
+            self.assertFalse(has_valid_tape_db(db_path))
+
+    def test_has_valid_tape_db_accepts_expected_schema(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "historical_tape.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE tape (timestamp INTEGER, market_id TEXT, token_id TEXT, price REAL, size REAL, side TEXT, source_file_id INTEGER, seq INTEGER)"
+            )
+            conn.commit()
+            conn.close()
+            self.assertTrue(has_valid_tape_db(db_path))
 
 
 if __name__ == "__main__":
