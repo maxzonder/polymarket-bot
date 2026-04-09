@@ -115,20 +115,34 @@ class TapeDrivenDryRunRunner:
 
         self.stats = TapeRunnerStats()
         self._resolved_market_ids: set[str] = set()
+        # Sorted list of (end_date_ts, market_id) for O(log n) expiry scan.
+        self._expiry_events: list[tuple[int, str]] = sorted(
+            (m.end_date_ts, mid)
+            for mid, m in self.state.markets.items()
+            if m.end_date_ts is not None
+        )
+        self._expiry_idx: int = 0
 
     def _resolve_expired_markets(self, now_ts: int) -> int:
         """
         Resolve markets whose end_date_ts has passed using dataset is_winner labels.
-        Called each batch so positions are closed and capital returned as simulation advances.
+        Uses a pre-sorted expiry event list for O(expired_count) work per call
+        instead of O(total_markets) — critical with 23k+ market universes.
         Returns count of token resolutions triggered.
         """
         resolved = 0
-        for market_id, market in self.state.markets.items():
+        while (
+            self._expiry_idx < len(self._expiry_events)
+            and self._expiry_events[self._expiry_idx][0] <= now_ts
+        ):
+            end_ts, market_id = self._expiry_events[self._expiry_idx]
+            self._expiry_idx += 1
             if market_id in self._resolved_market_ids:
                 continue
-            if market.end_date_ts is None or now_ts < market.end_date_ts:
-                continue
             self._resolved_market_ids.add(market_id)
+            market = self.state.markets.get(market_id)
+            if market is None:
+                continue
             for token_id in market.token_ids:
                 snap = self.state.tokens.get(token_id)
                 if snap is None:

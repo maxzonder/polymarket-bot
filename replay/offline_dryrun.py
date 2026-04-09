@@ -226,7 +226,7 @@ class OfflineDryRunState:
         candidate_market_ids = self._active_market_ids & self._priced_market_ids
 
         markets: list[MarketInfo] = []
-        for market_id in sorted(candidate_market_ids):
+        for market_id in candidate_market_ids:
             market = self.markets[market_id]
             if market.volume_usdc < volume_min or market.volume_usdc > volume_max:
                 continue

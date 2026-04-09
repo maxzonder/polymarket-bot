@@ -205,6 +205,9 @@ def _populate_temp_filter_table(conn: sqlite3.Connection, table_name: str, value
     conn.executemany(f"INSERT INTO {table_name}(id) VALUES (?)", ((value,) for value in sorted(values)))
 
 
+_IN_CLAUSE_TOKEN_THRESHOLD = 2000
+
+
 def iter_global_tape_db(
     *,
     start_ts: int,
@@ -213,30 +216,54 @@ def iter_global_tape_db(
     selected_tokens: Optional[set[str]] = None,
     selected_markets: Optional[set[str]] = None,
 ) -> Iterator[TapeTrade]:
+    """
+    Stream trades from the historical sqlite tape in timestamp order.
+
+    Filter strategy:
+    - Small token universe (≤ _IN_CLAUSE_TOKEN_THRESHOLD): use idx_tape_token_ts
+      via IN clause — one B-tree lookup per token, no sort needed.
+    - Large token universe: scan idx_tape_ts (timestamp range, one sequential pass),
+      filter in Python. Avoids N×46k B-tree lookups when most tokens have no trades.
+    """
     conn = sqlite3.connect(tape_db_path)
     conn.row_factory = sqlite3.Row
 
-    if selected_markets:
-        _populate_temp_filter_table(conn, "selected_markets", selected_markets)
-    if selected_tokens:
-        _populate_temp_filter_table(conn, "selected_tokens", selected_tokens)
+    use_ts_scan = selected_tokens is not None and len(selected_tokens) > _IN_CLAUSE_TOKEN_THRESHOLD
 
-    where_parts = ["timestamp >= ?", "timestamp <= ?"]
-    params: list[object] = [int(start_ts), int(end_ts)]
+    if use_ts_scan:
+        # Sequential timestamp scan + Python filter: efficient for large token universes.
+        sql = (
+            "SELECT timestamp, market_id, token_id, price, size, side "
+            "FROM tape INDEXED BY idx_tape_ts "
+            "WHERE timestamp >= ? AND timestamp <= ?"
+        )
+        params: list[object] = [int(start_ts), int(end_ts)]
+    else:
+        if selected_markets:
+            _populate_temp_filter_table(conn, "selected_markets", selected_markets)
+        if selected_tokens:
+            _populate_temp_filter_table(conn, "selected_tokens", selected_tokens)
 
-    if selected_markets:
-        where_parts.append("market_id IN (SELECT id FROM selected_markets)")
-    if selected_tokens:
-        where_parts.append("token_id IN (SELECT id FROM selected_tokens)")
+        where_parts = ["timestamp >= ?", "timestamp <= ?"]
+        params = [int(start_ts), int(end_ts)]
+        if selected_markets:
+            where_parts.append("market_id IN (SELECT id FROM selected_markets)")
+        if selected_tokens:
+            where_parts.append("token_id IN (SELECT id FROM selected_tokens)")
+        sql = (
+            "SELECT timestamp, market_id, token_id, price, size, side "
+            "FROM tape WHERE " + " AND ".join(where_parts) + " "
+            "ORDER BY timestamp, market_id, token_id, source_file_id, seq"
+        )
 
-    sql = (
-        "SELECT timestamp, market_id, token_id, price, size, side "
-        "FROM tape WHERE " + " AND ".join(where_parts) + " "
-        "ORDER BY timestamp, market_id, token_id, source_file_id, seq"
-    )
     cur = conn.execute(sql, params)
     try:
         for row in cur:
+            if use_ts_scan:
+                if selected_tokens is not None and row["token_id"] not in selected_tokens:
+                    continue
+                if selected_markets is not None and row["market_id"] not in selected_markets:
+                    continue
             yield TapeTrade(
                 timestamp=int(row["timestamp"]),
                 market_id=str(row["market_id"]),
