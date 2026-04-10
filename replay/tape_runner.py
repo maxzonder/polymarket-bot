@@ -16,14 +16,13 @@ from api.clob_client import ClobClient
 from config import BotConfig
 from execution.order_manager import OrderManager
 from execution.position_monitor import PositionMonitor
-from replay.offline_dryrun import OfflineDryRunState
+from replay.offline_dryrun import OfflineDryRunState, load_all_markets
 from replay.tape_feed import (
     DEFAULT_TAPE_DB_PATH,
     has_valid_tape_db,
     iter_tape_batches,
     iter_tape_batches_db,
 )
-from replay.honest_replay import load_all_markets
 from strategy.market_scorer import MarketScorer
 from strategy.risk_manager import RiskManager
 from strategy.scorer import EntryFillScorer, ResolutionScorer

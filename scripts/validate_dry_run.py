@@ -25,7 +25,6 @@ from api.gamma_client import MarketInfo
 from config import BotConfig, FAST_TP_MODE, BIG_SWAN_MODE
 from execution.order_manager import OrderManager
 from execution.position_monitor import PositionMonitor
-from replay.honest_replay import simulate_token
 from strategy.risk_manager import RiskManager
 from strategy.screener import EntryCandidate
 
@@ -427,152 +426,6 @@ def scenario_real_mode_monitor_handles_partial_cumulative_fills() -> tuple[bool,
         return True, ""
 
 
-# ── Scenario 8: honest replay entry path + balance gate ─────────────────────
-
-def scenario_honest_replay_respects_balance_gate() -> tuple[bool, str]:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        positions_db = tmp_dir / "positions.db"
-        paper_db = tmp_dir / "paper.db"
-        trades_path = tmp_dir / "tok1.json"
-        trades_path.write_text(
-            json.dumps(
-                [
-                    {"timestamp": 1_700_000_000, "price": 0.20, "size": 100.0, "side": "BUY"},
-                    {"timestamp": 1_700_000_100, "price": 0.20, "size": 100.0, "side": "BUY"},
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        cfg = BotConfig(
-            mode="big_swan_mode",
-            dry_run=True,
-            private_key="fake",
-            paper_initial_balance_usdc=0.06,
-        )
-        clob = ClobClient(private_key="fake", dry_run=True, paper_db_path=paper_db)
-        risk = RiskManager(cfg.mode_config, balance_usdc=cfg.paper_initial_balance_usdc)
-        om_module.POSITIONS_DB = positions_db
-        om = OrderManager(cfg, clob, risk)
-
-        row = {
-            "token_id": "tok1",
-            "market_id": "mkt1",
-            "question": "Replay test?",
-            "outcome_name": "Yes",
-            "end_date": 1_700_100_000,
-            "start_date": 0,
-            "category": "crypto",
-            "volume": 1000.0,
-            "comment_count": 0,
-            "neg_risk": 0,
-            "neg_risk_market_id": None,
-            "is_winner": 0,
-        }
-
-        result = simulate_token(
-            row=row,
-            om=om,
-            clob=clob,
-            mc=cfg.mode_config,
-            risk=risk,
-            scorer=None,
-            positions_db_path=str(positions_db),
-            start_ts=1_700_000_000,
-            end_ts=1_700_050_000,
-            dead_market_hours=48.0,
-            trade_index={("mkt1", "tok1"): str(trades_path)},
-            activation_delay=0,
-            fill_fraction=1.0,
-            group_boost=1.0,
-        )
-
-        if result["status"] != "ok":
-            return False, f"Expected replay status=ok, got {result}"
-        if count_rows(str(positions_db), "resting_orders") != 1:
-            return False, "Expected replay to place exactly one resting bid under tight balance"
-        if count_rows(str(paper_db), "paper_orders") != 1:
-            return False, "Expected replay to create exactly one paper order under tight balance"
-        return True, ""
-
-
-def scenario_honest_replay_terminal_cleanup_cancels_paper_orders() -> tuple[bool, str]:
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        positions_db = tmp_dir / "positions.db"
-        paper_db = tmp_dir / "paper.db"
-        trades_path = tmp_dir / "tok1.json"
-        trades_path.write_text(
-            json.dumps(
-                [
-                    {"timestamp": 1_700_000_000, "price": 0.20, "size": 100.0, "side": "BUY"},
-                    {"timestamp": 1_700_000_100, "price": 0.20, "size": 100.0, "side": "SELL"},
-                ]
-            ),
-            encoding="utf-8",
-        )
-
-        cfg = BotConfig(
-            mode="big_swan_mode",
-            dry_run=True,
-            private_key="fake",
-            paper_initial_balance_usdc=1000.0,
-        )
-        clob = ClobClient(private_key="fake", dry_run=True, paper_db_path=paper_db)
-        risk = RiskManager(cfg.mode_config, balance_usdc=cfg.paper_initial_balance_usdc)
-        om_module.POSITIONS_DB = positions_db
-        om = OrderManager(cfg, clob, risk)
-
-        row = {
-            "token_id": "tok1",
-            "market_id": "mkt1",
-            "question": "Replay cancel sync?",
-            "outcome_name": "Yes",
-            "end_date": 1_700_100_000,
-            "start_date": 0,
-            "category": "crypto",
-            "volume": 1000.0,
-            "comment_count": 0,
-            "neg_risk": 0,
-            "neg_risk_market_id": None,
-            "is_winner": 0,
-        }
-
-        result = simulate_token(
-            row=row,
-            om=om,
-            clob=clob,
-            mc=cfg.mode_config,
-            risk=risk,
-            scorer=None,
-            positions_db_path=str(positions_db),
-            start_ts=1_700_000_000,
-            end_ts=1_700_050_000,
-            dead_market_hours=48.0,
-            trade_index={("mkt1", "tok1"): str(trades_path)},
-            activation_delay=0,
-            fill_fraction=1.0,
-            group_boost=1.0,
-        )
-
-        if result["status"] != "ok":
-            return False, f"Expected replay status=ok, got {result}"
-        cancelled_resting = count_rows(str(positions_db), "resting_orders", "status='cancelled'")
-        live_resting = count_rows(str(positions_db), "resting_orders", "status='live'")
-        cancelled_paper = count_rows(str(paper_db), "paper_orders", "side='BUY' AND status='cancelled'")
-        live_paper = count_rows(str(paper_db), "paper_orders", "side='BUY' AND status='live'")
-        if cancelled_resting == 0:
-            return False, "Expected terminal replay cleanup to cancel resting buys"
-        if live_resting != 0:
-            return False, f"Expected no live resting buys after cleanup, got {live_resting}"
-        if cancelled_paper != cancelled_resting:
-            return False, f"Expected cancelled paper BUY count={cancelled_resting}, got {cancelled_paper}"
-        if live_paper != 0:
-            return False, f"Expected no live paper BUY orders after cleanup, got {live_paper}"
-        return True, ""
-
-
 SCENARIOS = [
     ("scanner_entry_best_ask", scenario_scanner_entry_best_ask),
     ("resting_bid_uses_entry_levels", scenario_resting_bid_uses_entry_levels),
@@ -582,8 +435,6 @@ SCENARIOS = [
     ("tp_partial_fill_keeps_orders_live_until_full", scenario_tp_partial_fill_keeps_orders_live_until_full),
     ("resolution_uses_actual_moonbag_leg", scenario_resolution_uses_actual_moonbag_leg),
     ("real_mode_monitor_handles_partial_cumulative_fills", scenario_real_mode_monitor_handles_partial_cumulative_fills),
-    ("honest_replay_respects_balance_gate", scenario_honest_replay_respects_balance_gate),
-    ("honest_replay_terminal_cleanup_cancels_paper_orders", scenario_honest_replay_terminal_cleanup_cancels_paper_orders),
 ]
 
 
