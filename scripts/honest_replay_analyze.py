@@ -627,28 +627,6 @@ def _representative_position(cur: sqlite3.Cursor, market_id: str) -> dict:
     )
 
 
-def _chart_token_for_market(cur: sqlite3.Cursor, market_id: str, fallback_token_id: str | None, fallback_outcome_name: str | None) -> dict:
-    row = _one(
-        cur,
-        """
-        select token_id, outcome_name
-        from dataset.tokens
-        where cast(market_id as text) = ?
-          and lower(trim(coalesce(outcome_name, ''))) = 'yes'
-        limit 1
-        """,
-        (market_id,),
-    )
-    if row:
-        row["basis"] = "yes_token"
-        return row
-    return {
-        "token_id": fallback_token_id,
-        "outcome_name": fallback_outcome_name or "n/a",
-        "basis": "position_token",
-    }
-
-
 def _token_price_path(tape_cur: sqlite3.Cursor | None, market_id: str, token_id: str) -> tuple[str, str]:
     if tape_cur is None or not token_id:
         return ("n/a", "n/a")
@@ -980,19 +958,13 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
 
     for idx, row in enumerate(rows, 1):
         rep = _representative_position(cur, str(row["market_id"]))
-        chart_token = _chart_token_for_market(
-            cur,
-            str(row["market_id"]),
-            str(rep.get("token_id") or "") or None,
-            rep.get("outcome_name"),
-        )
         hours_to_close = None
         if row.get("end_date_ts") is not None and row.get("first_opened_at") is not None:
             hours_to_close = (float(row["end_date_ts"]) - float(row["first_opened_at"])) / 3600.0
         market_duration = None
         if row.get("start_date_ts") is not None and row.get("end_date_ts") is not None:
             market_duration = (float(row["end_date_ts"]) - float(row["start_date_ts"])) / 3600.0
-        path_summary, spark = _token_price_path(tape_cur, str(row["market_id"]), str(chart_token.get("token_id") or ""))
+        path_summary, spark = _token_price_path(tape_cur, str(row["market_id"]), str(rep.get("token_id") or ""))
         category_weight = category_weights.get(row["category"])
 
         print(f"- [{idx}] {row['market_id']} | {_short_text(row['question'], 120)}")
@@ -1019,20 +991,10 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
             f" | avg entry: {_fmt_price(row['avg_entry_price'])}"
             f" | entry range: {_fmt_price(row['min_entry_price'])} → {_fmt_price(row['max_entry_price'])}"
         )
-        token_label = chart_token.get('outcome_name') or 'n/a'
-        filled_label = rep.get('outcome_name') or 'n/a'
-        if chart_token.get('basis') == 'yes_token':
-            print(f"  - token: {token_label}")
-        else:
-            print(
-                "  - "
-                f"token: {token_label}"
-                f" | chart basis: {chart_token.get('basis') or 'n/a'}"
-            )
-        if filled_label != token_label:
-            print(f"  - filled token: {filled_label}")
-        print(f"  - price path ({chart_token.get('outcome_name') or 'n/a'} token): {path_summary}")
-        print(f"  - sparkline ({chart_token.get('outcome_name') or 'n/a'} token): {spark}")
+        token_label = rep.get('outcome_name') or 'n/a'
+        print(f"  - token: {token_label}")
+        print(f"  - price path ({token_label} token): {path_summary}")
+        print(f"  - sparkline ({token_label} token): {spark}")
 
 
 def _print_single_run(data: dict, top: int) -> None:
@@ -1182,11 +1144,12 @@ def _parse_section_items(lines: list[str]) -> list[dict[str, object]]:
 def _render_value_html(key: str, value: str) -> str:
     stripped = value.strip()
     key_norm = key.strip().lower()
-    if key_norm in {"token", "filled token"}:
+    if key_norm == "token":
         if stripped.lower() == "yes":
             return '<span class="token token-yes">Yes</span>'
         if stripped.lower() == "no":
             return '<span class="token token-no">No</span>'
+        return f'<span class="token token-generic">{escape(stripped)}</span>'
     return escape(value)
 
 
@@ -1508,6 +1471,11 @@ def _text_report_to_html(text: str, title: str) -> str:
       background: rgba(255, 99, 132, 0.16);
       color: #ff9db1;
       border: 1px solid rgba(255, 99, 132, 0.28);
+    }
+    .token-generic {
+      background: rgba(255, 255, 255, 0.06);
+      color: #d8e0ee;
+      border: 1px solid rgba(255, 255, 255, 0.18);
     }
     .mono-box, .spark-box {
       margin-top: 12px;
