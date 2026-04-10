@@ -781,6 +781,7 @@ def _top_neg_risk_groups(cur: sqlite3.Cursor, top: int) -> list[dict]:
     top_rows = _top_market_rows(cur, top, winners=True) + _top_market_rows(cur, top, winners=False)
     group_ids: list[str] = []
     seen: set[str] = set()
+    top_market_ids = sorted({str(row.get("market_id") or "").strip() for row in top_rows if str(row.get("market_id") or "").strip()})
     for row in top_rows:
         if int(row.get("neg_risk") or 0) != 1:
             continue
@@ -790,36 +791,73 @@ def _top_neg_risk_groups(cur: sqlite3.Cursor, top: int) -> list[dict]:
         seen.add(group_id)
         group_ids.append(group_id)
 
+    priority_sql = "when 0 then 0"
+    priority_params: tuple[object, ...] = ()
+    if top_market_ids:
+        priority_sql = f"when p.market_id in ({','.join('?' for _ in top_market_ids)}) then 0"
+        priority_params = tuple(top_market_ids)
+
     groups: list[dict] = []
     for group_id in group_ids:
         rows = _rows(
             cur,
-            """
+            f"""
             select
               p.market_id,
               coalesce(m.question, p.market_id) as question,
               round(sum(coalesce(p.realized_pnl, 0)), 6) as pnl,
               max(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) as is_winner,
               max(case when p.status='resolved' and coalesce(p.is_winner, 0)=0 then 1 else 0 end) as is_loser,
-              max(case when p.status='open' then 1 else 0 end) as is_open
+              max(case when p.status='open' then 1 else 0 end) as is_open,
+              count(p.position_id) as positions,
+              round(sum(coalesce(p.entry_size_usdc, 0)), 6) as buy
             from positions p
             left join dataset.markets m on cast(m.id as text) = p.market_id
             where coalesce(m.neg_risk, 0) = 1 and m.neg_risk_market_id = ?
             group by p.market_id, question
             order by
               case
-                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) = 1 then 0
-                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=0 then 1 else 0 end) = 1 then 1
-                else 2
+                {priority_sql}
+                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) = 1 then 1
+                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=0 then 1 else 0 end) = 1 then 2
+                else 3
               end,
               question collate nocase,
               p.market_id
             """,
-            (group_id,),
+            (group_id, *priority_params),
         )
         if rows:
             groups.append({"group_id": group_id, "rows": rows})
     return groups
+
+
+def _print_neg_risk_section(data: dict, top: int) -> None:
+    _print_section("neg-risk")
+    if not data.get("dataset_attached"):
+        _print_key_value("dataset metadata", "not available")
+        return
+
+    groups = _top_neg_risk_groups(data["cur"], top)
+    if not groups:
+        print("- none")
+        return
+
+    for group in groups:
+        badge = _fmt_neg_risk_badge(group.get("group_id"))
+        print(f"- {badge}:")
+        for idx, row in enumerate(group.get("rows", []), 1):
+            tags: list[str] = []
+            if float(row.get("buy") or 0) > 0:
+                tags.append("bet")
+            if int(row.get("is_winner") or 0) == 1:
+                tags.append("win")
+            elif float(row.get("buy") or 0) > 0 and int(row.get("is_loser") or 0) == 1:
+                tags.append("loss")
+            elif int(row.get("is_open") or 0) == 1:
+                tags.append("open")
+            tag_text = f" [{' | '.join(tags)}]" if tags else ""
+            print(f"  - {idx}. {row.get('question') or row.get('market_id') or 'n/a'}{tag_text}")
 
 
 def _print_key_value(label: str, value: str) -> None:
@@ -1145,6 +1183,7 @@ def _print_single_run(data: dict, top: int) -> None:
     _print_selection_profile(data)
     _print_market_cards(data, winners=True, top=top)
     _print_market_cards(data, winners=False, top=top)
+    _print_neg_risk_section(data, top)
 
 
 def _capture_single_run_text(data: dict, top: int) -> str:
@@ -1427,28 +1466,38 @@ def _render_section_html(title: str, lines: list[str]) -> str:
     return "".join(html)
 
 
-def _render_neg_risk_section(groups: list[dict]) -> str:
-    if not groups:
+def _render_neg_risk_section_from_text(items: list[dict[str, object]]) -> str:
+    if not items:
         return ""
     html = ['<section class="section"><h2>neg-risk</h2><div class="neg-risk-groups">']
-    for group in groups:
-        badge = _fmt_neg_risk_badge(group.get("group_id"))
+    for item in items:
+        badge = str(item.get("text") or "").rstrip(":")
+        children = [str(child) for child in item.get("children", [])]
         html.append(f'<div class="subcard neg-risk-group"><h3>{escape(badge)}</h3><ol class="neg-risk-list">')
-        for row in group.get("rows", []):
-            cls = "nr-open"
-            if int(row.get("is_winner") or 0) == 1:
+        for child in children:
+            m = re.match(r"^\d+\.\s+(.*?)(?:\s+\[(.*?)\])?$", child.strip())
+            if m:
+                question = m.group(1).strip()
+                tags = {tag.strip().lower() for tag in (m.group(2) or "").split("|") if tag.strip()}
+            else:
+                question = child.strip()
+                tags = set()
+            cls = "nr-neutral"
+            if "win" in tags:
                 cls = "nr-win"
-            elif int(row.get("is_loser") or 0) == 1:
+            elif "loss" in tags:
                 cls = "nr-loss"
-            html.append(
-                f'<li class="{cls}"><span class="nr-question">{escape(str(row.get("question") or row.get("market_id") or "n/a"))}</span></li>'
-            )
+            elif "bet" in tags:
+                cls = "nr-bet"
+            elif "open" in tags:
+                cls = "nr-open"
+            html.append(f'<li class="{cls}"><span class="nr-question">{escape(question)}</span></li>')
         html.append('</ol></div>')
     html.append('</div></section>')
     return ''.join(html)
 
 
-def _text_report_to_html(text: str, title: str, neg_risk_groups: list[dict] | None = None) -> str:
+def _text_report_to_html(text: str, title: str) -> str:
     report_name, header_lines, sections = _parse_text_report(text)
 
     header_rows: list[tuple[str, str]] = []
@@ -1468,10 +1517,10 @@ def _text_report_to_html(text: str, title: str, neg_risk_groups: list[dict] | No
         body.append("</section>")
 
     for section_title, section_lines in sections:
-        body.append(_render_section_html(section_title, section_lines))
-
-    if neg_risk_groups:
-        body.append(_render_neg_risk_section(neg_risk_groups))
+        if section_title.strip().lower() == "neg-risk":
+            body.append(_render_neg_risk_section_from_text(_parse_section_items(section_lines)))
+        else:
+            body.append(_render_section_html(section_title, section_lines))
 
     css = """
     :root {
@@ -1720,6 +1769,13 @@ def _text_report_to_html(text: str, title: str, neg_risk_groups: list[dict] | No
     .nr-open .nr-question {
       color: #d8e0ee;
     }
+    .nr-bet .nr-question {
+      color: #ffd84d;
+      font-weight: 700;
+    }
+    .nr-neutral .nr-question {
+      color: #9fb0d0;
+    }
     strong { font-weight: 800; }
     @media (max-width: 900px) {
       body { padding: 14px; }
@@ -1751,9 +1807,9 @@ def _text_report_to_html(text: str, title: str, neg_risk_groups: list[dict] | No
     )
 
 
-def _write_html_report(html_path: Path, text: str, title: str, neg_risk_groups: list[dict] | None = None) -> None:
+def _write_html_report(html_path: Path, text: str, title: str) -> None:
     html_path.parent.mkdir(parents=True, exist_ok=True)
-    html_path.write_text(_text_report_to_html(text, title, neg_risk_groups=neg_risk_groups), encoding="utf-8")
+    html_path.write_text(_text_report_to_html(text, title), encoding="utf-8")
 
 
 def main() -> None:
@@ -1778,8 +1834,7 @@ def main() -> None:
         print(text, end="")
         if args.html_out:
             title = f"Replay report, {data['run_dir'].name}"
-            neg_risk_groups = _top_neg_risk_groups(data["cur"], args.top)
-            _write_html_report(Path(args.html_out), text, title, neg_risk_groups=neg_risk_groups)
+            _write_html_report(Path(args.html_out), text, title)
     finally:
         _close_data(data)
 
