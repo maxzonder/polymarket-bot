@@ -58,7 +58,7 @@ def _write_runtime_snapshot(
             "output_dir": str(output_dir),
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
         },
-        "bot_config": asdict(config),
+        "bot_config": {**asdict(config), "mode_config": asdict(config.mode_config)},
     }
     (output_dir / "config_snapshot.json").write_text(
         json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True),
