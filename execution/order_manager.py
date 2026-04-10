@@ -86,10 +86,19 @@ class ExecutionCycleContext:
         if self.free_balance is not None:
             self.free_balance -= float(reserved_usdc)
 
-    def note_immediate_fill(self, *, market_id: str, token_id: str, stake_usdc: float) -> None:
+    def note_immediate_fill(
+        self,
+        *,
+        market_id: str,
+        token_id: str,
+        neg_risk_group_id: Optional[str],
+        stake_usdc: float,
+    ) -> None:
         key = (market_id, token_id)
         self.open_position_keys.add(key)
         self.open_position_tokens.add(token_id)
+        if neg_risk_group_id:
+            self.cluster_live_markets.setdefault(neg_risk_group_id, set()).add(market_id)
         if self.free_balance is not None:
             self.free_balance -= float(stake_usdc)
 
@@ -309,7 +318,12 @@ class OrderManager:
     def build_cycle_context(self) -> ExecutionCycleContext:
         conn = self._conn()
         open_rows = conn.execute(
-            "SELECT market_id, token_id FROM positions WHERE status='open'"
+            """
+            SELECT p.market_id, p.token_id, ro.neg_risk_group_id
+            FROM positions p
+            LEFT JOIN resting_orders ro ON ro.order_id = p.entry_order_id
+            WHERE p.status='open'
+            """
         ).fetchall()
         live_rows = conn.execute(
             "SELECT market_id, token_id, neg_risk_group_id FROM resting_orders WHERE status='live'"
@@ -319,6 +333,10 @@ class OrderManager:
 
         cluster_live_markets: dict[str, set[str]] = {}
         for row in live_rows:
+            cluster_key = row["neg_risk_group_id"]
+            if cluster_key:
+                cluster_live_markets.setdefault(str(cluster_key), set()).add(str(row["market_id"]))
+        for row in open_rows:
             cluster_key = row["neg_risk_group_id"]
             if cluster_key:
                 cluster_live_markets.setdefault(str(cluster_key), set()).add(str(row["market_id"]))
@@ -543,8 +561,12 @@ class OrderManager:
             if self.mc.max_resting_per_cluster > 0:
                 cluster_key = candidate.market_info.neg_risk_group_id
                 if cluster_key is not None:
-                    cluster_count = context.live_cluster_count(cluster_key)
-                    if cluster_count >= self.mc.max_resting_per_cluster:
+                    cluster_markets = context.cluster_live_markets.get(cluster_key, set())
+                    cluster_count = len(cluster_markets)
+                    if (
+                        candidate.market_info.market_id not in cluster_markets
+                        and cluster_count >= self.mc.max_resting_per_cluster
+                    ):
                         logger.debug(
                             f"Cluster cap: market {candidate.market_info.market_id} "
                             f"group={cluster_key} already has {cluster_count} markets"
@@ -663,6 +685,7 @@ class OrderManager:
                     context.note_immediate_fill(
                         market_id=candidate.market_info.market_id,
                         token_id=candidate.token_id,
+                        neg_risk_group_id=candidate.market_info.neg_risk_group_id,
                         stake_usdc=estimated_fill_cost,
                     )
                     result.status = "matched"
@@ -724,6 +747,22 @@ class OrderManager:
             logger.debug(f"Scanner entry: token {candidate.token_id[:16]} already has live order or open position — skipping")
             conn.close()
             return []
+
+        if self.mc.max_resting_per_cluster > 0:
+            cluster_key = candidate.market_info.neg_risk_group_id
+            if cluster_key is not None:
+                cluster_markets = context.cluster_live_markets.get(cluster_key, set())
+                cluster_count = len(cluster_markets)
+                if (
+                    candidate.market_info.market_id not in cluster_markets
+                    and cluster_count >= self.mc.max_resting_per_cluster
+                ):
+                    logger.debug(
+                        f"Scanner entry cluster cap: market {candidate.market_info.market_id} "
+                        f"group={cluster_key} already has {cluster_count} markets"
+                    )
+                    conn.close()
+                    return []
 
         try:
             book = get_orderbook(candidate.token_id)
