@@ -377,6 +377,14 @@ class Screener:
         Also checks if the favorite dropped 20%+ in 24h — structural catalyst
         that further boosts underdogs.
         """
+        # Cohort size gate: skip 1-of-N guessing games.
+        if self.mc.max_cohort_size > 0 and len(markets) > self.mc.max_cohort_size:
+            logger.debug(
+                f"Neg-risk group {group_id[:16]}: skipped — "
+                f"{len(markets)} outcomes > max_cohort_size={self.mc.max_cohort_size}"
+            )
+            return []
+
         # Sort descending by YES price → favorite first
         sorted_markets = sorted(
             markets,

@@ -107,6 +107,12 @@ class ModeConfig:
     #   False = prefer short (linear decay from 0 to max_hours_to_close)
     prefer_long_duration: bool = False
 
+    # ── Cohort size gate ──────────────────────────────────────────────────────
+    # Skip an entire neg-risk cohort if it has more than this many outcomes.
+    # Prevents 1-of-N guessing games (e.g. 1-of-25 approval rating buckets).
+    # 0 = disabled.
+    max_cohort_size: int = 0
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -186,6 +192,7 @@ BIG_SWAN_MODE = ModeConfig(
     max_open_positions=500,
     max_resting_markets=5000,
     max_resting_per_cluster=1,
+    max_cohort_size=5,           # skip 1-of-N guessing games (>5 outcomes in a cohort)
     min_hours_to_close=0.25,     # 15 min — allow short-lived markets
     max_hours_to_close=168.0,    # 7 days — big events need time to materialise
     hours_to_close_null_default=48.0,
