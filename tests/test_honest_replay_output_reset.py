@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_honest_replay import _history_run_dir, _reset_replay_output
+from replay.honest_replay import _history_run_dir, _reset_replay_output
 
 
 def test_reset_replay_output_removes_stale_dbs_and_keeps_dir(tmp_path):
@@ -29,7 +29,7 @@ def test_reset_replay_output_removes_stale_dbs_and_keeps_dir(tmp_path):
 def test_history_run_dir_creates_timestamped_child(tmp_path):
     root = tmp_path / "history"
 
-    with patch("scripts.run_honest_replay.time.strftime", return_value="20260406_104800"):
+    with patch("replay.honest_replay.time.strftime", return_value="20260406_104800"):
         run_dir = _history_run_dir(root)
 
     assert run_dir == root / "run_20260406_104800"

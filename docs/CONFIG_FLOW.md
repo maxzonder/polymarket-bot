@@ -191,7 +191,7 @@ ingest → analyzer → feature_mart_v1_1 → ml_outcomes → rejected_outcomes 
 ├── category_weights ───→ Screener._compute_total_score: EV multiplier
 │
 └── dead_market_hours ──→ Screener: фильтр мёртвых рынков
-                       └─→ run_honest_replay: тот же фильтр offline
+                       └─→ replay runners: тот же фильтр offline
 ```
 
 ---

@@ -11,7 +11,7 @@ import execution.order_manager as om_module
 from api.clob_client import ClobClient
 from config import BotConfig
 from execution.order_manager import OrderManager
-from scripts.run_honest_replay import simulate_token
+from replay.honest_replay import simulate_token
 from strategy.entry_levels import partition_entry_levels, suggested_entry_levels
 from strategy.risk_manager import RiskManager
 

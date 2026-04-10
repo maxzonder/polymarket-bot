@@ -25,7 +25,7 @@ from api.gamma_client import MarketInfo
 from config import BotConfig, FAST_TP_MODE, BIG_SWAN_MODE
 from execution.order_manager import OrderManager
 from execution.position_monitor import PositionMonitor
-from scripts.run_honest_replay import simulate_token
+from replay.honest_replay import simulate_token
 from strategy.risk_manager import RiskManager
 from strategy.screener import EntryCandidate
 

@@ -113,15 +113,14 @@ miss_rate > 5%, winner_rate < 5%, avg_tail_ev аномален.
 
 ## Бэктест и реплей
 
-### `run_honest_replay.py`  *(рекомендуемый)*
-Честный full-universe реплей без look-ahead bias. В отличие от `run_dry_run_replay.py`,
-проходит по **всем** скачанным рынкам (не только по известным лебедям): применяет
-статические фильтры скринера, расставляет resting биды на подходящие рынки, реплеит
-трейды хронологически. Большинство бидов не заполняется — это честная цена стратегии.
+### `run_tape_dryrun.py`  *(рекомендуемый)*
+Tape-driven offline dryrun. Поднимает полноценный replay runner по историческому tape DB,
+пишет runtime snapshot и артефакты в output dir, после чего результаты можно анализировать
+через `honest_replay_analyze.py`.
 
 ```bash
-python scripts/run_honest_replay.py --start 2025-12-01 --end 2026-02-28
-python scripts/run_honest_replay.py --start 2025-12-01 --end 2026-02-28 --summary
+python scripts/run_tape_dryrun.py --start 2025-12-01 --end 2026-02-28
+python scripts/run_tape_dryrun.py --start 2025-12-01 --end 2026-02-28 --mode big_swan_mode
 ```
 
 ### `run_dry_run_replay.py`  *(moved to `_legacy/`)*

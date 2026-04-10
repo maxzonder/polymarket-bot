@@ -23,7 +23,7 @@ from replay.tape_feed import (
     iter_tape_batches,
     iter_tape_batches_db,
 )
-from scripts.run_honest_replay import load_all_markets
+from replay.honest_replay import load_all_markets
 from strategy.market_scorer import MarketScorer
 from strategy.risk_manager import RiskManager
 from strategy.scorer import EntryFillScorer, ResolutionScorer

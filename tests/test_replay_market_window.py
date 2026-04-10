@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.run_honest_replay import slice_rows_by_market
+from replay.honest_replay import slice_rows_by_market
 
 
 class ReplayMarketWindowTests(unittest.TestCase):

@@ -12,7 +12,7 @@ Use it for:
 - ranking candidate buy-set / ladder presets before honest replay.
 
 Do NOT interpret the output as final live expectancy.
-Final validation should go through `scripts/run_honest_replay.py`.
+Final validation should go through `scripts/run_tape_dryrun.py`.
 
 Examples:
     python3 scripts/optimize_big_swan_params.py

@@ -26,7 +26,7 @@ from strategy.screener import Screener
 from utils.logger import setup_logger
 from utils.paths import DB_PATH
 
-from scripts.run_honest_replay import (
+from replay.honest_replay import (
     _build_trade_file_index,
     _load_trades_sorted,
     load_all_markets,
