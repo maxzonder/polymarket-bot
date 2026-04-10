@@ -74,6 +74,11 @@ def _print_section(title: str) -> None:
     print(f"\n== {title} ==")
 
 
+def _progress(message: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[analyzer] {ts} | {message}", file=sys.stderr, flush=True)
+
+
 def _safe_div(numer: float | int | None, denom: float | int | None) -> Optional[float]:
     if numer is None or denom in (None, 0):
         return None
@@ -288,6 +293,8 @@ def _collect_run_data(run_dir: Path) -> dict:
     paper_db = run_dir / "paper_trades.db"
     summary_file = run_dir / "summary.txt"
 
+    _progress(f"collect run data: run_dir={run_dir}")
+
     if not positions_db.exists():
         raise SystemExit(f"positions.db not found: {positions_db}")
     if not paper_db.exists():
@@ -306,8 +313,12 @@ def _collect_run_data(run_dir: Path) -> dict:
         try:
             con.execute("ATTACH DATABASE ? AS dataset", (str(DB_PATH),))
             dataset_attached = True
+            _progress(f"dataset attached: {DB_PATH}")
         except sqlite3.Error:
             dataset_attached = False
+            _progress(f"dataset attach failed: {DB_PATH}")
+    else:
+        _progress(f"dataset missing: {DB_PATH}")
 
     con2 = _conn(paper_db)
     cur2 = con2.cursor()
@@ -326,6 +337,7 @@ def _collect_run_data(run_dir: Path) -> dict:
                 tape_cur = None
 
     summary_metrics = _parse_summary_file(summary_file)
+    _progress("collecting base metrics")
 
     overall = _one(cur, """
         select
@@ -574,6 +586,7 @@ def _winner_economics(cur: sqlite3.Cursor) -> dict:
 
 
 def _category_rows(cur: sqlite3.Cursor, category_weights: dict) -> list[dict]:
+    _progress("query category rows")
     rows = _rows(
         cur,
         """
@@ -589,7 +602,7 @@ def _category_rows(cur: sqlite3.Cursor, category_weights: dict) -> list[dict]:
           round(avg(case when m.end_date is not null then (m.end_date - p.opened_at) / 3600.0 end), 2) as avg_hours_to_close,
           round(avg(coalesce(m.volume, 0)), 2) as avg_volume_usdc
         from positions p
-        left join dataset.markets m on cast(m.id as text) = p.market_id
+        left join dataset.markets m on m.id = p.market_id
         group by coalesce(m.category, 'unknown')
         order by buy desc, positions desc
         """,
@@ -602,6 +615,7 @@ def _category_rows(cur: sqlite3.Cursor, category_weights: dict) -> list[dict]:
 
 
 def _time_bucket_rows(cur: sqlite3.Cursor) -> list[dict]:
+    _progress("query time bucket rows")
     rows = _rows(
         cur,
         """
@@ -621,7 +635,7 @@ def _time_bucket_rows(cur: sqlite3.Cursor) -> list[dict]:
           round(sum(coalesce(p.realized_pnl, 0)), 6) as pnl,
           round(avg(p.entry_price), 6) as avg_entry_price
         from positions p
-        left join dataset.markets m on cast(m.id as text) = p.market_id
+        left join dataset.markets m on m.id = p.market_id
         group by bucket
         """,
     )
@@ -740,6 +754,7 @@ def _fmt_neg_risk_badge(group_id: object | None) -> str:
 
 
 def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[dict]:
+    _progress(f"query top {'winning' if winners else 'losing'} markets")
     having = "> 0" if winners else "< 0"
     ordering = "desc" if winners else "asc"
     rows = _rows(
@@ -767,7 +782,7 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           min(p.opened_at) as first_opened_at,
           max(coalesce(p.closed_at, p.opened_at)) as last_activity_at
         from positions p
-        left join dataset.markets m on cast(m.id as text) = p.market_id
+        left join dataset.markets m on m.id = p.market_id
         group by p.market_id, question, category, neg_risk, neg_risk_group_id, start_date_ts, end_date_ts, volume_usdc
         having sum(coalesce(p.realized_pnl, 0)) {having}
         order by pnl {ordering}, buy desc
@@ -1163,17 +1178,22 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
 
 
 def _print_single_run(data: dict, top: int) -> None:
-    _print_run_header(data)
-    _print_headline(data)
-    _print_config_highlights(data)
-    _print_capital_path(data)
-    _print_execution_breakdown(data)
-    _print_entry_price_analysis(data)
-    _print_winner_economics(data)
-    _print_selection_profile(data)
-    _print_market_cards(data, winners=True, top=top)
-    _print_market_cards(data, winners=False, top=top)
-    _print_neg_risk_section(data, top)
+    sections = [
+        ("run header", lambda: _print_run_header(data)),
+        ("headline", lambda: _print_headline(data)),
+        ("config highlights", lambda: _print_config_highlights(data)),
+        ("capital path", lambda: _print_capital_path(data)),
+        ("execution breakdown", lambda: _print_execution_breakdown(data)),
+        ("entry price analysis", lambda: _print_entry_price_analysis(data)),
+        ("winner economics", lambda: _print_winner_economics(data)),
+        ("selection profile", lambda: _print_selection_profile(data)),
+        ("top winning markets", lambda: _print_market_cards(data, winners=True, top=top)),
+        ("top losing markets", lambda: _print_market_cards(data, winners=False, top=top)),
+        ("neg-risk", lambda: _print_neg_risk_section(data, top)),
+    ]
+    for label, fn in sections:
+        _progress(f"render {label}")
+        fn()
 
 
 def _capture_single_run_text(data: dict, top: int) -> str:
@@ -1806,20 +1826,25 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.compare:
+        _progress(f"compare mode: {args.compare[0]} vs {args.compare[1]}")
         text = _capture_compare_text(Path(args.compare[0]), Path(args.compare[1]))
         print(text, end="")
         if args.html_out:
+            _progress(f"write html report: {args.html_out}")
             _write_html_report(Path(args.html_out), text, "Replay run comparison")
         return
 
     data = _collect_run_data(Path(args.run_dir))
     try:
         text = _capture_single_run_text(data, args.top)
+        _progress("emit text report")
         print(text, end="")
         if args.html_out:
             title = f"Replay report, {data['run_dir'].name}"
+            _progress(f"write html report: {args.html_out}")
             _write_html_report(Path(args.html_out), text, title)
     finally:
+        _progress("close databases")
         _close_data(data)
 
 
