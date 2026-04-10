@@ -673,6 +673,7 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           p.market_id,
           coalesce(m.question, p.market_id) as question,
           coalesce(m.category, 'unknown') as category,
+          coalesce(m.neg_risk, 0) as neg_risk,
           m.start_date as start_date_ts,
           m.end_date as end_date_ts,
           round(coalesce(m.volume, 0), 2) as volume_usdc,
@@ -689,7 +690,7 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           max(coalesce(p.closed_at, p.opened_at)) as last_activity_at
         from positions p
         left join dataset.markets m on cast(m.id as text) = p.market_id
-        group by p.market_id, question, category, start_date_ts, end_date_ts, volume_usdc
+        group by p.market_id, question, category, neg_risk, start_date_ts, end_date_ts, volume_usdc
         having sum(coalesce(p.realized_pnl, 0)) {having}
         order by pnl {ordering}, stake desc
         limit {int(top)}
@@ -968,9 +969,12 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
         category_weight = category_weights.get(row["category"])
 
         print(f"- [{idx}] {row['market_id']} | {_short_text(row['question'], 120)}")
+        category_label = str(row['category'])
+        if int(row.get('neg_risk') or 0):
+            category_label += " | NEG-RISK"
         print(
             "  - "
-            f"category: {row['category']}"
+            f"category: {category_label}"
             f" | category_weight: {category_weight if category_weight is not None else 'n/a'}"
             f" | closes: {_fmt_ts(row.get('end_date_ts'))}"
             f" | volume: {_fmt_money(row.get('volume_usdc'), 2)}"
@@ -1150,6 +1154,9 @@ def _render_value_html(key: str, value: str) -> str:
         if stripped.lower() == "no":
             return '<span class="token token-no">No</span>'
         return f'<span class="token token-generic">{escape(stripped)}</span>'
+    if key_norm == "category" and "| NEG-RISK" in stripped:
+        left, _sep, _right = stripped.partition("| NEG-RISK")
+        return f'{escape(left.strip())} | <strong class="neg-risk">NEG-RISK</strong>'
     return escape(value)
 
 
@@ -1476,6 +1483,11 @@ def _text_report_to_html(text: str, title: str) -> str:
       background: rgba(255, 255, 255, 0.06);
       color: #d8e0ee;
       border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .neg-risk {
+      color: #ffffff;
+      font-weight: 900;
+      letter-spacing: 0.02em;
     }
     .mono-box, .spark-box {
       margin-top: 12px;
