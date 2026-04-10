@@ -985,6 +985,9 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
         hours_to_close = None
         if row.get("end_date_ts") is not None and row.get("first_opened_at") is not None:
             hours_to_close = (float(row["end_date_ts"]) - float(row["first_opened_at"])) / 3600.0
+        market_duration = None
+        if row.get("start_date_ts") is not None and row.get("end_date_ts") is not None:
+            market_duration = (float(row["end_date_ts"]) - float(row["start_date_ts"])) / 3600.0
         path_summary, spark = _token_price_path(tape_cur, str(row["market_id"]), str(chart_token.get("token_id") or ""))
         category_weight = category_weights.get(row["category"])
 
@@ -1002,6 +1005,7 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
             f" | resolved: {_fmt_int(row['resolved_positions'])}"
             f" | winners: {_fmt_int(row['winners'])}"
             f" | open: {_fmt_int(row['open_positions'])}"
+            f" | market duration: {_fmt_hours(market_duration)}"
             f" | first-entry time-to-close: {_fmt_hours(hours_to_close)}"
         )
         print(
@@ -1011,12 +1015,15 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
             f" | avg entry: {_fmt_price(row['avg_entry_price'])}"
             f" | entry range: {_fmt_price(row['min_entry_price'])} → {_fmt_price(row['max_entry_price'])}"
         )
+        token_label = chart_token.get('outcome_name') or 'n/a'
+        filled_label = rep.get('outcome_name') or 'n/a'
         print(
             "  - "
-            f"filled token: {rep.get('outcome_name') or 'n/a'}"
-            f" | chart token: {chart_token.get('outcome_name') or 'n/a'}"
+            f"token: {token_label}"
             f" | chart basis: {chart_token.get('basis') or 'n/a'}"
         )
+        if filled_label != token_label:
+            print(f"  - filled token: {filled_label}")
         print(f"  - price path ({chart_token.get('outcome_name') or 'n/a'} token): {path_summary}")
         print(f"  - sparkline ({chart_token.get('outcome_name') or 'n/a'} token): {spark}")
 
@@ -1165,6 +1172,18 @@ def _parse_section_items(lines: list[str]) -> list[dict[str, object]]:
     return items
 
 
+def _render_value_html(key: str, value: str) -> str:
+    stripped = value.strip()
+    key_norm = key.strip().lower()
+    if key_norm in {"token", "filled token"}:
+        if stripped.lower() == "yes":
+            return '<span class="token token-yes">Yes</span>'
+        if stripped.lower() == "no":
+            return '<span class="token token-no">No</span>'
+    return escape(value)
+
+
+
 def _render_kv_table(rows: list[tuple[str, str]], extra_class: str = "") -> str:
     if not rows:
         return ""
@@ -1174,7 +1193,7 @@ def _render_kv_table(rows: list[tuple[str, str]], extra_class: str = "") -> str:
         parts.append(
             "<tr>"
             f"<th>{escape(key)}</th>"
-            f"<td>{escape(value)}</td>"
+            f"<td>{_render_value_html(key, value)}</td>"
             "</tr>"
         )
     parts.append("</tbody></table>")
@@ -1202,6 +1221,19 @@ def _render_subgroup(item: dict[str, object]) -> str:
     return "".join(html)
 
 
+def _render_sparkline_html(text: str) -> str:
+    if not text:
+        return ""
+    chars = list(text)
+    if len(chars) == 1:
+        return f'<span class="spark-point">{escape(chars[0])}</span>'
+    first = f'<span class="spark-start">{escape(chars[0])}</span>'
+    middle = ''.join(escape(ch) for ch in chars[1:-1])
+    last = f'<span class="spark-end">{escape(chars[-1])}</span>'
+    return first + middle + last
+
+
+
 def _render_market_card(item: dict[str, object]) -> str:
     header = str(item.get("text") or "")
     children = [str(child) for child in item.get("children", [])]
@@ -1218,9 +1250,9 @@ def _render_market_card(item: dict[str, object]) -> str:
     detail_lines: list[str] = []
     for child in children:
         key, value = _split_label_value(child)
-        if key == "price path":
+        if key and key.startswith("price path"):
             path_line = value
-        elif key == "sparkline":
+        elif key and key.startswith("sparkline"):
             spark_line = value
         else:
             detail_lines.append(child)
@@ -1242,7 +1274,7 @@ def _render_market_card(item: dict[str, object]) -> str:
         html.append(
             '<div class="spark-box">'
             '<div class="mono-label">sparkline</div>'
-            f'<div class="sparkline">{escape(spark_line)}</div>'
+            f'<div class="sparkline">{_render_sparkline_html(spark_line)}</div>'
             '</div>'
         )
     html.append("</article>")
@@ -1452,6 +1484,24 @@ def _text_report_to_html(text: str, title: str) -> str:
       font-size: 0.83rem;
       font-weight: 800;
     }
+    .token {
+      display: inline-block;
+      padding: 0.12rem 0.52rem;
+      border-radius: 999px;
+      font-weight: 800;
+      line-height: 1.2;
+      letter-spacing: 0.01em;
+    }
+    .token-yes {
+      background: rgba(46, 204, 113, 0.18);
+      color: #7df0ae;
+      border: 1px solid rgba(46, 204, 113, 0.28);
+    }
+    .token-no {
+      background: rgba(255, 99, 132, 0.16);
+      color: #ff9db1;
+      border: 1px solid rgba(255, 99, 132, 0.28);
+    }
     .mono-box, .spark-box {
       margin-top: 12px;
       padding: 12px 14px;
@@ -1477,6 +1527,18 @@ def _text_report_to_html(text: str, title: str) -> str:
       line-height: 1.2;
       letter-spacing: 0.08em;
       color: #cfe4ff;
+    }
+    .spark-start {
+      color: #67c6ff;
+      font-weight: 800;
+    }
+    .spark-end {
+      color: #ffd84d;
+      font-weight: 800;
+    }
+    .spark-point {
+      color: #9fe0ff;
+      font-weight: 800;
     }
     .plain {
       margin: 8px 0 0;
