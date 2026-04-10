@@ -1023,11 +1023,11 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
             f" | market duration: {_fmt_hours(market_duration)}"
             f" | first-entry time-to-close: {_fmt_hours(hours_to_close)}"
         )
+        print(f"  - buy: {_fmt_money(row['buy'])}")
+        print(f"  - sell: {_fmt_money(row['sell'])}")
         print(
             "  - "
-            f"buy: {_fmt_money(row['buy'])}"
-            f" | sell: {_fmt_money(row['sell'])}"
-            f" | pnl: {_fmt_money(row['pnl'])}"
+            f"pnl: {_fmt_money(row['pnl'])}"
             f" | avg entry: {_fmt_price(row['avg_entry_price'])}"
             f" | entry range: {_fmt_price(row['min_entry_price'])} → {_fmt_price(row['max_entry_price'])}"
         )
@@ -1190,11 +1190,11 @@ def _render_value_html(key: str, value: str) -> str:
         if stripped.lower() == "no":
             return '<span class="token token-no">No</span>'
         return f'<span class="token token-generic">{escape(stripped)}</span>'
-    if key_norm == "category" and "| " in stripped:
-        left, _sep, right = stripped.partition("| ")
-        right = right.strip()
-        if right == "NEG-RISK" or right.startswith("NR-"):
-            return f'{escape(left.strip())} | <strong class="neg-risk">{escape(right)}</strong>'
+    if key_norm == "category":
+        match = re.match(r"^(.*?)(\s*\|\s*)(NR-[A-Z0-9]+|NEG-RISK)(.*)$", stripped)
+        if match:
+            left, sep, badge, tail = match.groups()
+            return f'{escape(left.strip())}{escape(sep)}<strong class="neg-risk">{escape(badge)}</strong>{escape(tail)}'
     return escape(value)
 
 
