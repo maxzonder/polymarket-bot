@@ -5,12 +5,8 @@ import sys
 from datetime import date
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parent.parent
-V2_DIR = Path(__file__).resolve().parent
-if str(V2_DIR) not in sys.path:
-    sys.path.insert(0, str(V2_DIR))
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tape_runner import TapeDrivenDryRunRunner
 from utils.paths import DATA_DIR
