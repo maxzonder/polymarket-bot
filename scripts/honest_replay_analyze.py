@@ -1816,6 +1816,10 @@ def _write_html_report(html_path: Path, text: str, title: str) -> None:
     html_path.write_text(_text_report_to_html(text, title), encoding="utf-8")
 
 
+def _default_html_out(run_dir: Path) -> Path:
+    return run_dir / "analyzer_report_current.html"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Analyze a replay run directory")
     group = ap.add_mutually_exclusive_group(required=True)
@@ -1839,10 +1843,10 @@ def main() -> None:
         text = _capture_single_run_text(data, args.top)
         _progress("emit text report")
         print(text, end="")
-        if args.html_out:
-            title = f"Replay report, {data['run_dir'].name}"
-            _progress(f"write html report: {args.html_out}")
-            _write_html_report(Path(args.html_out), text, title)
+        html_out = Path(args.html_out) if args.html_out else _default_html_out(data["run_dir"])
+        title = f"Replay report, {data['run_dir'].name}"
+        _progress(f"write html report: {html_out}")
+        _write_html_report(html_out, text, title)
     finally:
         _progress("close databases")
         _close_data(data)
