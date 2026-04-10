@@ -131,7 +131,7 @@ class TapeDrivenDryRunRunner:
             for market_id in list(grouped.keys())[:limit_markets]:
                 rows.extend(grouped[market_id])
 
-        self.state = OfflineDryRunState.from_rows(rows)
+        self.state = OfflineDryRunState.from_rows(rows, max_cohort_size=self.mc.max_cohort_size)
         self.market_ids = set(self.state.markets.keys())
         self.token_ids = set(self.state.tokens.keys())
 

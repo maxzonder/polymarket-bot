@@ -154,6 +154,75 @@ class OfflineDryRunStateTests(unittest.TestCase):
         )
         self.assertEqual([m.market_id for m in state.fetch_open_markets()], ["m2"])
 
+    def test_fetch_open_markets_skips_large_neg_risk_cohorts_by_full_group_size(self) -> None:
+        rows = []
+        for idx in range(6):
+            market_id = f"m{idx}"
+            rows.append(
+                {
+                    "market_id": market_id,
+                    "question": f"Q{idx}",
+                    "category": "crypto",
+                    "volume": 1000.0,
+                    "comment_count": 0,
+                    "end_date": 10_000,
+                    "start_date": 10,
+                    "neg_risk": 1,
+                    "neg_risk_market_id": "gid_big",
+                    "token_id": f"{market_id}_yes",
+                    "outcome_name": "Yes",
+                }
+            )
+        state = OfflineDryRunState.from_rows(rows, max_cohort_size=5)
+        state.apply_batch(
+            TapeBatch(
+                batch_start_ts=100,
+                batch_end_ts=399,
+                trades=tuple(
+                    TapeTrade(100 + idx, f"m{idx}", f"m{idx}_yes", 0.1, 1.0, "BUY", {})
+                    for idx in range(6)
+                ),
+            )
+        )
+
+        markets = state.fetch_open_markets(price_max=0.20)
+        self.assertEqual(markets, [])
+
+    def test_fetch_open_markets_keeps_small_neg_risk_cohorts(self) -> None:
+        rows = []
+        for idx in range(5):
+            market_id = f"m{idx}"
+            rows.append(
+                {
+                    "market_id": market_id,
+                    "question": f"Q{idx}",
+                    "category": "crypto",
+                    "volume": 1000.0,
+                    "comment_count": 0,
+                    "end_date": 10_000,
+                    "start_date": 10,
+                    "neg_risk": 1,
+                    "neg_risk_market_id": "gid_ok",
+                    "token_id": f"{market_id}_yes",
+                    "outcome_name": "Yes",
+                }
+            )
+        state = OfflineDryRunState.from_rows(rows, max_cohort_size=5)
+        state.apply_batch(
+            TapeBatch(
+                batch_start_ts=100,
+                batch_end_ts=399,
+                trades=tuple(
+                    TapeTrade(100 + idx, f"m{idx}", f"m{idx}_yes", 0.1, 1.0, "BUY", {})
+                    for idx in range(5)
+                ),
+            )
+        )
+
+        markets = state.fetch_open_markets(price_max=0.20)
+        self.assertEqual(len(markets), 5)
+        self.assertTrue(all(m.neg_risk_group_id == "gid_ok" for m in markets))
+
     def test_orderbook_cache_invalidates_only_dirty_token(self) -> None:
         rows = [
             {

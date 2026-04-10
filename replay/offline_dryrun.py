@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -33,6 +33,7 @@ class MarketMeta:
     start_date_ts: Optional[int]
     neg_risk: bool
     neg_risk_group_id: Optional[str]
+    cohort_total_markets: int
     token_ids: tuple[str, ...]
     outcome_names: tuple[str, ...]
 
@@ -48,6 +49,7 @@ class OfflineDryRunState:
         initial_active_market_ids: Optional[set[str]] = None,
         start_events: tuple[tuple[int, str], ...] = (),
         end_events: tuple[tuple[int, str], ...] = (),
+        max_cohort_size: int = 0,
     ):
         self.markets = markets
         self.tokens = tokens
@@ -63,9 +65,10 @@ class OfflineDryRunState:
         self._start_event_idx = 0
         self._end_event_idx = 0
         self._active_synced_ts: Optional[int] = None
+        self.max_cohort_size = max(0, int(max_cohort_size))
 
     @classmethod
-    def from_rows(cls, rows: list[dict]) -> "OfflineDryRunState":
+    def from_rows(cls, rows: list[dict], *, max_cohort_size: int = 0) -> "OfflineDryRunState":
         grouped: dict[str, list[dict]] = {}
         for row in rows:
             grouped.setdefault(str(row["market_id"]), []).append(row)
@@ -75,6 +78,11 @@ class OfflineDryRunState:
         initial_active_market_ids: set[str] = set()
         start_events: list[tuple[int, str]] = []
         end_events: list[tuple[int, str]] = []
+        cohort_sizes = Counter(
+            str(rows[0].get("neg_risk_market_id"))
+            for rows in grouped.values()
+            if rows and rows[0].get("neg_risk_market_id") is not None
+        )
 
         for market_id, market_rows in grouped.items():
             ordered = sorted(
@@ -97,6 +105,11 @@ class OfflineDryRunState:
                     str(sample.get("neg_risk_market_id"))
                     if sample.get("neg_risk_market_id") is not None
                     else None
+                ),
+                cohort_total_markets=(
+                    cohort_sizes[str(sample.get("neg_risk_market_id"))]
+                    if sample.get("neg_risk_market_id") is not None
+                    else 1
                 ),
                 token_ids=token_ids,
                 outcome_names=outcome_names,
@@ -125,6 +138,7 @@ class OfflineDryRunState:
             initial_active_market_ids=initial_active_market_ids,
             start_events=tuple(sorted(start_events)),
             end_events=tuple(sorted(end_events)),
+            max_cohort_size=max_cohort_size,
         )
 
     @staticmethod
@@ -230,6 +244,12 @@ class OfflineDryRunState:
         for market_id in candidate_market_ids:
             market = self.markets[market_id]
             if market.volume_usdc < volume_min or market.volume_usdc > volume_max:
+                continue
+            if (
+                self.max_cohort_size > 0
+                and market.neg_risk_group_id
+                and market.cohort_total_markets > self.max_cohort_size
+            ):
                 continue
 
             token_prices = [self.tokens[token_id].last_price for token_id in market.token_ids]
