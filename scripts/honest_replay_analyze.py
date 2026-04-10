@@ -772,6 +772,10 @@ def _print_config_highlights(data: dict) -> None:
     _print_key_value("tp_levels + moonbag_fraction", _fmt_tp_levels(mode_config.tp_levels, mode_config.moonbag_fraction))
     _print_key_value("max_open_positions", _fmt_int(mode_config.max_open_positions))
     _print_key_value("max_resting_markets", _fmt_int(mode_config.max_resting_markets))
+    _print_key_value(
+        "market duration limits",
+        f"min {_fmt_hours(mode_config.min_hours_to_close)}, max {_fmt_hours(mode_config.max_hours_to_close)}",
+    )
     _print_key_value("market_score_tiers", _fmt_market_score_tiers(mode_config.market_score_tiers))
     _print_key_value("scoring_weights", _fmt_scoring_weights(mode_config.scoring_weights))
     _print_key_value("category_weights", _fmt_category_weights(bot_config.get("category_weights") or {}))
@@ -1017,11 +1021,14 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
         )
         token_label = chart_token.get('outcome_name') or 'n/a'
         filled_label = rep.get('outcome_name') or 'n/a'
-        print(
-            "  - "
-            f"token: {token_label}"
-            f" | chart basis: {chart_token.get('basis') or 'n/a'}"
-        )
+        if chart_token.get('basis') == 'yes_token':
+            print(f"  - token: {token_label}")
+        else:
+            print(
+                "  - "
+                f"token: {token_label}"
+                f" | chart basis: {chart_token.get('basis') or 'n/a'}"
+            )
         if filled_label != token_label:
             print(f"  - filled token: {filled_label}")
         print(f"  - price path ({chart_token.get('outcome_name') or 'n/a'} token): {path_summary}")
