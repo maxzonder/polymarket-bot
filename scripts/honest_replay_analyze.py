@@ -23,6 +23,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import MODES, ModeConfig, TPLevel
+from replay.tape_feed import DEFAULT_TAPE_DB_PATH
 from utils.paths import DB_PATH
 
 
@@ -287,6 +288,17 @@ def _load_config_snapshot(run_dir: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _resolve_tape_db_path(run_meta: dict) -> Path | None:
+    tape_db_value = run_meta.get("tape_db_path")
+    if tape_db_value:
+        tape_path = Path(str(tape_db_value)).expanduser()
+        if tape_path.exists():
+            return tape_path
+    if DEFAULT_TAPE_DB_PATH.exists():
+        return DEFAULT_TAPE_DB_PATH
+    return None
+
+
 def _collect_run_data(run_dir: Path) -> dict:
     run_dir = run_dir.expanduser().resolve()
     positions_db = run_dir / "positions.db"
@@ -325,16 +337,18 @@ def _collect_run_data(run_dir: Path) -> dict:
 
     tape_conn = None
     tape_cur = None
-    tape_db_value = run_meta.get("tape_db_path")
-    if tape_db_value:
-        tape_path = Path(str(tape_db_value)).expanduser()
-        if tape_path.exists():
-            try:
-                tape_conn = _conn(tape_path)
-                tape_cur = tape_conn.cursor()
-            except sqlite3.Error:
-                tape_conn = None
-                tape_cur = None
+    tape_path = _resolve_tape_db_path(run_meta)
+    if tape_path is not None:
+        try:
+            tape_conn = _conn(tape_path)
+            tape_cur = tape_conn.cursor()
+            _progress(f"tape attached: {tape_path}")
+        except sqlite3.Error:
+            tape_conn = None
+            tape_cur = None
+            _progress(f"tape attach failed: {tape_path}")
+    else:
+        _progress("tape missing: no configured or default tape DB")
 
     summary_metrics = _parse_summary_file(summary_file)
     _progress("collecting base metrics")

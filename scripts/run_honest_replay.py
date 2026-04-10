@@ -66,6 +66,7 @@ import execution.order_manager as om_module
 from api.clob_client import ClobClient, Orderbook, OrderbookLevel
 from api.gamma_client import MarketInfo
 from config import BotConfig, ModeConfig
+from replay.tape_feed import DEFAULT_TAPE_DB_PATH
 from strategy.market_scorer import MarketScore, MarketScorer
 from strategy.risk_manager import RiskManager
 from strategy.screener import EntryCandidate
@@ -968,8 +969,21 @@ def run_honest_replay(
 
     config = BotConfig(mode=mode, dry_run=True)
     mc     = config.mode_config
+    tape_db_path = DEFAULT_TAPE_DB_PATH if DEFAULT_TAPE_DB_PATH.exists() else None
     config_snapshot = {
         "mode": mode,
+        "run": {
+            "kind": "honest_replay",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "mode": mode,
+            "output_dir": str(output_dir),
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "activation_delay": activation_delay,
+            "fill_fraction": fill_fraction,
+            "summary_only": summary_only,
+            "tape_db_path": str(tape_db_path) if tape_db_path is not None else None,
+        },
         "bot_config": {
             "mode": config.mode,
             "dry_run": config.dry_run,
