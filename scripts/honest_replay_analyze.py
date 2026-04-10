@@ -778,11 +778,16 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
 
 
 def _top_neg_risk_groups(cur: sqlite3.Cursor, top: int) -> list[dict]:
-    top_rows = _top_market_rows(cur, top, winners=True) + _top_market_rows(cur, top, winners=False)
+    winner_rows = _top_market_rows(cur, top, winners=True)
+    loser_rows = _top_market_rows(cur, top, winners=False)
+    status_by_market: dict[str, str] = {}
     group_ids: list[str] = []
     seen: set[str] = set()
-    top_market_ids = sorted({str(row.get("market_id") or "").strip() for row in top_rows if str(row.get("market_id") or "").strip()})
-    for row in top_rows:
+
+    for row, status in [*[(r, "win") for r in winner_rows], *[(r, "loss") for r in loser_rows]]:
+        market_id = str(row.get("market_id") or "").strip()
+        if market_id:
+            status_by_market[market_id] = status
         if int(row.get("neg_risk") or 0) != 1:
             continue
         group_id = str(row.get("neg_risk_group_id") or "").strip()
@@ -791,11 +796,12 @@ def _top_neg_risk_groups(cur: sqlite3.Cursor, top: int) -> list[dict]:
         seen.add(group_id)
         group_ids.append(group_id)
 
+    priority_market_ids = sorted(status_by_market)
     priority_sql = "when 0 then 0"
     priority_params: tuple[object, ...] = ()
-    if top_market_ids:
-        priority_sql = f"when p.market_id in ({','.join('?' for _ in top_market_ids)}) then 0"
-        priority_params = tuple(top_market_ids)
+    if priority_market_ids:
+        priority_sql = f"when cast(m.id as text) in ({','.join('?' for _ in priority_market_ids)}) then 0"
+        priority_params = tuple(priority_market_ids)
 
     groups: list[dict] = []
     for group_id in group_ids:
@@ -803,31 +809,23 @@ def _top_neg_risk_groups(cur: sqlite3.Cursor, top: int) -> list[dict]:
             cur,
             f"""
             select
-              p.market_id,
-              coalesce(m.question, p.market_id) as question,
-              round(sum(coalesce(p.realized_pnl, 0)), 6) as pnl,
-              max(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) as is_winner,
-              max(case when p.status='resolved' and coalesce(p.is_winner, 0)=0 then 1 else 0 end) as is_loser,
-              max(case when p.status='open' then 1 else 0 end) as is_open,
-              count(p.position_id) as positions,
-              round(sum(coalesce(p.entry_size_usdc, 0)), 6) as buy
-            from positions p
-            left join dataset.markets m on cast(m.id as text) = p.market_id
+              cast(m.id as text) as market_id,
+              coalesce(m.question, cast(m.id as text)) as question
+            from dataset.markets m
             where coalesce(m.neg_risk, 0) = 1 and m.neg_risk_market_id = ?
-            group by p.market_id, question
             order by
               case
                 {priority_sql}
-                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) = 1 then 1
-                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=0 then 1 else 0 end) = 1 then 2
-                else 3
+                else 1
               end,
-              question collate nocase,
-              p.market_id
+              m.question collate nocase,
+              cast(m.id as text)
             """,
             (group_id, *priority_params),
         )
         if rows:
+            for row in rows:
+                row["status"] = status_by_market.get(str(row.get("market_id") or "").strip(), "neutral")
             groups.append({"group_id": group_id, "rows": rows})
     return groups
 
@@ -847,16 +845,8 @@ def _print_neg_risk_section(data: dict, top: int) -> None:
         badge = _fmt_neg_risk_badge(group.get("group_id"))
         print(f"- {badge}:")
         for idx, row in enumerate(group.get("rows", []), 1):
-            tags: list[str] = []
-            if float(row.get("buy") or 0) > 0:
-                tags.append("bet")
-            if int(row.get("is_winner") or 0) == 1:
-                tags.append("win")
-            elif float(row.get("buy") or 0) > 0 and int(row.get("is_loser") or 0) == 1:
-                tags.append("loss")
-            elif int(row.get("is_open") or 0) == 1:
-                tags.append("open")
-            tag_text = f" [{' | '.join(tags)}]" if tags else ""
+            status = str(row.get("status") or "neutral")
+            tag_text = f" [{status}]" if status != "neutral" else ""
             print(f"  - {idx}. {row.get('question') or row.get('market_id') or 'n/a'}{tag_text}")
 
 
@@ -1487,8 +1477,6 @@ def _render_neg_risk_section_from_text(items: list[dict[str, object]]) -> str:
                 cls = "nr-win"
             elif "loss" in tags:
                 cls = "nr-loss"
-            elif "bet" in tags:
-                cls = "nr-bet"
             elif "open" in tags:
                 cls = "nr-open"
             html.append(f'<li class="{cls}"><span class="nr-question">{escape(question)}</span></li>')
@@ -1768,10 +1756,6 @@ def _text_report_to_html(text: str, title: str) -> str:
     }
     .nr-open .nr-question {
       color: #d8e0ee;
-    }
-    .nr-bet .nr-question {
-      color: #ffd84d;
-      font-weight: 700;
     }
     .nr-neutral .nr-question {
       color: #9fb0d0;
