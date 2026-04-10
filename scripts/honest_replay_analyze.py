@@ -648,6 +648,49 @@ def _representative_position(cur: sqlite3.Cursor, market_id: str) -> dict:
     )
 
 
+def _market_sell_ladder(cur: sqlite3.Cursor, market_id: str) -> list[dict]:
+    rows = _rows(
+        cur,
+        """
+        select
+          t.label as label,
+          round(sum(coalesce(t.sell_quantity, 0)), 6) as sell_qty,
+          round(sum(
+            coalesce(t.filled_quantity, 0) * coalesce(t.sell_price, 0)
+            + case
+                when p.status='resolved' and coalesce(p.is_winner, 0)=1
+                  then max(coalesce(t.sell_quantity, 0) - coalesce(t.filled_quantity, 0), 0)
+                else 0
+              end
+          ), 6) as sell_usdc
+        from tp_orders t
+        join positions p on p.position_id = t.position_id
+        where p.market_id = ?
+        group by t.label
+        order by
+          case
+            when t.label = 'tp_p10' then 1
+            when t.label = 'tp_p50' then 2
+            when t.label = 'moonbag_resolution' then 3
+            else 9
+          end,
+          t.label
+        """,
+        (market_id,),
+    )
+    return rows
+
+
+def _fmt_ladder_label(label: object | None) -> str:
+    raw = str(label or "").strip()
+    mapping = {
+        "tp_p10": "tp10",
+        "tp_p50": "tp50",
+        "moonbag_resolution": "moonbag",
+    }
+    return mapping.get(raw, raw or "n/a")
+
+
 def _token_price_path(tape_cur: sqlite3.Cursor | None, market_id: str, token_id: str) -> tuple[str, str]:
     if tape_cur is None or not token_id:
         return ("n/a", "n/a")
@@ -1001,6 +1044,7 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
         if row.get("start_date_ts") is not None and row.get("end_date_ts") is not None:
             market_duration = (float(row["end_date_ts"]) - float(row["start_date_ts"])) / 3600.0
         path_summary, spark = _token_price_path(tape_cur, str(row["market_id"]), str(rep.get("token_id") or ""))
+        sell_ladder = _market_sell_ladder(cur, str(row["market_id"]))
         category_weight = category_weights.get(row["category"])
 
         print(f"- [{idx}] {row['market_id']} | {_short_text(row['question'], 120)}")
@@ -1023,13 +1067,21 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
             f" | market duration: {_fmt_hours(market_duration)}"
             f" | first-entry time-to-close: {_fmt_hours(hours_to_close)}"
         )
-        print(f"  - buy: {_fmt_money(row['buy'])}")
-        print(f"  - sell: {_fmt_money(row['sell'])}")
+        ladder_text = ", ".join(
+            f"{_fmt_ladder_label(item.get('label'))} {_fmt_money(item.get('sell_usdc'))}"
+            for item in sell_ladder
+        ) or "n/a"
         print(
             "  - "
-            f"pnl: {_fmt_money(row['pnl'])}"
+            f"bag: {_fmt_money(row['buy'])}"
             f" | avg entry: {_fmt_price(row['avg_entry_price'])}"
             f" | entry range: {_fmt_price(row['min_entry_price'])} → {_fmt_price(row['max_entry_price'])}"
+        )
+        print(
+            "  - "
+            f"sell: {_fmt_money(row['sell'])}"
+            f" | ladder: {ladder_text}"
+            f" | pnl: {_fmt_money(row['pnl'])}"
         )
         token_label = rep.get('outcome_name') or 'n/a'
         print(f"  - token: {token_label}")
