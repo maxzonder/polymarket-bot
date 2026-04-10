@@ -86,10 +86,19 @@ class ExecutionCycleContext:
         if self.free_balance is not None:
             self.free_balance -= float(reserved_usdc)
 
-    def note_immediate_fill(self, *, market_id: str, token_id: str, stake_usdc: float) -> None:
+    def note_immediate_fill(
+        self,
+        *,
+        market_id: str,
+        token_id: str,
+        neg_risk_group_id: Optional[str],
+        stake_usdc: float,
+    ) -> None:
         key = (market_id, token_id)
         self.open_position_keys.add(key)
         self.open_position_tokens.add(token_id)
+        if neg_risk_group_id:
+            self.cluster_live_markets.setdefault(neg_risk_group_id, set()).add(market_id)
         if self.free_balance is not None:
             self.free_balance -= float(stake_usdc)
 
@@ -132,7 +141,8 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             closed_at        INTEGER,
             realized_pnl     REAL,
             mode             TEXT,
-            is_winner        INTEGER
+            is_winner        INTEGER,
+            neg_risk_group_id TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_pos_token ON positions(token_id);
         CREATE INDEX IF NOT EXISTS idx_pos_status ON positions(status);
@@ -282,6 +292,7 @@ class OrderManager:
             "ALTER TABLE positions      ADD COLUMN peak_price REAL",
             "ALTER TABLE positions      ADD COLUMN peak_x REAL",
             "ALTER TABLE positions      ADD COLUMN sold_quantity REAL NOT NULL DEFAULT 0",
+            "ALTER TABLE positions      ADD COLUMN neg_risk_group_id TEXT",
             "ALTER TABLE ml_outcomes    ADD COLUMN tp_10x_hit INTEGER",
             "ALTER TABLE ml_outcomes    ADD COLUMN tp_20x_hit INTEGER",
             "ALTER TABLE ml_outcomes    ADD COLUMN tp_moonbag_hit INTEGER",
@@ -309,7 +320,7 @@ class OrderManager:
     def build_cycle_context(self) -> ExecutionCycleContext:
         conn = self._conn()
         open_rows = conn.execute(
-            "SELECT market_id, token_id FROM positions WHERE status='open'"
+            "SELECT market_id, token_id, neg_risk_group_id FROM positions WHERE status='open'"
         ).fetchall()
         live_rows = conn.execute(
             "SELECT market_id, token_id, neg_risk_group_id FROM resting_orders WHERE status='live'"
@@ -319,6 +330,10 @@ class OrderManager:
 
         cluster_live_markets: dict[str, set[str]] = {}
         for row in live_rows:
+            cluster_key = row["neg_risk_group_id"]
+            if cluster_key:
+                cluster_live_markets.setdefault(str(cluster_key), set()).add(str(row["market_id"]))
+        for row in open_rows:
             cluster_key = row["neg_risk_group_id"]
             if cluster_key:
                 cluster_live_markets.setdefault(str(cluster_key), set()).add(str(row["market_id"]))
@@ -543,8 +558,12 @@ class OrderManager:
             if self.mc.max_resting_per_cluster > 0:
                 cluster_key = candidate.market_info.neg_risk_group_id
                 if cluster_key is not None:
-                    cluster_count = context.live_cluster_count(cluster_key)
-                    if cluster_count >= self.mc.max_resting_per_cluster:
+                    cluster_markets = context.cluster_live_markets.get(cluster_key, set())
+                    cluster_count = len(cluster_markets)
+                    if (
+                        candidate.market_info.market_id not in cluster_markets
+                        and cluster_count >= self.mc.max_resting_per_cluster
+                    ):
                         logger.debug(
                             f"Cluster cap: market {candidate.market_info.market_id} "
                             f"group={cluster_key} already has {cluster_count} markets"
@@ -663,6 +682,7 @@ class OrderManager:
                     context.note_immediate_fill(
                         market_id=candidate.market_info.market_id,
                         token_id=candidate.token_id,
+                        neg_risk_group_id=candidate.market_info.neg_risk_group_id,
                         stake_usdc=estimated_fill_cost,
                     )
                     result.status = "matched"
@@ -724,6 +744,22 @@ class OrderManager:
             logger.debug(f"Scanner entry: token {candidate.token_id[:16]} already has live order or open position — skipping")
             conn.close()
             return []
+
+        if self.mc.max_resting_per_cluster > 0:
+            cluster_key = candidate.market_info.neg_risk_group_id
+            if cluster_key is not None:
+                cluster_markets = context.cluster_live_markets.get(cluster_key, set())
+                cluster_count = len(cluster_markets)
+                if (
+                    candidate.market_info.market_id not in cluster_markets
+                    and cluster_count >= self.mc.max_resting_per_cluster
+                ):
+                    logger.debug(
+                        f"Scanner entry cluster cap: market {candidate.market_info.market_id} "
+                        f"group={cluster_key} already has {cluster_count} markets"
+                    )
+                    conn.close()
+                    return []
 
         try:
             book = get_orderbook(candidate.token_id)
@@ -819,12 +855,36 @@ class OrderManager:
                 outcome_name=candidate.outcome_name or "",
                 neg_risk_group_id=candidate.market_info.neg_risk_group_id,
             )
-            context.note_live_resting_order(
-                market_id=candidate.market_info.market_id,
-                token_id=candidate.token_id,
-                neg_risk_group_id=candidate.market_info.neg_risk_group_id,
-                reserved_usdc=execution_price * sized.token_quantity,
-            )
+            if result.status == "matched":
+                filled_qty = float(result.filled_size or sized.token_quantity)
+                conn.execute(
+                    "UPDATE resting_orders SET filled_quantity=?, status='matched' WHERE order_id=?",
+                    (filled_qty, result.order_id),
+                )
+                self.on_entry_filled(
+                    order_id=result.order_id,
+                    token_id=candidate.token_id,
+                    market_id=candidate.market_info.market_id,
+                    fill_price=execution_price,
+                    fill_quantity=filled_qty,
+                    outcome_name=candidate.outcome_name or "",
+                    neg_risk_group_id=candidate.market_info.neg_risk_group_id,
+                    conn=conn,
+                )
+                context.note_immediate_fill(
+                    market_id=candidate.market_info.market_id,
+                    token_id=candidate.token_id,
+                    neg_risk_group_id=candidate.market_info.neg_risk_group_id,
+                    stake_usdc=execution_price * filled_qty,
+                )
+                result.filled_size = filled_qty
+            else:
+                context.note_live_resting_order(
+                    market_id=candidate.market_info.market_id,
+                    token_id=candidate.token_id,
+                    neg_risk_group_id=candidate.market_info.neg_risk_group_id,
+                    reserved_usdc=execution_price * sized.token_quantity,
+                )
             logger.info(
                 f"Scanner BUY: {candidate.market_info.question[:50]!r} "
                 f"token={candidate.token_id[:16]} @ ${execution_price:.5f} "
@@ -1005,6 +1065,7 @@ class OrderManager:
         fill_price: float,
         fill_quantity: float,
         outcome_name: str = "",
+        neg_risk_group_id: Optional[str] = None,
         conn: Optional[sqlite3.Connection] = None,
     ) -> None:
         """Apply a BUY fill delta to the accumulated open position."""
@@ -1017,7 +1078,7 @@ class OrderManager:
             conn = self._conn()
 
         resting = conn.execute(
-            "SELECT size, filled_quantity, status FROM resting_orders WHERE order_id=?",
+            "SELECT size, filled_quantity, status, neg_risk_group_id FROM resting_orders WHERE order_id=?",
             (order_id,),
         ).fetchone()
         if resting is not None:
@@ -1029,6 +1090,8 @@ class OrderManager:
                 "UPDATE resting_orders SET filled_quantity=?, status=? WHERE order_id=?",
                 (new_filled, "matched" if is_done else prev_status, order_id),
             )
+            if neg_risk_group_id is None:
+                neg_risk_group_id = resting["neg_risk_group_id"]
 
         if self.config.dry_run:
             pb.debit(conn, stake_usdc, f"entry fill {order_id[:12]}")
@@ -1039,9 +1102,9 @@ class OrderManager:
             conn.execute(
                 "INSERT INTO positions "
                 "(position_id, token_id, market_id, outcome_name, entry_order_id, "
-                "entry_price, entry_size_usdc, token_quantity, sold_quantity, moonbag_quantity, status, opened_at, mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'open', ?, ?)",
-                (position_id, token_id, market_id, outcome_name, order_id, fill_price, stake_usdc, fill_quantity, now, self.mc.name),
+                "entry_price, entry_size_usdc, token_quantity, sold_quantity, moonbag_quantity, status, opened_at, mode, neg_risk_group_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'open', ?, ?, ?)",
+                (position_id, token_id, market_id, outcome_name, order_id, fill_price, stake_usdc, fill_quantity, now, self.mc.name, neg_risk_group_id),
             )
         else:
             position_id = pos["position_id"]
@@ -1050,8 +1113,9 @@ class OrderManager:
             avg_entry = total_usdc / max(total_qty, 1e-12)
             conn.execute(
                 "UPDATE positions SET outcome_name=COALESCE(NULLIF(outcome_name, ''), ?), "
-                "entry_price=?, entry_size_usdc=?, token_quantity=? WHERE position_id=?",
-                (outcome_name, avg_entry, total_usdc, total_qty, position_id),
+                "entry_price=?, entry_size_usdc=?, token_quantity=?, "
+                "neg_risk_group_id=COALESCE(neg_risk_group_id, ?) WHERE position_id=?",
+                (outcome_name, avg_entry, total_usdc, total_qty, neg_risk_group_id, position_id),
             )
 
         self._reconcile_tp_orders(conn, position_id, token_id, market_id)
