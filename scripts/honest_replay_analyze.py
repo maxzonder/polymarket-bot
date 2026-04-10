@@ -340,6 +340,12 @@ def _collect_run_data(run_dir: Path) -> dict:
           round(max(coalesce(peak_x, 0)), 6) as max_peak_x
         from positions
     """)
+    realized_sell = cur.execute(
+        """
+        select round(sum(case when status='resolved' then case when entry_size_usdc + coalesce(realized_pnl, 0) > 0 then entry_size_usdc + coalesce(realized_pnl, 0) else 0 end else 0 end), 6)
+        from positions
+        """
+    ).fetchone()[0] or 0.0
 
     winners = cur.execute("select count(*) from positions where status='resolved' and coalesce(realized_pnl, 0) > 0").fetchone()[0]
     losers = cur.execute("select count(*) from positions where status='resolved' and coalesce(realized_pnl, 0) <= 0").fetchone()[0]
@@ -409,8 +415,11 @@ def _collect_run_data(run_dir: Path) -> dict:
         "distinct_markets": distinct_markets,
         "distinct_tokens": distinct_tokens,
         "stake": overall.get("stake"),
+        "buy": overall.get("stake"),
+        "sell": realized_sell,
         "pnl": overall.get("pnl"),
         "roi_on_stake_pct": (overall.get("roi_on_stake") * 100.0) if overall.get("roi_on_stake") is not None else None,
+        "roi_on_buy_pct": (overall.get("roi_on_stake") * 100.0) if overall.get("roi_on_stake") is not None else None,
         "initial_balance": initial_balance,
         "final_equity": final_equity,
         "bankroll_return_pct": bankroll_return_pct,
@@ -459,6 +468,14 @@ def _close_data(data: dict) -> None:
         data["tape_conn"].close()
 
 
+def _realized_sell_value(entry_size_usdc: float | None, realized_pnl: float | None, status: str | None) -> float:
+    if status != "resolved":
+        return 0.0
+    buy = float(entry_size_usdc or 0.0)
+    pnl = float(realized_pnl or 0.0)
+    return max(0.0, buy + pnl)
+
+
 def _entry_price_bucket_rows(cur: sqlite3.Cursor, levels: tuple[float, ...]) -> list[dict]:
     rows = _rows(
         cur,
@@ -479,7 +496,8 @@ def _entry_price_bucket_rows(cur: sqlite3.Cursor, levels: tuple[float, ...]) -> 
             {
                 "bucket": label,
                 "positions": 0,
-                "stake": 0.0,
+                "buy": 0.0,
+                "sell": 0.0,
                 "pnl": 0.0,
                 "resolved": 0,
                 "winners": 0,
@@ -487,7 +505,8 @@ def _entry_price_bucket_rows(cur: sqlite3.Cursor, levels: tuple[float, ...]) -> 
             },
         )
         bucket["positions"] += 1
-        bucket["stake"] += float(row["entry_size_usdc"] or 0.0)
+        bucket["buy"] += float(row["entry_size_usdc"] or 0.0)
+        bucket["sell"] += _realized_sell_value(row["entry_size_usdc"], row["realized_pnl"], row["status"])
         bucket["pnl"] += float(row["realized_pnl"] or 0.0)
         bucket["price_weighted_sum"] += float(row["entry_price"] or 0.0) * float(row["entry_size_usdc"] or 0.0)
         if row["status"] == "resolved":
@@ -511,8 +530,8 @@ def _entry_price_bucket_rows(cur: sqlite3.Cursor, levels: tuple[float, ...]) -> 
             continue
         bucket = buckets[label]
         bucket["win_rate_pct"] = (_safe_div(bucket["winners"], bucket["resolved"]) * 100.0) if bucket["resolved"] else None
-        bucket["roi_on_stake_pct"] = (_safe_div(bucket["pnl"], bucket["stake"]) * 100.0) if bucket["stake"] else None
-        bucket["weighted_avg_entry"] = _safe_div(bucket["price_weighted_sum"], bucket["stake"])
+        bucket["roi_on_buy_pct"] = (_safe_div(bucket["pnl"], bucket["buy"]) * 100.0) if bucket["buy"] else None
+        bucket["weighted_avg_entry"] = _safe_div(bucket["price_weighted_sum"], bucket["buy"])
         result.append(bucket)
     return result
 
@@ -563,7 +582,8 @@ def _category_rows(cur: sqlite3.Cursor, category_weights: dict) -> list[dict]:
           count(*) as positions,
           sum(case when p.status='resolved' then 1 else 0 end) as resolved,
           sum(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) as winners,
-          round(sum(p.entry_size_usdc), 6) as stake,
+          round(sum(p.entry_size_usdc), 6) as buy,
+          round(sum(case when p.status='resolved' then case when p.entry_size_usdc + coalesce(p.realized_pnl, 0) > 0 then p.entry_size_usdc + coalesce(p.realized_pnl, 0) else 0 end else 0 end), 6) as sell,
           round(sum(coalesce(p.realized_pnl, 0)), 6) as pnl,
           round(avg(p.entry_price), 6) as avg_entry_price,
           round(avg(case when m.end_date is not null then (m.end_date - p.opened_at) / 3600.0 end), 2) as avg_hours_to_close,
@@ -571,13 +591,13 @@ def _category_rows(cur: sqlite3.Cursor, category_weights: dict) -> list[dict]:
         from positions p
         left join dataset.markets m on cast(m.id as text) = p.market_id
         group by coalesce(m.category, 'unknown')
-        order by stake desc, positions desc
+        order by buy desc, positions desc
         """,
     )
     for row in rows:
         row["category_weight"] = category_weights.get(row["category"])
         row["win_rate_pct"] = (_safe_div(row["winners"], row["resolved"]) * 100.0) if row["resolved"] else None
-        row["roi_on_stake_pct"] = (_safe_div(row["pnl"], row["stake"]) * 100.0) if row["stake"] else None
+        row["roi_on_buy_pct"] = (_safe_div(row["pnl"], row["buy"]) * 100.0) if row["buy"] else None
     return rows
 
 
@@ -596,7 +616,8 @@ def _time_bucket_rows(cur: sqlite3.Cursor) -> list[dict]:
           count(*) as positions,
           sum(case when p.status='resolved' then 1 else 0 end) as resolved,
           sum(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) as winners,
-          round(sum(p.entry_size_usdc), 6) as stake,
+          round(sum(p.entry_size_usdc), 6) as buy,
+          round(sum(case when p.status='resolved' then case when p.entry_size_usdc + coalesce(p.realized_pnl, 0) > 0 then p.entry_size_usdc + coalesce(p.realized_pnl, 0) else 0 end else 0 end), 6) as sell,
           round(sum(coalesce(p.realized_pnl, 0)), 6) as pnl,
           round(avg(p.entry_price), 6) as avg_entry_price
         from positions p
@@ -608,7 +629,7 @@ def _time_bucket_rows(cur: sqlite3.Cursor) -> list[dict]:
     rows.sort(key=lambda row: order.get(row["bucket"], 99))
     for row in rows:
         row["win_rate_pct"] = (_safe_div(row["winners"], row["resolved"]) * 100.0) if row["resolved"] else None
-        row["roi_on_stake_pct"] = (_safe_div(row["pnl"], row["stake"]) * 100.0) if row["stake"] else None
+        row["roi_on_buy_pct"] = (_safe_div(row["pnl"], row["buy"]) * 100.0) if row["buy"] else None
     return rows
 
 
@@ -681,7 +702,8 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           sum(case when p.status='resolved' then 1 else 0 end) as resolved_positions,
           sum(case when p.status='open' then 1 else 0 end) as open_positions,
           sum(case when coalesce(p.is_winner, 0)=1 then 1 else 0 end) as winners,
-          round(sum(p.entry_size_usdc), 6) as stake,
+          round(sum(p.entry_size_usdc), 6) as buy,
+          round(sum(case when p.status='resolved' then case when p.entry_size_usdc + coalesce(p.realized_pnl, 0) > 0 then p.entry_size_usdc + coalesce(p.realized_pnl, 0) else 0 end else 0 end), 6) as sell,
           round(sum(coalesce(p.realized_pnl, 0)), 6) as pnl,
           round(avg(p.entry_price), 6) as avg_entry_price,
           round(min(p.entry_price), 6) as min_entry_price,
@@ -692,7 +714,7 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
         left join dataset.markets m on cast(m.id as text) = p.market_id
         group by p.market_id, question, category, neg_risk, start_date_ts, end_date_ts, volume_usdc
         having sum(coalesce(p.realized_pnl, 0)) {having}
-        order by pnl {ordering}, stake desc
+        order by pnl {ordering}, buy desc
         limit {int(top)}
         """
     )
@@ -719,8 +741,8 @@ def _print_headline(data: dict) -> None:
     _print_key_value("final equity", f"{_fmt_money(m.get('final_equity'))} from {_fmt_money(m.get('initial_balance'))}")
     _print_key_value("bankroll return", _fmt_pct(m.get("bankroll_return_pct"), 1))
     _print_key_value(
-        "realized pnl",
-        f"{_fmt_money(m.get('pnl'))} on {_fmt_money(m.get('stake'))} stake ({_fmt_pct(m.get('roi_on_stake_pct'), 1)} ROI on stake)",
+        "realized trade flow",
+        f"buy {_fmt_money(m.get('buy'))} → sell {_fmt_money(m.get('sell'))} | pnl {_fmt_money(m.get('pnl'))} | ROI on buy {_fmt_pct(m.get('roi_on_buy_pct'), 1)}",
     )
     _print_key_value(
         "positions",
@@ -869,26 +891,26 @@ def _print_entry_price_analysis(data: dict) -> None:
             print(
                 "  - "
                 f"{row['bucket']}: positions {_fmt_int(row['positions'])}, "
-                f"stake {_fmt_money(row['stake'])}, pnl {_fmt_money(row['pnl'])}, "
-                f"ROI {_fmt_pct(row['roi_on_stake_pct'], 1)}, resolved WR {_fmt_pct(row['win_rate_pct'], 1)}"
+                f"buy {_fmt_money(row['buy'])}, sell {_fmt_money(row['sell'])}, pnl {_fmt_money(row['pnl'])}, "
+                f"ROI {_fmt_pct(row['roi_on_buy_pct'], 1)}, resolved WR {_fmt_pct(row['win_rate_pct'], 1)}"
             )
 
-        dominant = max(rows, key=lambda row: (row["positions"], row["stake"]))
-        best = max(rows, key=lambda row: row["roi_on_stake_pct"] if row["roi_on_stake_pct"] is not None else -10**9)
-        worst = min(rows, key=lambda row: row["roi_on_stake_pct"] if row["roi_on_stake_pct"] is not None else 10**9)
+        dominant = max(rows, key=lambda row: (row["positions"], row["buy"]))
+        best = max(rows, key=lambda row: row["roi_on_buy_pct"] if row["roi_on_buy_pct"] is not None else -10**9)
+        worst = min(rows, key=lambda row: row["roi_on_buy_pct"] if row["roi_on_buy_pct"] is not None else 10**9)
 
         print("- signals:")
         print(
             f"  - largest fill bucket: {dominant['bucket']} | positions {_fmt_int(dominant['positions'])} | "
-            f"stake {_fmt_money(dominant['stake'])} | ROI {_fmt_pct(dominant['roi_on_stake_pct'], 1)}"
+            f"buy {_fmt_money(dominant['buy'])} | ROI {_fmt_pct(dominant['roi_on_buy_pct'], 1)}"
         )
         print(
-            f"  - best bucket by ROI: {best['bucket']} | pnl {_fmt_money(best['pnl'])} | "
-            f"ROI {_fmt_pct(best['roi_on_stake_pct'], 1)} | resolved WR {_fmt_pct(best['win_rate_pct'], 1)}"
+            f"  - best bucket by ROI: {best['bucket']} | sell {_fmt_money(best['sell'])} | pnl {_fmt_money(best['pnl'])} | "
+            f"ROI {_fmt_pct(best['roi_on_buy_pct'], 1)} | resolved WR {_fmt_pct(best['win_rate_pct'], 1)}"
         )
         print(
-            f"  - worst bucket by ROI: {worst['bucket']} | pnl {_fmt_money(worst['pnl'])} | "
-            f"ROI {_fmt_pct(worst['roi_on_stake_pct'], 1)} | resolved WR {_fmt_pct(worst['win_rate_pct'], 1)}"
+            f"  - worst bucket by ROI: {worst['bucket']} | sell {_fmt_money(worst['sell'])} | pnl {_fmt_money(worst['pnl'])} | "
+            f"ROI {_fmt_pct(worst['roi_on_buy_pct'], 1)} | resolved WR {_fmt_pct(worst['win_rate_pct'], 1)}"
         )
 
 
@@ -926,7 +948,7 @@ def _print_selection_profile(data: dict) -> None:
             print(
                 "  - "
                 f"{row['category']}: cfg weight {row['category_weight'] if row['category_weight'] is not None else 'n/a'}, "
-                f"positions {_fmt_int(row['positions'])}, stake {_fmt_money(row['stake'])}, pnl {_fmt_money(row['pnl'])}, "
+                f"positions {_fmt_int(row['positions'])}, buy {_fmt_money(row['buy'])}, sell {_fmt_money(row['sell'])}, pnl {_fmt_money(row['pnl'])}, "
                 f"resolved WR {_fmt_pct(row['win_rate_pct'], 1)}, avg entry {_fmt_price(row['avg_entry_price'])}, "
                 f"avg time-to-close {_fmt_hours(row['avg_hours_to_close'])}"
             )
@@ -936,8 +958,8 @@ def _print_selection_profile(data: dict) -> None:
         for row in time_rows:
             print(
                 "  - "
-                f"{row['bucket']}: positions {_fmt_int(row['positions'])}, stake {_fmt_money(row['stake'])}, "
-                f"pnl {_fmt_money(row['pnl'])}, resolved WR {_fmt_pct(row['win_rate_pct'], 1)}, "
+                f"{row['bucket']}: positions {_fmt_int(row['positions'])}, buy {_fmt_money(row['buy'])}, "
+                f"sell {_fmt_money(row['sell'])}, pnl {_fmt_money(row['pnl'])}, resolved WR {_fmt_pct(row['win_rate_pct'], 1)}, "
                 f"avg entry {_fmt_price(row['avg_entry_price'])}"
             )
 
@@ -990,7 +1012,8 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
         )
         print(
             "  - "
-            f"stake: {_fmt_money(row['stake'])}"
+            f"buy: {_fmt_money(row['buy'])}"
+            f" | sell: {_fmt_money(row['sell'])}"
             f" | pnl: {_fmt_money(row['pnl'])}"
             f" | avg entry: {_fmt_price(row['avg_entry_price'])}"
             f" | entry range: {_fmt_price(row['min_entry_price'])} → {_fmt_price(row['max_entry_price'])}"
