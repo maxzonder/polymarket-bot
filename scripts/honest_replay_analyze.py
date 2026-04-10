@@ -684,6 +684,18 @@ def _token_price_path(tape_cur: sqlite3.Cursor | None, market_id: str, token_id:
     return (summary, spark)
 
 
+def _fmt_neg_risk_badge(group_id: object | None) -> str:
+    raw = str(group_id or "").strip()
+    if not raw:
+        return "NEG-RISK"
+    if raw.lower().startswith("0x"):
+        raw = raw[2:]
+    raw = re.sub(r"[^0-9A-Za-z]+", "", raw)
+    if not raw:
+        return "NEG-RISK"
+    return f"NR-{raw[:7].upper()}"
+
+
 def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[dict]:
     having = "> 0" if winners else "< 0"
     ordering = "desc" if winners else "asc"
@@ -695,6 +707,7 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           coalesce(m.question, p.market_id) as question,
           coalesce(m.category, 'unknown') as category,
           coalesce(m.neg_risk, 0) as neg_risk,
+          m.neg_risk_market_id as neg_risk_group_id,
           m.start_date as start_date_ts,
           m.end_date as end_date_ts,
           round(coalesce(m.volume, 0), 2) as volume_usdc,
@@ -712,7 +725,7 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           max(coalesce(p.closed_at, p.opened_at)) as last_activity_at
         from positions p
         left join dataset.markets m on cast(m.id as text) = p.market_id
-        group by p.market_id, question, category, neg_risk, start_date_ts, end_date_ts, volume_usdc
+        group by p.market_id, question, category, neg_risk, neg_risk_group_id, start_date_ts, end_date_ts, volume_usdc
         having sum(coalesce(p.realized_pnl, 0)) {having}
         order by pnl {ordering}, buy desc
         limit {int(top)}
@@ -993,7 +1006,7 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
         print(f"- [{idx}] {row['market_id']} | {_short_text(row['question'], 120)}")
         category_label = str(row['category'])
         if int(row.get('neg_risk') or 0):
-            category_label += " | NEG-RISK"
+            category_label += f" | {_fmt_neg_risk_badge(row.get('neg_risk_group_id'))}"
         print(
             "  - "
             f"category: {category_label}"
@@ -1177,9 +1190,11 @@ def _render_value_html(key: str, value: str) -> str:
         if stripped.lower() == "no":
             return '<span class="token token-no">No</span>'
         return f'<span class="token token-generic">{escape(stripped)}</span>'
-    if key_norm == "category" and "| NEG-RISK" in stripped:
-        left, _sep, _right = stripped.partition("| NEG-RISK")
-        return f'{escape(left.strip())} | <strong class="neg-risk">NEG-RISK</strong>'
+    if key_norm == "category" and "| " in stripped:
+        left, _sep, right = stripped.partition("| ")
+        right = right.strip()
+        if right == "NEG-RISK" or right.startswith("NR-"):
+            return f'{escape(left.strip())} | <strong class="neg-risk">{escape(right)}</strong>'
     return escape(value)
 
 
