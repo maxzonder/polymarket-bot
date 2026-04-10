@@ -777,6 +777,51 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
     return rows
 
 
+def _top_neg_risk_groups(cur: sqlite3.Cursor, top: int) -> list[dict]:
+    top_rows = _top_market_rows(cur, top, winners=True) + _top_market_rows(cur, top, winners=False)
+    group_ids: list[str] = []
+    seen: set[str] = set()
+    for row in top_rows:
+        if int(row.get("neg_risk") or 0) != 1:
+            continue
+        group_id = str(row.get("neg_risk_group_id") or "").strip()
+        if not group_id or group_id in seen:
+            continue
+        seen.add(group_id)
+        group_ids.append(group_id)
+
+    groups: list[dict] = []
+    for group_id in group_ids:
+        rows = _rows(
+            cur,
+            """
+            select
+              p.market_id,
+              coalesce(m.question, p.market_id) as question,
+              round(sum(coalesce(p.realized_pnl, 0)), 6) as pnl,
+              max(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) as is_winner,
+              max(case when p.status='resolved' and coalesce(p.is_winner, 0)=0 then 1 else 0 end) as is_loser,
+              max(case when p.status='open' then 1 else 0 end) as is_open
+            from positions p
+            left join dataset.markets m on cast(m.id as text) = p.market_id
+            where coalesce(m.neg_risk, 0) = 1 and m.neg_risk_market_id = ?
+            group by p.market_id, question
+            order by
+              case
+                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=1 then 1 else 0 end) = 1 then 0
+                when max(case when p.status='resolved' and coalesce(p.is_winner, 0)=0 then 1 else 0 end) = 1 then 1
+                else 2
+              end,
+              question collate nocase,
+              p.market_id
+            """,
+            (group_id,),
+        )
+        if rows:
+            groups.append({"group_id": group_id, "rows": rows})
+    return groups
+
+
 def _print_key_value(label: str, value: str) -> None:
     print(f"- {label}: {value}")
 
@@ -1382,7 +1427,28 @@ def _render_section_html(title: str, lines: list[str]) -> str:
     return "".join(html)
 
 
-def _text_report_to_html(text: str, title: str) -> str:
+def _render_neg_risk_section(groups: list[dict]) -> str:
+    if not groups:
+        return ""
+    html = ['<section class="section"><h2>neg-risk</h2><div class="neg-risk-groups">']
+    for group in groups:
+        badge = _fmt_neg_risk_badge(group.get("group_id"))
+        html.append(f'<div class="subcard neg-risk-group"><h3>{escape(badge)}</h3><ol class="neg-risk-list">')
+        for row in group.get("rows", []):
+            cls = "nr-open"
+            if int(row.get("is_winner") or 0) == 1:
+                cls = "nr-win"
+            elif int(row.get("is_loser") or 0) == 1:
+                cls = "nr-loss"
+            html.append(
+                f'<li class="{cls}"><span class="nr-question">{escape(str(row.get("question") or row.get("market_id") or "n/a"))}</span></li>'
+            )
+        html.append('</ol></div>')
+    html.append('</div></section>')
+    return ''.join(html)
+
+
+def _text_report_to_html(text: str, title: str, neg_risk_groups: list[dict] | None = None) -> str:
     report_name, header_lines, sections = _parse_text_report(text)
 
     header_rows: list[tuple[str, str]] = []
@@ -1403,6 +1469,9 @@ def _text_report_to_html(text: str, title: str) -> str:
 
     for section_title, section_lines in sections:
         body.append(_render_section_html(section_title, section_lines))
+
+    if neg_risk_groups:
+        body.append(_render_neg_risk_section(neg_risk_groups))
 
     css = """
     :root {
@@ -1621,6 +1690,36 @@ def _text_report_to_html(text: str, title: str) -> str:
       margin: 8px 0 0;
       color: var(--text);
     }
+    .neg-risk-groups {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+    }
+    .neg-risk-group {
+      background: var(--panel-3);
+    }
+    .neg-risk-list {
+      margin: 0;
+      padding-left: 1.35rem;
+    }
+    .neg-risk-list li {
+      margin: 0 0 8px;
+    }
+    .nr-question {
+      display: inline-block;
+      line-height: 1.45;
+    }
+    .nr-win .nr-question {
+      color: #7df0ae;
+      font-weight: 700;
+    }
+    .nr-loss .nr-question {
+      color: #ff9db1;
+      font-weight: 700;
+    }
+    .nr-open .nr-question {
+      color: #d8e0ee;
+    }
     strong { font-weight: 800; }
     @media (max-width: 900px) {
       body { padding: 14px; }
@@ -1652,9 +1751,9 @@ def _text_report_to_html(text: str, title: str) -> str:
     )
 
 
-def _write_html_report(html_path: Path, text: str, title: str) -> None:
+def _write_html_report(html_path: Path, text: str, title: str, neg_risk_groups: list[dict] | None = None) -> None:
     html_path.parent.mkdir(parents=True, exist_ok=True)
-    html_path.write_text(_text_report_to_html(text, title), encoding="utf-8")
+    html_path.write_text(_text_report_to_html(text, title, neg_risk_groups=neg_risk_groups), encoding="utf-8")
 
 
 def main() -> None:
@@ -1679,7 +1778,8 @@ def main() -> None:
         print(text, end="")
         if args.html_out:
             title = f"Replay report, {data['run_dir'].name}"
-            _write_html_report(Path(args.html_out), text, title)
+            neg_risk_groups = _top_neg_risk_groups(data["cur"], args.top)
+            _write_html_report(Path(args.html_out), text, title, neg_risk_groups=neg_risk_groups)
     finally:
         _close_data(data)
 
