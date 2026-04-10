@@ -16,8 +16,8 @@ from api.clob_client import ClobClient
 from config import BotConfig
 from execution.order_manager import OrderManager
 from execution.position_monitor import PositionMonitor
-from replay.offline_dryrun import OfflineDryRunState
-from replay.tape_feed import (
+from offline_dryrun import OfflineDryRunState
+from tape_feed import (
     DEFAULT_TAPE_DB_PATH,
     has_valid_tape_db,
     iter_tape_batches,
