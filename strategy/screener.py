@@ -72,7 +72,7 @@ class Screener:
     Soft scoring (produces ranking):
     v1.1: market_scorer (MarketScorer) replaces category-level EntryFillScorer +
           ResolutionScorer for ranking. Legacy scorers still supported as fallback.
-    - market_score from MarketScorer (per-market, not per-category)
+    - market_score from MarketScorer (market-level features, side-aware analogy when token side is known)
     - entry_fill_score from EntryFillScorer (backward-compat)
     - resolution_score from ResolutionScorer (backward-compat)
     - category_weight from config
@@ -227,17 +227,28 @@ class Screener:
             return []
 
         # v1.1: market-level score gate — runs BEFORE ef_score.
-        # Rationale: ef_score is category-level and can't differentiate within a category.
-        # market_scorer uses per-market signals (volume, duration, analogy, neg_risk).
-        # Running it first means ef_score never fires on markets already rejected by
-        # market_scorer, making the funnel easier to read and market_scorer effective.
-        # Issue #47 identified that running market_scorer AFTER ef_score made it a
-        # dead gate (ef_score pre-filtered all markets that would fail market_scorer).
-        ms_obj: Optional[MarketScore] = None
+        # With side-aware analogy enabled, the same market can score differently for
+        # YES vs NO, so we precompute a per-token market_score and only reject the
+        # whole market if every token side fails.
+        token_market_scores: list[Optional[MarketScore]] = [None] * len(m.token_ids)
+        market_score_for_market: Optional[MarketScore] = None
         if self.market_scorer is not None:
-            ms_obj = self.market_scorer.score(m, hours_to_close=hours)
-            if ms_obj.tier == "reject":
-                _log("rejected_market_score", ms=ms_obj.total)
+            any_token_passes_market_score = False
+            for i, _token_id in enumerate(m.token_ids):
+                ms_obj = self.market_scorer.score(m, hours_to_close=hours, token_order=i)
+                token_market_scores[i] = ms_obj
+                if market_score_for_market is None or ms_obj.total > market_score_for_market.total:
+                    market_score_for_market = ms_obj
+                if ms_obj.tier != "reject":
+                    any_token_passes_market_score = True
+            if not any_token_passes_market_score:
+                for i, token_id in enumerate(m.token_ids):
+                    ms_obj = token_market_scores[i]
+                    _log(
+                        "rejected_market_score",
+                        token_id=token_id,
+                        ms=ms_obj.total if ms_obj else None,
+                    )
                 return []
 
         # Dead market filter: reject if no trades in the last dead_market_hours.
@@ -246,7 +257,7 @@ class Screener:
         if last_trade is not None:
             hours_since_trade = (time.time() - last_trade) / 3600.0
             if hours_since_trade > self.config.dead_market_hours:
-                _log("rejected_dead_market", ms=ms_obj.total if ms_obj else None)
+                _log("rejected_dead_market", ms=market_score_for_market.total if market_score_for_market else None)
                 return []
 
         ef_score_obj  = self.ef_scorer.get(m.category)
@@ -286,6 +297,11 @@ class Screener:
                 continue
             if price >= 0.99:
                 _log("rejected_price_ge_0_99", token_id=token_id, price=price)
+                continue
+
+            ms_obj = token_market_scores[i] if i < len(token_market_scores) else None
+            if ms_obj is not None and ms_obj.tier == "reject":
+                _log("rejected_market_score", token_id=token_id, price=price, ef=ef_s, res=res_s, ms=ms_obj.total)
                 continue
 
             # v1.1: for NO token that passed the price gate, refine with real CLOB ask.
