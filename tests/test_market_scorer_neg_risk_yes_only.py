@@ -123,38 +123,44 @@ class FeatureMartNegRiskYesOnlyTests(unittest.TestCase):
 
 
 class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
+    def _build_dataset(self, db_path: Path, include_neg_risk_yes: bool) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE feature_mart_v1_1 (
+                market_id TEXT PRIMARY KEY,
+                category TEXT,
+                volume_usdc REAL,
+                log_volume REAL,
+                was_swan INTEGER,
+                swan_is_winner INTEGER,
+                best_swan_is_yes_token INTEGER,
+                label_20x INTEGER,
+                neg_risk INTEGER
+            )
+            """
+        )
+        rows = []
+        for i in range(20):
+            rows.append((f"bin_{i}", "sports", 20000.0, 1.0, 0, None, None, 0, 0))
+        if include_neg_risk_yes:
+            for i in range(20):
+                rows.append((f"nr_yes_{i}", "sports", 20000.0, 1.0, 1, 1, 1, 1, 1))
+        for i in range(20):
+            rows.append((f"nr_no_{i}", "sports", 20000.0, 1.0, 1, 0, 0, 0, 1))
+        for i in range(20):
+            rows.append((f"bin_hi_{i}", "weather", 20000.0, 1.0, 1, 1, None, 1 if i < 10 else 0, 0))
+        conn.executemany(
+            "INSERT INTO feature_mart_v1_1 (market_id, category, volume_usdc, log_volume, was_swan, swan_is_winner, best_swan_is_yes_token, label_20x, neg_risk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
     def test_neg_risk_yes_uses_dedicated_lookup_but_binary_does_not(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "dataset.db"
-            conn = sqlite3.connect(db_path)
-            conn.execute(
-                """
-                CREATE TABLE feature_mart_v1_1 (
-                    market_id TEXT PRIMARY KEY,
-                    category TEXT,
-                    volume_usdc REAL,
-                    log_volume REAL,
-                    was_swan INTEGER,
-                    swan_is_winner INTEGER,
-                    best_swan_is_yes_token INTEGER,
-                    label_20x INTEGER,
-                    neg_risk INTEGER
-                )
-                """
-            )
-            rows = []
-            for i in range(20):
-                rows.append((f"bin_{i}", "sports", 20000.0, 1.0, 0, None, None, 0, 0))
-            for i in range(20):
-                rows.append((f"nr_yes_{i}", "sports", 20000.0, 1.0, 1, 1, 1, 1, 1))
-            for i in range(20):
-                rows.append((f"nr_no_{i}", "sports", 20000.0, 1.0, 1, 0, 0, 0, 1))
-            conn.executemany(
-                "INSERT INTO feature_mart_v1_1 (market_id, category, volume_usdc, log_volume, was_swan, swan_is_winner, best_swan_is_yes_token, label_20x, neg_risk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                rows,
-            )
-            conn.commit()
-            conn.close()
+            self._build_dataset(db_path, include_neg_risk_yes=True)
 
             scorer = MarketScorer(db_path=db_path)
             yes_score = scorer.score_from_db(
@@ -186,8 +192,38 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             )
 
             self.assertAlmostEqual(yes_score.analogy_score, 1.0, places=4)
-            self.assertAlmostEqual(no_score.analogy_score, 1.0 / 3.0, places=4)
-            self.assertAlmostEqual(binary_score.analogy_score, 1.0 / 3.0, places=4)
+            self.assertAlmostEqual(no_score.analogy_score, 2.0 / 3.0, places=4)
+            self.assertAlmostEqual(binary_score.analogy_score, 2.0 / 3.0, places=4)
+
+    def test_neg_risk_yes_lookup_does_not_rescale_blended_scores(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "dataset.db"
+            self._build_dataset(db_path, include_neg_risk_yes=True)
+
+            scorer = MarketScorer(db_path=db_path)
+            binary_score = scorer.score_from_db(
+                market_id="live_bin_yes",
+                volume=20000.0,
+                comment_count=0,
+                hours_to_close=24.0,
+                category="sports",
+                neg_risk=False,
+                is_no_token=False,
+            )
+            neg_risk_no_score = scorer.score_from_db(
+                market_id="live_nr_no",
+                volume=20000.0,
+                comment_count=0,
+                hours_to_close=24.0,
+                category="sports",
+                neg_risk=True,
+                is_no_token=True,
+            )
+
+            # Baseline blended normalization for sports is (1/3) / 0.5 = 2/3.
+            # Dedicated YES-neg-risk lookup must not change this blended scale.
+            self.assertAlmostEqual(binary_score.analogy_score, 2.0 / 3.0, places=4)
+            self.assertAlmostEqual(neg_risk_no_score.analogy_score, 2.0 / 3.0, places=4)
 
     def test_screener_keeps_neg_risk_yes_and_rejects_neg_risk_no(self) -> None:
         config = BotConfig()

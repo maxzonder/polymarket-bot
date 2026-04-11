@@ -189,11 +189,15 @@ class MarketScorer:
                 total, good = r["total"], r["good"]
                 raw_yes_negrisk[(cat, vbk)] = (good or 0) / max(total, 1)
 
-            max_rate = max([*raw.values(), *raw_yes_negrisk.values()], default=1.0)
+            max_rate = max(raw.values(), default=1.0)
             self._max_analogy = max_rate
-            # Normalise to [0, 1]
+            # Normalise blended cohorts by blended max only.
             self._analogy = {k: v / max_rate for k, v in raw.items()}
-            self._analogy_yes_negrisk = {k: v / max_rate for k, v in raw_yes_negrisk.items()}
+            # Neg-risk YES cohorts reuse the same baseline scale, capped at 1.0.
+            self._analogy_yes_negrisk = {
+                k: min(v / max_rate, 1.0)
+                for k, v in raw_yes_negrisk.items()
+            }
             self._loser_rates = raw_loser
             self._ready = len(self._analogy) > 0
 
