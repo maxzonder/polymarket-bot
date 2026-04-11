@@ -8,7 +8,6 @@ config.py
 │   ├── mode → ModeConfig  — стратегия
 │   ├── screener_interval, monitor_interval, resting_cleanup_interval
 │   ├── min_volume_usdc, max_volume_usdc, dead_market_hours
-│   ├── scorer_entry_price_max, scorer_min_samples
 │   └── category_weights
 └── ModeConfig  — иммутабельный объект стратегии
     ├── entry_price_levels, entry_price_max
@@ -101,7 +100,7 @@ from config import BIG_SWAN_MODE, BotConfig
 cfg = BotConfig()
 ```
 
-Использует `BIG_SWAN_MODE.entry_price_levels` и `BotConfig.scorer_entry_price_max` как ориентиры при анализе порогов. Результат → `recommended_config.json`.
+Использует `BIG_SWAN_MODE.entry_price_levels` и `SWAN_BUY_PRICE_THRESHOLD` как ориентиры при анализе порогов. Результат → `recommended_config.json`.
 
 ---
 
@@ -126,10 +125,6 @@ POLY_PRIVATE_KEY=...     # нужен только при DRY_RUN=false
 BotConfig
 │
 ├── .mode → ModeConfig mc
-│   ├── Scorer (strategy/scorer.py)
-│   │     entry_price_max ← max(mc.entry_price_levels)
-│   │     min_samples     ← config.scorer_min_samples
-│   │
 │   ├── MarketScorer (strategy/market_scorer.py)
 │   │     min_score ← mc.min_market_score
 │   │     (данные из feature_mart_v1_1 в SQLite)

@@ -91,8 +91,6 @@ def _candidate(group_id: str, market_id: str, token_id: str) -> EntryCandidate:
         token_id=token_id,
         outcome_name="Yes",
         current_price=0.08,
-        entry_fill_score=0.5,
-        resolution_score=0.5,
         total_score=0.5,
         suggested_entry_levels=[0.05],
         candidate_id=f"cand-{market_id}",

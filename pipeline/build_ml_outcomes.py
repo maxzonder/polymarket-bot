@@ -52,8 +52,6 @@ SELECT
     sl.current_price,
     sl.hours_to_close,
     sl.volume_usdc,
-    sl.ef_score,
-    sl.res_score,
     r.price                                     AS entry_level,
     r.order_id,
     r.created_at                                AS order_created_at,
@@ -97,7 +95,7 @@ WHERE sl.outcome = 'passed_to_order_manager'
 _UPSERT = """
 INSERT INTO ml_outcomes (
     materialized_at, candidate_id, market_id, token_id, question, category,
-    current_price, hours_to_close, volume_usdc, ef_score, res_score,
+    current_price, hours_to_close, volume_usdc,
     entry_level, order_id,
     got_fill, is_winner, realized_pnl, realized_roi, time_to_fill_hours,
     tp_5x_hit, tp_10x_hit, tp_20x_hit, tp_moonbag_hit,
@@ -106,7 +104,7 @@ INSERT INTO ml_outcomes (
 )
 VALUES (
     ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?,
+    ?, ?, ?,
     ?, ?,
     ?, ?, ?, ?, ?,
     ?, ?, ?, ?,
@@ -161,8 +159,6 @@ def build(conn: sqlite3.Connection, rebuild: bool = False) -> int:
             r["current_price"],
             r["hours_to_close"],
             r["volume_usdc"],
-            r["ef_score"],
-            r["res_score"],
             r["entry_level"],
             r["order_id"],
             r["got_fill"],

@@ -210,8 +210,8 @@ Gamma API (открытые рынки)
       ▼
   Screener.scan()
   ├─ Hard filters: volume, hours_to_close, price <= entry_price_max
-  ├─ EntryFillScorer  (из swans_v2 по категории)
-  └─ ResolutionScorer (из swans_v2 по категории)
+  ├─ MarketScorer (feature_mart_v1_1, per-market)
+  └─ Composite total_score (market_score + liq + duration + category)
       │
       ▼
   EntryCandidate list (отсортирован по total_score)
@@ -337,22 +337,18 @@ python3 pipeline/daily_pipeline.py
 
 Публичный метод `get_orderbook(token_id)` работает в обоих режимах (нужен для симуляции fills).
 
-### `strategy/scorer.py`
+### `strategy/screener.py` + `strategy/market_scorer.py`
 
-Два отдельных класса, каждый со своим кэшем:
+Старые category-level scorers удалены из runtime path.
+Сейчас отбор строится так:
 
-**`EntryFillScorer`** — вычисляет `P(fill)` для категории:
-- Считает, в скольких рынках категории был хотя бы один swans_v2 event
-- Делит на общее количество рынков категории
-- Взвешивает по среднему объёму на дне
-
-**`ResolutionScorer`** — вычисляет tail EV для категории:
-- `p_winner` = доля is_winner=1 среди swans_v2
-- `p_20x`, `p_50x`, `p_100x` = доли с real_x >= N
-- `tail_ev` = `E[real_x | real_x>=20x] * P(real_x>=20x)`
-- Итоговый `score` = `tail_ev/50 * 0.7 + p_winner * 0.3`
-
-Оба класса кэшируют результаты в памяти. Метод `.refresh()` перечитывает из БД (вызывается в cleanup loop раз в час).
+- `MarketScorer` читает `feature_mart_v1_1` и даёт per-market `market_score`
+- `Screener` применяет hard filters и считает `total_score` только из live-компонентов:
+  - `market_score`
+  - `liq`
+  - `duration`
+  - `category`
+- `scoring_weights` обязательны для каждого активного режима
 
 ### `strategy/market_scorer.py`
 
@@ -394,11 +390,10 @@ Hard фильтры (до скоринга, дёшево):
 
 Чистые функции без side effects.
 
-**`size_position(token_id, entry_price, resolution_score, open_positions)`:**
+**`size_position(token_id, entry_price, open_positions, market_score)`:**
 - Базовая ставка = `mode_config.stake_usdc`
 - Если заданы `market_score_tiers`, они имеют приоритет над `stake_tiers`
 - Если `market_score < min_market_score`, позиция отклоняется
-- Отклоняет позицию если `entry_price < 0.0005` без исторических данных (защита от артефактов пустого стакана)
 
 **`build_tp_orders(position)`:**
 - Для каждого TPLevel создаёт `TPOrder(sell_price=entry*x, sell_quantity=total_qty*fraction)`
@@ -467,8 +462,7 @@ REST polling каждые 90 секунд. Без WebSocket (позиции жи
 
 ### Защита от переобучения (важно при обучении скоринга)
 
-- `scorer_min_samples = 5` — не вычисляем скор по категории с < 5 примерами
-- Fallback на глобальный средний скор с penalty (× 0.6–0.7) для незнакомых категорий
+- `scoring_weights` обязательны для каждого активного режима, fallback на legacy scorer formula больше нет
 - **Survivorship bias:** `swans_v2` содержит только рынки, по которым были собраны raw trades. Рынки без трейдов (объём < 50 USDC) не попадают в датасет.
 - **Lookahead:** `is_winner` в `swans_v2` — это финальный результат рынка. При обучении модели проверять, что все фичи были доступны на момент входа.
 

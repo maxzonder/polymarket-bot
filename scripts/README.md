@@ -70,9 +70,8 @@ python scripts/analyze_token_side_bias.py --min-samples 50 --top 30
 ```
 
 ### `build_feature_mart.py`  *(moved to `_legacy/`)*
-Строит token-level `feature_mart` в `polymarket_dataset.db`. Использовался `EntryFillScorer`
-и `ResolutionScorer` для знаменателей скоринга (общий счётчик рынков по категориям).
-Заменён `market_level_features_v1_1.py` в v1.1. Перенесён в `_legacy/`.
+Старый builder token-level `feature_mart` в `polymarket_dataset.db`.
+Заменён `market_level_features_v1_1.py` в v1.1 и оставлен только как legacy reference в `_legacy/`.
 
 ---
 

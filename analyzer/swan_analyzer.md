@@ -107,7 +107,7 @@ python3 analyzer/swan_analyzer.py --date 2026-03-28
 
 | Компонент | Как |
 |-----------|-----|
-| `strategy/scorer.py` | `EntryFillScorer` и `ResolutionScorer` — `swans_v2` единственный источник |
+| `strategy/market_scorer.py` | runtime market-level scorer; `swans_v2` используется только в офлайн-анализе и research pipeline |
 | `analyzer/market_level_features_v1_1.py` | Источник позитивов для `feature_mart_v1_1` |
 | `scripts/build_rejected_outcomes.py` | Ground truth для пропущенных возможностей |
 | `scripts/daily_pipeline.py` | `--date-from {start} --date-to {end}` для новых дат |

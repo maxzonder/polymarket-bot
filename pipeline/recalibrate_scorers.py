@@ -60,8 +60,6 @@ class CategoryStats:
     had_swan: int = 0
     missed_opportunity: int = 0
     miss_rate: float = 0.0
-    avg_ef_score: float = 0.0
-    avg_res_score: float = 0.0
     # Accepted / filled side
     total_accepted: int = 0
     got_fill: int = 0
@@ -83,9 +81,7 @@ def load_rejected_stats(dataset_db_path: str) -> dict[str, CategoryStats]:
                 COALESCE(category, 'unknown') AS category,
                 COUNT(*)                      AS total,
                 SUM(had_swan_event)           AS had_swan,
-                SUM(was_missed_opportunity)   AS missed,
-                AVG(ef_score)                 AS avg_ef,
-                AVG(res_score)                AS avg_res
+                SUM(was_missed_opportunity)   AS missed
             FROM ml_rejected_outcomes
             WHERE had_swan_event IS NOT NULL
             GROUP BY category
@@ -107,8 +103,6 @@ def load_rejected_stats(dataset_db_path: str) -> dict[str, CategoryStats]:
         s.had_swan = int(r["had_swan"] or 0)
         s.missed_opportunity = missed
         s.miss_rate = missed / total if total > 0 else 0.0
-        s.avg_ef_score = float(r["avg_ef"] or 0)
-        s.avg_res_score = float(r["avg_res"] or 0)
         stats[cat] = s
     return stats
 

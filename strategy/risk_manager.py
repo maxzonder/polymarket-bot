@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from config import ModeConfig, TPLevel
-from strategy.scorer import ResolutionScore
 from strategy.market_scorer import MarketScore
 
 
@@ -62,7 +61,6 @@ class RiskManager:
 
     Rejects:
     - market_score < min_market_score
-    - entry_price < 0.0005 with fewer than 5 historical samples
     """
 
     def __init__(self, mode_config: ModeConfig, balance_usdc: float = 10.0):
@@ -73,7 +71,6 @@ class RiskManager:
         self,
         token_id: str,
         entry_price: float,
-        resolution_score: Optional[ResolutionScore] = None,
         open_positions: int = 0,
         market_score: Optional[MarketScore] = None,
     ) -> Optional[SizedPosition]:
@@ -89,11 +86,6 @@ class RiskManager:
         if market_score is not None and self.mc.min_market_score > 0:
             if market_score.total < self.mc.min_market_score:
                 return None
-
-        # Anti-garbage: reject if price is suspiciously low with no historical data
-        if resolution_score is not None:
-            if entry_price < 0.0005 and resolution_score.sample_count < 5:
-                return None  # paper price artifact risk
 
         # ── Stake determination (v1.1 priority order) ─────────────────────────
         # 1. If market_score_tiers configured: quality-weighted sizing
@@ -128,12 +120,6 @@ class RiskManager:
             f"mode={self.mc.name} stake=${stake:.4f}[{tier_source}]{score_info} "
             f"qty={token_quantity:.2f} tokens @ ${entry_price:.5f}"
         )
-        if resolution_score is not None:
-            rationale += (
-                f" res_score={resolution_score.score:.3f} "
-                f"p_winner={resolution_score.p_winner:.2f} "
-                f"tail_ev={resolution_score.tail_ev:.1f}"
-            )
 
         return SizedPosition(
             token_id=token_id,
@@ -198,12 +184,12 @@ class RiskManager:
         entry_price: float,
         days_since_entry: float,
         hours_to_resolution: float,
-        resolution_score: ResolutionScore,
+        win_probability: float,
     ) -> bool:
         """
         In rare cases, a full early exit is justified:
         1. Resolution is < 2h away and price < 5x (won't resolve YES)
-        2. Market has extremely low resolution score and price already at 5x+
+        2. Market has extremely low win probability and price already at 5x+
 
         We do NOT implement trailing stop — see module docstring.
         """
@@ -213,11 +199,11 @@ class RiskManager:
         if hours_to_resolution < 2.0 and current_x < 3.0:
             return True
 
-        # If we're already at good profit but resolution score is very low and
+        # If we're already at good profit but win probability is very low and
         # time left is long — take what we can (anti-capital-lock)
         if (
             current_x >= 5.0
-            and resolution_score.p_winner < 0.05
+            and win_probability < 0.05
             and days_since_entry > 7.0
             and hours_to_resolution > 24.0
         ):
