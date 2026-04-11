@@ -3,12 +3,11 @@ Market-Level Scorer (v1.1) — per-market scoring for big_swan_mode.
 
 Computes a single market_score from market-level features.
 
-Formula (initial weights from Stage 0 cohort analysis, issue #45):
-    market_score = 0.35 · liquidity_score
-                 + 0.25 · niche_score
-                 + 0.15 · time_score
-                 + 0.15 · analogy_score
-                 + 0.10 · context_score
+Formula (initial weights from Stage 0 cohort analysis, adjusted after removing niche):
+    market_score = 0.4667 · liquidity_score
+                 + 0.2000 · time_score
+                 + 0.2000 · analogy_score
+                 + 0.1333 · context_score
 
 Weights are initial hypotheses from Dec–Feb data; calibrate after Stage 2
 paper trading.
@@ -16,9 +15,6 @@ paper trading.
 Sub-scores:
     liquidity_score — log(volume+1) / log(max_observed_volume+1)
                       Strongest predictor: 7.58x lift in top decile.
-    niche_score     — 1 / (1 + log1p(comment_count))
-                      Proxy for attention/neglect at screener time.
-                      Lower comment_count → more niche → better floor pricing.
     time_score      — min(duration_hours / 720, 1.0)
                       Confirmed: >6mo markets have 10.6% swan_rate vs 0.1%.
     analogy_score   — historical good_swan_rate for (category, vol_bucket)
@@ -46,11 +42,10 @@ from api.gamma_client import MarketInfo
 from utils.paths import DB_PATH
 
 # ── Weights (from Stage 0 cohort analysis, issue #45) ───────────────────────
-W_LIQUIDITY = 0.35
-W_NICHE     = 0.25
-W_TIME      = 0.15
-W_ANALOGY   = 0.15
-W_CONTEXT   = 0.10
+W_LIQUIDITY = 0.4667
+W_TIME      = 0.2000
+W_ANALOGY   = 0.2000
+W_CONTEXT   = 0.1333
 
 # ── Tier thresholds (tune after Stage 2 paper trading) ──────────────────────
 TOP10_THRESHOLD  = 0.60   # top ~10% of screener-eligible markets
@@ -74,7 +69,6 @@ class MarketScore:
     """Result of market_score computation for a single market."""
     market_id: str
     liquidity_score: float
-    niche_score: float
     time_score: float
     analogy_score: float
     context_score: float
@@ -87,7 +81,6 @@ def _make_rationale(ms: "MarketScore") -> str:
     return (
         f"total={ms.total:.3f}({ms.tier}) "
         f"liq={ms.liquidity_score:.3f} "
-        f"niche={ms.niche_score:.3f} "
         f"time={ms.time_score:.3f} "
         f"analogy={ms.analogy_score:.3f} "
         f"ctx={ms.context_score:.3f}"
@@ -243,7 +236,6 @@ class MarketScorer:
         return self._score_raw(
             market_id=market.market_id,
             volume=market.volume_usdc,
-            comment_count=market.comment_count,
             hours_to_close=hours_to_close if hours_to_close is not None else market.hours_to_close,
             category=market.category,
             neg_risk=market.neg_risk,
@@ -254,7 +246,6 @@ class MarketScorer:
         self,
         market_id: str,
         volume: float,
-        comment_count: int,
         hours_to_close: Optional[float],
         category: Optional[str],
         neg_risk: bool = False,
@@ -264,7 +255,6 @@ class MarketScorer:
         return self._score_raw(
             market_id=market_id,
             volume=volume,
-            comment_count=comment_count,
             hours_to_close=hours_to_close,
             category=category,
             neg_risk=neg_risk,
@@ -275,7 +265,6 @@ class MarketScorer:
         self,
         market_id: str,
         volume: float,
-        comment_count: int,
         hours_to_close: Optional[float],
         category: Optional[str],
         neg_risk: bool = False,
@@ -285,11 +274,6 @@ class MarketScorer:
         # ── liquidity_score: log(volume+1) / log(max_observed+1) ─────────────
         log_vol = math.log1p(max(volume, 0))
         liquidity_score = min(log_vol / max(self._max_log_volume, 1.0), 1.0)
-
-        # ── niche_score: 1 / (1 + log1p(comment_count)) ─────────────────────
-        # comment_count=0 → niche_score=1.0 (maximally neglected)
-        # comment_count=100 → niche_score ≈ 0.22
-        niche_score = 1.0 / (1.0 + math.log1p(max(comment_count, 0)))
 
         # ── time_score: duration proxy via hours_to_close ────────────────────
         # Issue #53 shows <1d and 1-3d markets have ~16% win rate (equal to 3-7d).
@@ -345,7 +329,6 @@ class MarketScorer:
         # ── Composite ─────────────────────────────────────────────────────────
         total = (
             W_LIQUIDITY * liquidity_score
-            + W_NICHE    * niche_score
             + W_TIME     * time_score
             + W_ANALOGY  * analogy_score
             + W_CONTEXT  * context_score
@@ -372,7 +355,6 @@ class MarketScorer:
         ms = MarketScore(
             market_id=market_id,
             liquidity_score=round(liquidity_score, 4),
-            niche_score=round(niche_score, 4),
             time_score=round(time_score, 4),
             analogy_score=round(analogy_score, 4),
             context_score=round(context_score, 4),

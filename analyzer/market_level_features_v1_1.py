@@ -589,36 +589,32 @@ def cohort_analysis(conn: sqlite3.Connection) -> None:
     print("SUGGESTED INITIAL market_score WEIGHTS")
     print("="*70)
     print("""
-market_score = w1·liquidity_score + w2·niche_score + w3·context_score
-             + w4·time_score + w5·analogy_score
+market_score = w1·liquidity_score + w2·context_score
+             + w3·time_score + w4·analogy_score
 
 Based on the cohort data above:
 
-  liquidity_score  (w1 = 0.35):
+  liquidity_score  (w1 = 0.4667):
     Strongest individual predictor: swan_rate scales from 0.2% (<1k)
     to 48.8% (>1M). Use log(volume) / log(max_observed_volume) as proxy
     until real CLOB orderbook depth is available.
 
-  niche_score      (w2 = 0.25):
-    Captures "traded but not saturated." Markets with high volume/liquidity
-    ratio have real activity but also more efficient pricing.
-    Proxy: 1 / (1 + log1p(buy_trade_count)) — fewer trades at floor = more neglected.
-    NOTE: needs buy_trade_count from screener, not available pre-entry.
-    At screener stage: use comment_count as attention proxy (lower = more niche).
-
-  context_score    (w3 = 0.10):
+  context_score    (w2 = 0.1333):
     neg_risk adds modest lift. Category matters but captured in analogy_score.
     Binary flag: neg_risk → slight boost (less pricing efficiency per token).
 
-  time_score       (w4 = 0.15):
+  time_score       (w3 = 0.2000):
     Long-duration markets have higher avg_x. Markets with >720h duration
     show consistently better swan quality.
     Formula: min(duration_hours / 720, 1.0)
 
-  analogy_score    (w5 = 0.15):
+  analogy_score    (w4 = 0.2000):
     Historical base rate for this (category, volume_bucket) combo.
     Build a lookup table from feature_mart_v1_1.
     Normalise to [0,1] using the observed good_swan_rate range.
+
+  NOTE: runtime niche/comment_count factor was removed after follow-up audit.
+  `niche_score_raw` remains in the mart as a research column only.
 
 Calibration criterion (exit stage 0):
   market_score of top 20% candidates must show:

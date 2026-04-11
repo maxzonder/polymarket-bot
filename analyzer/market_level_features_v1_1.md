@@ -150,12 +150,13 @@ politics   100k-1M   8%     34x
 ### Итог — рекомендуемые веса для market_score
 
 ```
-market_score = 0.35·liquidity_score   # объём/ликвидность
-             + 0.25·niche_score       # "активен, но не перегрет"
-             + 0.15·time_score        # длительность рынка
-             + 0.15·analogy_score     # исторический prior (category × vol)
-             + 0.10·context_score     # neg_risk флаг
+market_score = 0.4667·liquidity_score  # объём/ликвидность
+             + 0.2000·time_score       # длительность рынка
+             + 0.2000·analogy_score    # исторический prior (category × vol)
+             + 0.1333·context_score    # neg_risk флаг
 ```
+
+`niche` из runtime score удалён. `niche_score_raw` в mart остаётся только как research/debug колонка.
 
 Критерий качества: top-20% кандидатов по `market_score` должны давать `good_swan_rate >= 2x baseline` и `avg_x >= 20`.
 
