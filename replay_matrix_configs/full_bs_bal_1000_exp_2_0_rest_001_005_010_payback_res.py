@@ -1,5 +1,5 @@
 # Auto-generated replay matrix config.
-# balance=200 exposure=1.0 entry_set=005_010_015 ladder=pure
+# balance=1000 exposure=2.0 entry_set=001_005_010 ladder=payback_res
 
 """
 Bot Configuration — three trading modes + runtime settings.
@@ -173,8 +173,8 @@ BALANCED_MODE = ModeConfig(
 
 # Budget and levels are defined together so market_score_tiers stakes auto-scale with budget.
 # Current recommendation: conservative bankroll-aware big_swan sizing.
-_BIG_SWAN_BUDGET = 1.0
-_BIG_SWAN_LEVELS = (0.05, 0.10, 0.15)
+_BIG_SWAN_BUDGET = 2.0
+_BIG_SWAN_LEVELS = (0.01, 0.05, 0.10)
 _bsm_s = _BIG_SWAN_BUDGET / len(_BIG_SWAN_LEVELS)  # stake per level at full-budget allocation
 
 BIG_SWAN_MODE = ModeConfig(
@@ -186,8 +186,10 @@ BIG_SWAN_MODE = ModeConfig(
     scanner_entry=False,        # ONLY resting bids; no chasing dips
     # First-step binary-native ladder.
     # Tier-aware progress presets are intentionally deferred.
-    tp_levels=(),
-    moonbag_fraction=1.00,
+    tp_levels=(
+        TPLevel(progress=0.50, fraction=0.10),
+    ),
+    moonbag_fraction=0.90,
     stake_usdc=0.05,            # fallback if no tier matches
     max_open_positions=500,
     max_resting_markets=5000,
@@ -306,7 +308,7 @@ class BotConfig:
     mode: str = "big_swan_mode"
     dry_run: bool = True
     paper_initial_balance_usdc: float = field(
-        default_factory=lambda: float(os.environ.get("PAPER_INITIAL_BALANCE_USDC", "200.0"))
+        default_factory=lambda: float(os.environ.get("PAPER_INITIAL_BALANCE_USDC", "1000.0"))
     )
 
     # ── CLOB credentials (from env) ───────────────────────────────────────────
