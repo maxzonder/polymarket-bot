@@ -169,8 +169,6 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             question       TEXT,
             current_price  REAL,
             total_score    REAL,
-            ef_score       REAL,
-            res_score      REAL,
             entry_level    REAL NOT NULL,
             outcome        TEXT NOT NULL,
             order_id       TEXT,
@@ -190,8 +188,6 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             current_price  REAL,
             hours_to_close REAL,
             volume_usdc    REAL,
-            ef_score       REAL,
-            res_score      REAL,
             outcome        TEXT    NOT NULL,
             candidate_id   TEXT,
             market_score   REAL
@@ -211,8 +207,6 @@ def _init_positions_db(conn: sqlite3.Connection) -> None:
             current_price       REAL,
             hours_to_close      REAL,
             volume_usdc         REAL,
-            ef_score            REAL,
-            res_score           REAL,
             entry_level         REAL,
             order_id            TEXT,
             got_fill            INTEGER NOT NULL DEFAULT 0,
@@ -362,9 +356,8 @@ class OrderManager:
             """
             INSERT INTO scan_log
                 (scanned_at, token_id, market_id, question, current_price,
-                 total_score, ef_score, res_score, entry_level, outcome, order_id,
-                 candidate_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 total_score, entry_level, outcome, order_id, candidate_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(time.time()),
@@ -373,8 +366,6 @@ class OrderManager:
                 (candidate.market_info.question or "")[:120],
                 candidate.current_price,
                 candidate.total_score,
-                candidate.entry_fill_score,
-                candidate.resolution_score,
                 entry_level,
                 outcome,
                 order_id,
@@ -515,22 +506,9 @@ class OrderManager:
                 self._log_scan(conn, candidate, price_level, "duplicate")
                 continue
 
-            from strategy.scorer import ResolutionScore
-            dummy_res = ResolutionScore(
-                category=candidate.market_info.category,
-                sample_count=10,
-                p_winner=candidate.resolution_score,
-                avg_real_x=5.0,
-                p_20x=0.05, p_50x=0.02, p_100x=0.01,
-                avg_resolution_x=10.0,
-                tail_ev=candidate.resolution_score * 10,
-                score=candidate.resolution_score,
-            )
-
             sized = self.risk.size_position(
                 token_id=candidate.token_id,
                 entry_price=price_level,
-                resolution_score=dummy_res,
                 open_positions=context.open_position_count,
                 market_score=candidate.market_score,
             )
@@ -781,21 +759,9 @@ class OrderManager:
             conn.close()
             return []
 
-        from strategy.scorer import ResolutionScore
-        dummy_res = ResolutionScore(
-            category=candidate.market_info.category,
-            sample_count=10,
-            p_winner=candidate.resolution_score,
-            avg_real_x=5.0,
-            p_20x=0.05, p_50x=0.02, p_100x=0.01,
-            avg_resolution_x=10.0,
-            tail_ev=candidate.resolution_score * 10,
-            score=candidate.resolution_score,
-        )
         sized = self.risk.size_position(
             token_id=candidate.token_id,
             entry_price=execution_price,
-            resolution_score=dummy_res,
             open_positions=context.open_position_count,
             market_score=candidate.market_score,
         )

@@ -230,8 +230,6 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
 
         screener = Screener(
             config=config,
-            entry_fill_scorer=_StubScorerRegistry(),
-            resolution_scorer=_StubScorerRegistry(),
             market_scorer=_StubMarketScorer(),
             skip_logging=True,
         )
@@ -263,7 +261,7 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
         self.assertEqual(candidates[0].token_id, "yes_token")
         self.assertEqual(candidates[0].outcome_name, "Yes")
 
-        logged_outcomes = [(row[2], row[10]) for row in log_entries]
+        logged_outcomes = [(row[2], row[8]) for row in log_entries]
         self.assertIn(("no_token", "rejected_price_above_entry_max"), logged_outcomes)
         self.assertNotIn(("no_token", "rejected_market_score"), logged_outcomes)
 

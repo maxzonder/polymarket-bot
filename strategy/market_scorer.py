@@ -1,8 +1,7 @@
 """
 Market-Level Scorer (v1.1) — per-market scoring for big_swan_mode.
 
-Replaces the category-level EntryFillScorer + ResolutionScorer with a
-single market_score computed from market-level features.
+Computes a single market_score from market-level features.
 
 Formula (initial weights from Stage 0 cohort analysis, issue #45):
     market_score = 0.35 · liquidity_score

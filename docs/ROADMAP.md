@@ -124,7 +124,7 @@
   - `clob_client.py` — работа с книгой заявок и биржевой частью.
 - `strategy/`
   - `screener.py` — поиск рынков в зоне потенциального входа.
-  - `scorer.py` — `EntryFillScorer` и `ResolutionScorer` на основе `swans_v2`.
+  - исторический category-level scorer на основе `swans_v2` был удалён из runtime path.
   - `risk_manager.py` — сайзинг позиций и логика TP.
 - `execution/`
   - `order_manager.py` — формирование и отправка ордеров.

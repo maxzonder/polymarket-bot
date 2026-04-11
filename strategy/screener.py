@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +24,6 @@ from api.gamma_client import MarketInfo, fetch_open_markets
 from api.clob_client import get_orderbook
 from api.data_api import get_last_trade_ts, get_recent_trades
 from config import BotConfig
-from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.market_scorer import MarketScore, MarketScorer
 from strategy.entry_levels import suggested_entry_levels
 from utils.logger import setup_logger
@@ -36,9 +35,8 @@ logger = setup_logger("screener")
 _SCREENER_LOG_INSERT = """
     INSERT INTO screener_log
         (scanned_at, market_id, token_id, question, category,
-         current_price, hours_to_close, volume_usdc, ef_score, res_score, outcome, candidate_id,
-         market_score)
-    VALUES (?,?,?,?,?, ?,?,?,?,?,?,?, ?)
+         current_price, hours_to_close, volume_usdc, outcome, candidate_id, market_score)
+    VALUES (?,?,?,?,?, ?,?,?,?,?, ?)
 """
 
 
@@ -49,8 +47,6 @@ class EntryCandidate:
     token_id: str               # specific token to trade (YES or NO side)
     outcome_name: str           # "Yes" / "No"
     current_price: float        # best_ask or last_trade_price
-    entry_fill_score: float     # P(market hits our resting bid zone)
-    resolution_score: float     # tail EV score
     total_score: float          # weighted composite for ranking
     suggested_entry_levels: list[float]  # price levels for resting bids
     candidate_id: str = ""      # UUID linking screener_log → scan_log → resting_orders
@@ -70,14 +66,10 @@ class Screener:
     - not fees_enabled if category penalised (configurable)
 
     Soft scoring (produces ranking):
-    v1.1: market_scorer (MarketScorer) replaces category-level EntryFillScorer +
-          ResolutionScorer for ranking. Legacy scorers still supported as fallback.
-    - market_score from MarketScorer (per-market, not per-category)
-    - entry_fill_score from EntryFillScorer (backward-compat)
-    - resolution_score from ResolutionScorer (backward-compat)
+    - market_score from MarketScorer (per-market)
     - category_weight from config
     - duration weight
-    - liquidity_inefficiency weight
+    - liquidity inefficiency weight
 
     v1.1 CLOB pricing:
     - YES token: use Gamma best_ask (unchanged)
@@ -88,19 +80,20 @@ class Screener:
     def __init__(
         self,
         config: BotConfig,
-        entry_fill_scorer: EntryFillScorer,
-        resolution_scorer: ResolutionScorer,
         db_path: Optional[Path] = None,
         market_scorer: Optional[MarketScorer] = None,
         skip_logging: bool = False,
     ):
         self.config = config
         self.mc = config.mode_config
-        self.ef_scorer = entry_fill_scorer
-        self.res_scorer = resolution_scorer
         self.market_scorer = market_scorer
         self._db_path = str(db_path or DATA_DIR / "positions.db")
         self._skip_logging = skip_logging
+
+        if not self.mc.scoring_weights:
+            raise ValueError(
+                f"Mode {self.mc.name} must define scoring_weights; legacy ef/res fallback was removed"
+            )
 
     def scan(self, allowed_market_ids: Optional[set[str]] = None) -> list[EntryCandidate]:
         """
@@ -194,8 +187,7 @@ class Screener:
         mc = self.config.mode_config
         hours: float = m.hours_to_close if m.hours_to_close is not None else mc.hours_to_close_null_default
 
-        def _log(outcome: str, token_id=None, price=None, ef=None, res=None,
-                 candidate_id=None, ms=None) -> None:
+        def _log(outcome: str, token_id=None, price=None, candidate_id=None, ms=None) -> None:
             log_entries.append((
                 now,
                 m.market_id,
@@ -205,8 +197,6 @@ class Screener:
                 price,
                 hours,
                 m.volume_usdc,
-                ef,
-                res,
                 outcome,
                 candidate_id,
                 ms,
@@ -226,13 +216,8 @@ class Screener:
             _log("rejected_missing_token_ids")
             return []
 
-        # v1.1: market-level score gate — runs BEFORE ef_score.
-        # Rationale: ef_score is category-level and can't differentiate within a category.
-        # market_scorer uses per-market signals (volume, duration, analogy, neg_risk).
-        # Running it first means ef_score never fires on markets already rejected by
-        # market_scorer, making the funnel easier to read and market_scorer effective.
-        # Issue #47 identified that running market_scorer AFTER ef_score made it a
-        # dead gate (ef_score pre-filtered all markets that would fail market_scorer).
+        # Market-level score gate runs before any downstream price/depth work so we
+        # reject bad markets early using the single live ranking signal.
         ms_obj: Optional[MarketScore] = None
         token_market_scores: dict[int, MarketScore] = {}
         if self.market_scorer is not None:
@@ -264,15 +249,6 @@ class Screener:
                 _log("rejected_dead_market", ms=ms_obj.total if ms_obj else None)
                 return []
 
-        ef_score_obj  = self.ef_scorer.get(m.category)
-        res_score_obj = self.res_scorer.get(m.category)
-        ef_s  = ef_score_obj.score
-        res_s = res_score_obj.score
-
-        # ef_score / res_score gates removed: all current modes use scoring_weights
-        # with market_score as primary signal. market_scorer.score() already acts
-        # as the unified gate above. Category-level ef/res gates are legacy dead code.
-
         candidates: list[EntryCandidate] = []
 
         # Each token (YES, NO) is evaluated separately
@@ -297,8 +273,7 @@ class Screener:
                 _log("rejected_price_le_zero", token_id=token_id, price=price)
                 continue
             if price > self.mc.entry_price_max:
-                _log("rejected_price_above_entry_max", token_id=token_id, price=price,
-                     ef=ef_s, res=res_s)
+                _log("rejected_price_above_entry_max", token_id=token_id, price=price)
                 continue
             if price >= 0.99:
                 _log("rejected_price_ge_0_99", token_id=token_id, price=price)
@@ -317,15 +292,14 @@ class Screener:
                     pass  # fallback to synthetic — acceptable per issue #45 verdict
                 # Re-check price gate after CLOB refinement: real NO ask may exceed entry_price_max
                 if price > self.mc.entry_price_max:
-                    _log("rejected_no_reprice_above_max", token_id=token_id, price=price,
-                         ef=ef_s, res=res_s)
+                    _log("rejected_no_reprice_above_max", token_id=token_id, price=price)
                     continue
 
             if token_ms_obj is not None and token_ms_obj.tier == "reject":
                 _log("rejected_market_score", token_id=token_id, ms=token_ms_obj.total)
                 continue
 
-            total_score = self._compute_total_score(m, ef_s, res_s, token_ms_obj, hours=hours) * group_boost
+            total_score = self._compute_total_score(m, token_ms_obj, hours=hours) * group_boost
 
             # Entry tiers are MAX acceptable prices, not strictly-below-current bids.
             # If the market is already cheaper than a tier, that tier remains valid and
@@ -336,14 +310,13 @@ class Screener:
                 scanner_entry=self.mc.scanner_entry,
             )
             if not entry_levels:
-                _log("rejected_no_entry_levels", token_id=token_id, price=price,
-                     ef=ef_s, res=res_s)
+                _log("rejected_no_entry_levels", token_id=token_id, price=price)
                 continue
 
             ms_score = token_ms_obj.total if token_ms_obj else None
             candidate_id = str(uuid.uuid4())
             _log("passed_to_order_manager", token_id=token_id, price=price,
-                 ef=ef_s, res=res_s, candidate_id=candidate_id, ms=ms_score)
+                 candidate_id=candidate_id, ms=ms_score)
 
             boost_info = f" boost={group_boost:.2f}" if group_boost != 1.0 else ""
             neg_risk_info = f" [neg-risk grp={m.neg_risk_group_id[:12]}]" if m.neg_risk_group_id else ""
@@ -356,12 +329,10 @@ class Screener:
                 f"{neg_risk_info}"
             )
 
-            ms_info = f" {ms_obj.rationale}" if ms_obj else ""
+            score_rationale = token_ms_obj.rationale if token_ms_obj else (ms_obj.rationale if ms_obj else "")
+            ms_info = f" {score_rationale}" if score_rationale else ""
             rationale = (
-                f"category={m.category} fill_score={ef_s:.3f} res_score={res_s:.3f} "
-                f"p_winner={res_score_obj.p_winner:.2f} p_20x={res_score_obj.p_20x:.3f} "
-                f"tail_ev={res_score_obj.tail_ev:.1f} "
-                f"vol=${m.volume_usdc:.0f} hrs_to_close={hours:.1f}"
+                f"category={m.category} vol=${m.volume_usdc:.0f} hrs_to_close={hours:.1f}"
                 f"{ms_info}"
             )
 
@@ -370,8 +341,6 @@ class Screener:
                 token_id=token_id,
                 outcome_name=outcome_name,
                 current_price=price,
-                entry_fill_score=ef_s,
-                resolution_score=res_s,
                 total_score=total_score,
                 suggested_entry_levels=entry_levels,
                 candidate_id=candidate_id,
@@ -476,8 +445,6 @@ class Screener:
     def _compute_total_score(
         self,
         m: MarketInfo,
-        ef_score: float,
-        res_score: float,
         market_score: Optional[MarketScore] = None,
         hours: Optional[float] = None,
     ) -> float:
@@ -486,7 +453,6 @@ class Screener:
 
         Weights come from mc.scoring_weights (config-driven per mode).
         Components (all normalised 0–1): market_score, liq, duration, category.
-        Legacy ef_score/res_score path kept as fallback for modes without scoring_weights.
         hours: resolved hours_to_close (null-default already applied by caller).
         """
         if hours is None:
@@ -515,31 +481,13 @@ class Screener:
 
         cat_norm = min(self.config.category_weights.get(m.category or "", 1.0) / 1.5, 1.0)
 
-        if self.mc.scoring_weights:
-            ms_val = market_score.total if market_score is not None else 0.0
-            components = {
-                "market_score": ms_val,
-                "liq":          liq_score,
-                "duration":     duration_score,
-                "category":     cat_norm,
-            }
-            score = sum(w * components.get(name, 0.0) for name, w in self.mc.scoring_weights)
-        else:
-            # Legacy fallback for modes without scoring_weights
-            if market_score is not None:
-                score = (
-                    0.60 * market_score.total
-                    + 0.20 * liq_score
-                    + 0.10 * duration_score
-                    + 0.10 * cat_norm
-                )
-            else:
-                score = (
-                    0.40 * res_score
-                    + 0.25 * ef_score
-                    + 0.15 * liq_score
-                    + 0.10 * duration_score
-                    + 0.10 * cat_norm
-                )
+        ms_val = market_score.total if market_score is not None else 0.0
+        components = {
+            "market_score": ms_val,
+            "liq":          liq_score,
+            "duration":     duration_score,
+            "category":     cat_norm,
+        }
+        score = sum(w * components.get(name, 0.0) for name, w in self.mc.scoring_weights)
 
         return round(score, 4)

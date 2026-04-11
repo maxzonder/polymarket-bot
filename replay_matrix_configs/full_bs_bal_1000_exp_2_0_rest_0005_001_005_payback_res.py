@@ -102,7 +102,7 @@ class ModeConfig:
     # ── Screener scoring weights ───────────────────────────────────────────────
     # Tuple of (component_name, weight) pairs. Weights should sum to 1.0.
     # Components: "market_score", "liq", "duration", "category"
-    # Empty tuple = legacy ef_score/res_score formula (backward-compat fallback).
+    # Components: "market_score", "liq", "duration", "category".
     scoring_weights: tuple[tuple[str, float], ...] = ()
 
     # Duration scoring direction:
@@ -323,12 +323,6 @@ class BotConfig:
     min_volume_usdc: float = 50.0
     max_volume_usdc: float = 300_000.0  # raised from 50k: geopolitics/politics markets often 100k–1M
     dead_market_hours: float = 48.0    # reject markets with no trades in this many hours
-
-    # ── Scorer DB window ─────────────────────────────────────────────────────
-    # Only use swans_v2 rows with entry_min_price in this range for scoring
-    scorer_entry_price_max: float = 0.02
-    # Minimum sample count to compute a reliable score
-    scorer_min_samples: int = 5
 
     # ── Category EV weights (derived from feature_mart_v1_1 Dec–Feb 2026) ──────
     # Formula: clip(tail_ev / crypto_tail_ev, 0.5, 1.5)

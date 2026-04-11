@@ -57,8 +57,6 @@ CREATE TABLE IF NOT EXISTS ml_rejected_outcomes (
     avg_current_price    REAL,
     avg_hours_to_close   REAL,
     avg_volume_usdc      REAL,
-    ef_score             REAL,
-    res_score            REAL,
 
     -- Post-hoc ground truth (populated after analyzer runs on closed market)
     -- NULL = not yet labeled (analyzer hasn't processed this market yet)
@@ -84,13 +82,13 @@ _UPSERT = """
 INSERT INTO ml_rejected_outcomes (
     materialized_at, market_id, token_id, question, category,
     rejection_reason, first_scanned_at, last_scanned_at, scan_count,
-    avg_current_price, avg_hours_to_close, avg_volume_usdc, ef_score, res_score,
+    avg_current_price, avg_hours_to_close, avg_volume_usdc,
     had_swan_event, entry_min_price, possible_x, is_winner, was_missed_opportunity
 ) VALUES (
     ?, ?, ?, ?, ?,
     ?, ?, ?, ?,
-    ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?
+    ?, ?, ?, ?,
+    ?, ?, ?, ?
 )
 ON CONFLICT(market_id, token_id) DO UPDATE SET
     materialized_at       = excluded.materialized_at,
@@ -99,8 +97,6 @@ ON CONFLICT(market_id, token_id) DO UPDATE SET
     avg_current_price     = excluded.avg_current_price,
     avg_hours_to_close    = excluded.avg_hours_to_close,
     avg_volume_usdc       = excluded.avg_volume_usdc,
-    ef_score              = excluded.ef_score,
-    res_score             = excluded.res_score,
     had_swan_event        = excluded.had_swan_event,
     entry_min_price       = excluded.entry_min_price,
     possible_x            = excluded.possible_x,
@@ -156,8 +152,7 @@ def build(
     logger.info("Loading rejected screener_log rows...")
     sl_rows = ops_conn.execute("""
         SELECT market_id, token_id, question, category, outcome,
-               scanned_at, current_price, hours_to_close, volume_usdc,
-               ef_score, res_score
+               scanned_at, current_price, hours_to_close, volume_usdc
         FROM screener_log
         WHERE outcome != 'passed_to_order_manager'
     """).fetchall()
@@ -185,8 +180,6 @@ def build(
                 "prices":     [],
                 "hours":      [],
                 "volumes":    [],
-                "ef_scores":  [],
-                "res_scores": [],
             }
         g = groups[key]
         g["reasons"].append(r["outcome"])
@@ -194,8 +187,6 @@ def build(
         if r["current_price"]  is not None: g["prices"].append(r["current_price"])
         if r["hours_to_close"] is not None: g["hours"].append(r["hours_to_close"])
         if r["volume_usdc"]    is not None: g["volumes"].append(r["volume_usdc"])
-        if r["ef_score"]       is not None: g["ef_scores"].append(r["ef_score"])
-        if r["res_score"]      is not None: g["res_scores"].append(r["res_score"])
 
     # ── 3. Join to ground truth and build upsert params ───────────────────────
     params = []
@@ -228,7 +219,6 @@ def build(
             dominant_reason,
             min(g["timestamps"]), max(g["timestamps"]), len(g["timestamps"]),
             _avg(g["prices"]), _avg(g["hours"]), _avg(g["volumes"]),
-            _avg(g["ef_scores"]), _avg(g["res_scores"]),
             had_swan, entry_min_p, possible_x, is_winner, was_missed,
         ))
 
@@ -236,8 +226,8 @@ def build(
     ds_conn.commit()
     ds_conn.close()
 
-    labeled = sum(1 for p in params if p[15] is not None)  # entry_min_price not None
-    missed  = sum(1 for p in params if p[18] == 1)         # was_missed_opportunity
+    labeled = sum(1 for p in params if p[13] is not None)  # entry_min_price not None
+    missed  = sum(1 for p in params if p[16] == 1)         # was_missed_opportunity
     logger.info(
         f"ml_rejected_outcomes: {len(params)} rows upserted | "
         f"labeled={labeled} | missed_opportunities={missed}"

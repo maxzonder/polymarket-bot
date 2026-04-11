@@ -25,7 +25,6 @@ from replay.tape_feed import (
 )
 from strategy.market_scorer import MarketScorer
 from strategy.risk_manager import RiskManager
-from strategy.scorer import EntryFillScorer, ResolutionScorer
 from strategy.screener import Screener
 from utils.logger import setup_logger
 from utils.paths import DB_PATH, DATA_DIR
@@ -140,16 +139,11 @@ class TapeDrivenDryRunRunner:
         self.order_manager = OrderManager(self.config, self.clob, risk, disable_scan_log=True)
         self.monitor = PositionMonitor(self.config, self.clob, self.order_manager)
 
-        ef_price_max = max(self.mc.entry_price_levels) if self.mc.entry_price_levels else self.config.scorer_entry_price_max
-        self.ef_scorer = EntryFillScorer(entry_price_max=ef_price_max, min_samples=self.config.scorer_min_samples)
-        self.res_scorer = ResolutionScorer(min_samples=self.config.scorer_min_samples)
         self.market_scorer: Optional[MarketScorer] = None
         if self.mc.min_market_score > 0 or self.mc.market_score_tiers:
             self.market_scorer = MarketScorer(db_path=DB_PATH, min_score=self.mc.min_market_score)
         self.screener = Screener(
             config=self.config,
-            entry_fill_scorer=self.ef_scorer,
-            resolution_scorer=self.res_scorer,
             db_path=self.positions_db,
             market_scorer=self.market_scorer,
             skip_logging=True,
