@@ -24,7 +24,8 @@ Sub-scores:
                       Confirmed: >6mo markets have 10.6% swan_rate vs 0.1%.
     analogy_score   — historical good_swan_rate for (category, vol_bucket)
                       normalised to [0, 1] using max observed rate.
-                      Built from feature_mart_v1_1 at init time.
+                      For neg_risk YES tokens, may use a dedicated YES-only prior
+                      from feature_mart_v1_1.
     context_score   — neg_risk flag (0.6 if neg_risk else 0.2)
                       neg_risk=1 markets have 4.5x higher swan_rate.
 
@@ -106,6 +107,7 @@ class MarketScorer:
         self._db_path = str(db_path or DB_PATH)
         self.min_score = min_score
         self._analogy: dict[tuple[str, str], float] = {}
+        self._analogy_yes_negrisk: dict[tuple[str, str], float] = {}
         self._loser_rates: dict[tuple[str, str], float] = {}
         self._feedback_penalties: dict[tuple[str, str], float] = {}
         self._max_analogy: float = 1.0
@@ -127,6 +129,10 @@ class MarketScorer:
             if r and r[0]:
                 self._max_log_volume = float(r[0])
 
+            feature_cols = {
+                r[1] for r in conn.execute("PRAGMA table_info(feature_mart_v1_1)").fetchall()
+            }
+
             # good_swan_rate and loser_rate per (category, vol_bucket)
             rows = conn.execute("""
                 SELECT
@@ -147,7 +153,28 @@ class MarketScorer:
                 HAVING total >= 20
             """).fetchall()
 
+            neg_risk_yes_rows = []
+            if "best_swan_is_yes_token" in feature_cols:
+                neg_risk_yes_rows = conn.execute("""
+                    SELECT
+                        COALESCE(category, 'null') AS cat,
+                        CASE
+                            WHEN volume_usdc < 10000     THEN '<10k'
+                            WHEN volume_usdc < 100000    THEN '10k-100k'
+                            WHEN volume_usdc < 1000000   THEN '100k-1M'
+                            ELSE                              '>1M'
+                        END AS vol_bucket,
+                        COUNT(*) AS total,
+                        SUM(label_20x) AS good
+                    FROM feature_mart_v1_1
+                    WHERE neg_risk = 1
+                      AND best_swan_is_yes_token = 1
+                    GROUP BY cat, vol_bucket
+                    HAVING total >= 20
+                """).fetchall()
+
             raw: dict[tuple[str, str], float] = {}
+            raw_yes_negrisk: dict[tuple[str, str], float] = {}
             raw_loser: dict[tuple[str, str], float] = {}
             for r in rows:
                 cat, vbk = r["cat"], r["vol_bucket"]
@@ -157,10 +184,16 @@ class MarketScorer:
                 raw[(cat, vbk)] = rate
                 raw_loser[(cat, vbk)] = (loser_swans or 0) / max(total_swans or 1, 1)
 
-            max_rate = max(raw.values()) if raw else 1.0
+            for r in neg_risk_yes_rows:
+                cat, vbk = r["cat"], r["vol_bucket"]
+                total, good = r["total"], r["good"]
+                raw_yes_negrisk[(cat, vbk)] = (good or 0) / max(total, 1)
+
+            max_rate = max([*raw.values(), *raw_yes_negrisk.values()], default=1.0)
             self._max_analogy = max_rate
             # Normalise to [0, 1]
             self._analogy = {k: v / max_rate for k, v in raw.items()}
+            self._analogy_yes_negrisk = {k: v / max_rate for k, v in raw_yes_negrisk.items()}
             self._loser_rates = raw_loser
             self._ready = len(self._analogy) > 0
 
@@ -181,6 +214,7 @@ class MarketScorer:
         except Exception:
             # feature_mart_v1_1 not yet built — use fallback (zero analogy scores)
             self._analogy = {}
+            self._analogy_yes_negrisk = {}
             self._ready = False
 
     @property
@@ -191,7 +225,12 @@ class MarketScorer:
     def refresh(self) -> None:
         self._load_analogy_table()
 
-    def score(self, market: MarketInfo, hours_to_close: Optional[float] = None) -> MarketScore:
+    def score(
+        self,
+        market: MarketInfo,
+        hours_to_close: Optional[float] = None,
+        is_no_token: Optional[bool] = None,
+    ) -> MarketScore:
         """Compute market_score for a MarketInfo object.
 
         hours_to_close: pass resolved value (null-default applied) so time_score
@@ -205,6 +244,7 @@ class MarketScorer:
             hours_to_close=hours_to_close if hours_to_close is not None else market.hours_to_close,
             category=market.category,
             neg_risk=market.neg_risk,
+            is_no_token=is_no_token,
         )
 
     def score_from_db(
@@ -215,6 +255,7 @@ class MarketScorer:
         hours_to_close: Optional[float],
         category: Optional[str],
         neg_risk: bool = False,
+        is_no_token: Optional[bool] = None,
     ) -> MarketScore:
         """Score a market given raw DB fields (for screener and replay contexts)."""
         return self._score_raw(
@@ -224,6 +265,7 @@ class MarketScorer:
             hours_to_close=hours_to_close,
             category=category,
             neg_risk=neg_risk,
+            is_no_token=is_no_token,
         )
 
     def _score_raw(
@@ -234,6 +276,7 @@ class MarketScorer:
         hours_to_close: Optional[float],
         category: Optional[str],
         neg_risk: bool = False,
+        is_no_token: Optional[bool] = None,
     ) -> MarketScore:
 
         # ── liquidity_score: log(volume+1) / log(max_observed+1) ─────────────
@@ -260,7 +303,17 @@ class MarketScorer:
         # fall through to the floor. Python treats 0.0 as falsy in `or` chains.
         _analogy_exact = self._analogy.get((cat, vbk))
         _analogy_null  = self._analogy.get(("null", vbk))
-        if _analogy_exact is not None:
+        _analogy_yes_negrisk_exact = None
+        _analogy_yes_negrisk_null = None
+        if neg_risk and is_no_token is False:
+            _analogy_yes_negrisk_exact = self._analogy_yes_negrisk.get((cat, vbk))
+            _analogy_yes_negrisk_null = self._analogy_yes_negrisk.get(("null", vbk))
+
+        if _analogy_yes_negrisk_exact is not None:
+            analogy_score = _analogy_yes_negrisk_exact
+        elif _analogy_yes_negrisk_null is not None:
+            analogy_score = _analogy_yes_negrisk_null
+        elif _analogy_exact is not None:
             analogy_score = _analogy_exact
         elif _analogy_null is not None:
             analogy_score = _analogy_null

@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS feature_mart_v1_1 (
 
     -- ── Labels ───────────────────────────────────────────────────────────────
     swan_is_winner          INTEGER,         -- 1 if best-x swan token also won
+    best_swan_is_yes_token  INTEGER,         -- 1 if best-x swan token is token_order=0
     label_20x               INTEGER,         -- 1 if best_max_traded_x >= 20
     label_tail              INTEGER,         -- 0:<5x 1:5-20x 2:20-50x 3:50-100x 4:100x+
 
@@ -144,6 +145,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
     # Migrate: add neg-risk group columns to existing tables
     existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(feature_mart_v1_1)").fetchall()}
     for col, col_type in [
+        ("best_swan_is_yes_token", "INTEGER"),
         ("neg_risk_group_id",    "TEXT"),
         ("group_token_count",    "INTEGER"),
         ("group_max_volume",      "REAL"),
@@ -176,6 +178,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                 s.buy_ts_first,
                 s.buy_ts_last,
                 s.is_winner,
+                t.token_order AS best_swan_token_order,
                 ROW_NUMBER() OVER (
                     PARTITION BY t.market_id
                     ORDER BY s.max_traded_x DESC
@@ -222,6 +225,11 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             (bs.buy_ts_last - bs.buy_ts_first) AS best_floor_duration_s,
             bs.buy_ts_first          AS best_buy_ts_first,
             bs.is_winner             AS swan_is_winner,
+            CASE
+                WHEN bs.best_swan_token_order = 0 THEN 1
+                WHEN bs.best_swan_token_order = 1 THEN 0
+                ELSE NULL
+            END                      AS best_swan_is_yes_token,
 
             -- Neg-risk group features (NULL for binary markets)
             m.neg_risk_market_id     AS neg_risk_group_id,
@@ -265,12 +273,13 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             best_floor_duration_s  = row[14]
             best_buy_ts_first    = row[15]
             swan_is_winner         = row[16]
+            best_swan_is_yes_token = row[17]
 
-            neg_risk_group_id    = row[17]
-            group_token_count    = row[18]
-            group_max_volume      = row[19]
-            group_underdog_count = row[20]
-            group_underdog_winner = row[21]
+            neg_risk_group_id    = row[18]
+            group_token_count    = row[19]
+            group_max_volume      = row[20]
+            group_underdog_count = row[21]
+            group_underdog_winner = row[22]
 
             was_swan = 1 if best_buy_min_price is not None else 0
 
@@ -308,7 +317,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     was_swan, best_buy_min_price, best_max_traded_x,
                     best_buy_volume, best_buy_trade_count,
                     best_floor_duration_s, best_time_to_res_hours,
-                    swan_is_winner, label_20x, label_tail,
+                    swan_is_winner, best_swan_is_yes_token, label_20x, label_tail,
                     neg_risk_group_id, group_token_count, group_max_volume,
                     group_underdog_count, group_underdog_winner
                 ) VALUES (
@@ -319,7 +328,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     ?, ?, ?,
                     ?, ?,
                     ?, ?,
-                    ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?, ?, ?
                 ) ON CONFLICT(market_id) DO UPDATE SET
                     volume_usdc              = excluded.volume_usdc,
@@ -339,6 +348,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     best_floor_duration_s    = excluded.best_floor_duration_s,
                     best_time_to_res_hours   = excluded.best_time_to_res_hours,
                     swan_is_winner           = excluded.swan_is_winner,
+                    best_swan_is_yes_token   = excluded.best_swan_is_yes_token,
                     label_20x                = excluded.label_20x,
                     label_tail               = excluded.label_tail,
                     neg_risk_group_id        = excluded.neg_risk_group_id,
@@ -359,6 +369,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                 float(best_floor_duration_s) if best_floor_duration_s is not None else None,
                 best_time_to_res,
                 int(swan_is_winner) if swan_is_winner is not None else None,
+                int(best_swan_is_yes_token) if best_swan_is_yes_token is not None else None,
                 label_20x, label_tail,
                 neg_risk_group_id,
                 int(group_token_count) if group_token_count is not None else None,

@@ -234,11 +234,26 @@ class Screener:
         # Issue #47 identified that running market_scorer AFTER ef_score made it a
         # dead gate (ef_score pre-filtered all markets that would fail market_scorer).
         ms_obj: Optional[MarketScore] = None
+        token_market_scores: dict[int, MarketScore] = {}
         if self.market_scorer is not None:
-            ms_obj = self.market_scorer.score(m, hours_to_close=hours)
-            if ms_obj.tier == "reject":
-                _log("rejected_market_score", ms=ms_obj.total)
-                return []
+            if m.neg_risk:
+                token_market_scores = {
+                    i: self.market_scorer.score(
+                        m,
+                        hours_to_close=hours,
+                        is_no_token=(i > 0),
+                    )
+                    for i in range(len(m.token_ids))
+                }
+                ms_obj = max(token_market_scores.values(), key=lambda ms: ms.total, default=None)
+                if ms_obj is None or all(ms.tier == "reject" for ms in token_market_scores.values()):
+                    _log("rejected_market_score", ms=ms_obj.total if ms_obj else None)
+                    return []
+            else:
+                ms_obj = self.market_scorer.score(m, hours_to_close=hours)
+                if ms_obj.tier == "reject":
+                    _log("rejected_market_score", ms=ms_obj.total)
+                    return []
 
         # Dead market filter: reject if no trades in the last dead_market_hours.
         # Checked after market_score gate to avoid hitting Data API for bad markets.
@@ -263,6 +278,10 @@ class Screener:
         # Each token (YES, NO) is evaluated separately
         for i, token_id in enumerate(m.token_ids):
             outcome_name = m.outcome_names[i] if i < len(m.outcome_names) else f"outcome_{i}"
+            token_ms_obj = token_market_scores.get(i, ms_obj)
+            if token_ms_obj is not None and token_ms_obj.tier == "reject":
+                _log("rejected_market_score", token_id=token_id, ms=token_ms_obj.total)
+                continue
 
             # Current price for this specific token.
             # YES (i=0): use Gamma best_ask / last_trade_price.
@@ -305,7 +324,7 @@ class Screener:
                          ef=ef_s, res=res_s)
                     continue
 
-            total_score = self._compute_total_score(m, ef_s, res_s, ms_obj, hours=hours) * group_boost
+            total_score = self._compute_total_score(m, ef_s, res_s, token_ms_obj, hours=hours) * group_boost
 
             # Entry tiers are MAX acceptable prices, not strictly-below-current bids.
             # If the market is already cheaper than a tier, that tier remains valid and
@@ -320,7 +339,7 @@ class Screener:
                      ef=ef_s, res=res_s)
                 continue
 
-            ms_score = ms_obj.total if ms_obj else None
+            ms_score = token_ms_obj.total if token_ms_obj else None
             candidate_id = str(uuid.uuid4())
             _log("passed_to_order_manager", token_id=token_id, price=price,
                  ef=ef_s, res=res_s, candidate_id=candidate_id, ms=ms_score)
