@@ -255,12 +255,17 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             neg_risk_group_id="gid-1",
         )
 
+        log_entries = []
         with patch("strategy.screener.get_last_trade_ts", return_value=None):
-            candidates = screener._evaluate_market(market, log_entries=[])
+            candidates = screener._evaluate_market(market, log_entries=log_entries)
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].token_id, "yes_token")
         self.assertEqual(candidates[0].outcome_name, "Yes")
+
+        logged_outcomes = [(row[2], row[10]) for row in log_entries]
+        self.assertIn(("no_token", "rejected_price_above_entry_max"), logged_outcomes)
+        self.assertNotIn(("no_token", "rejected_market_score"), logged_outcomes)
 
 
 if __name__ == "__main__":

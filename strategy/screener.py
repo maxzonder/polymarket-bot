@@ -279,9 +279,6 @@ class Screener:
         for i, token_id in enumerate(m.token_ids):
             outcome_name = m.outcome_names[i] if i < len(m.outcome_names) else f"outcome_{i}"
             token_ms_obj = token_market_scores.get(i, ms_obj)
-            if token_ms_obj is not None and token_ms_obj.tier == "reject":
-                _log("rejected_market_score", token_id=token_id, ms=token_ms_obj.total)
-                continue
 
             # Current price for this specific token.
             # YES (i=0): use Gamma best_ask / last_trade_price.
@@ -323,6 +320,10 @@ class Screener:
                     _log("rejected_no_reprice_above_max", token_id=token_id, price=price,
                          ef=ef_s, res=res_s)
                     continue
+
+            if token_ms_obj is not None and token_ms_obj.tier == "reject":
+                _log("rejected_market_score", token_id=token_id, ms=token_ms_obj.total)
+                continue
 
             total_score = self._compute_total_score(m, ef_s, res_s, token_ms_obj, hours=hours) * group_boost
 
