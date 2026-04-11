@@ -85,10 +85,7 @@ class OfflineDryRunState:
         )
 
         for market_id, market_rows in grouped.items():
-            ordered = sorted(
-                market_rows,
-                key=lambda row: cls._outcome_sort_key(row.get("outcome_name") or ""),
-            )
+            ordered = sorted(market_rows, key=cls._token_sort_key)
             token_ids = tuple(str(row["token_id"]) for row in ordered)
             outcome_names = tuple(str(row.get("outcome_name") or "") for row in ordered)
             sample = ordered[0]
@@ -140,6 +137,17 @@ class OfflineDryRunState:
             end_events=tuple(sorted(end_events)),
             max_cohort_size=max_cohort_size,
         )
+
+    @classmethod
+    def _token_sort_key(cls, row: dict) -> tuple[int, int, str]:
+        token_order = row.get("token_order")
+        if token_order is not None:
+            try:
+                return (0, int(token_order), "")
+            except (TypeError, ValueError):
+                pass
+        lowered = str(row.get("outcome_name") or "").strip().lower()
+        return (1, *cls._outcome_sort_key(lowered))
 
     @staticmethod
     def _outcome_sort_key(outcome_name: str) -> tuple[int, str]:
@@ -357,6 +365,7 @@ def load_all_markets(
             m.neg_risk_market_id,
             COALESCE(m.comment_count, 0) AS comment_count,
             t.token_id,
+            t.token_order,
             t.outcome_name,
             t.is_winner
         FROM markets m

@@ -154,6 +154,43 @@ class OfflineDryRunStateTests(unittest.TestCase):
         )
         self.assertEqual([m.market_id for m in state.fetch_open_markets()], ["m2"])
 
+    def test_from_rows_prefers_token_order_over_outcome_name_sort(self) -> None:
+        rows = [
+            {
+                "market_id": "m1",
+                "question": "Question?",
+                "category": "sports",
+                "volume": 1000.0,
+                "comment_count": 3,
+                "end_date": 10_000,
+                "start_date": 10,
+                "neg_risk": 0,
+                "neg_risk_market_id": None,
+                "token_id": "tok_second",
+                "token_order": 1,
+                "outcome_name": "Alpha",
+            },
+            {
+                "market_id": "m1",
+                "question": "Question?",
+                "category": "sports",
+                "volume": 1000.0,
+                "comment_count": 3,
+                "end_date": 10_000,
+                "start_date": 10,
+                "neg_risk": 0,
+                "neg_risk_market_id": None,
+                "token_id": "tok_first",
+                "token_order": 0,
+                "outcome_name": "Zulu",
+            },
+        ]
+        state = OfflineDryRunState.from_rows(rows)
+        market = state.markets["m1"]
+
+        self.assertEqual(market.token_ids, ("tok_first", "tok_second"))
+        self.assertEqual(market.outcome_names, ("Zulu", "Alpha"))
+
     def test_fetch_open_markets_skips_large_neg_risk_cohorts_by_full_group_size(self) -> None:
         rows = []
         for idx in range(6):
