@@ -157,6 +157,7 @@ python -m data_collector.data_collector_and_parsing --start 2026-03-27 --end 202
 |------|-----|----------|
 | `token_id` | TEXT PK | `clobTokenIds[i]` |
 | `market_id` | TEXT FK | `id` |
+| `token_order` | INTEGER | Порядок в Gamma `clobTokenIds[i]` / `outcomes[i]` |
 | `outcome_name` | TEXT | `outcomes[i]` |
 | `is_winner` | INTEGER (0/1) | `outcomePrices[i] >= 0.99` |
 

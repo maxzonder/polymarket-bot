@@ -405,6 +405,7 @@ CREATE TABLE IF NOT EXISTS markets (
 CREATE TABLE IF NOT EXISTS tokens (
     token_id        TEXT PRIMARY KEY,
     market_id       TEXT,
+    token_order     INTEGER,
     outcome_name    TEXT,
     is_winner       INTEGER,
     FOREIGN KEY (market_id) REFERENCES markets(id)
@@ -455,10 +456,11 @@ ON CONFLICT(id) DO UPDATE SET
 """
 
 _TOKEN_UPSERT = """
-INSERT INTO tokens (token_id, market_id, outcome_name, is_winner)
-VALUES (:token_id, :market_id, :outcome_name, :is_winner)
+INSERT INTO tokens (token_id, market_id, token_order, outcome_name, is_winner)
+VALUES (:token_id, :market_id, :token_order, :outcome_name, :is_winner)
 ON CONFLICT(token_id) DO UPDATE SET
     market_id=excluded.market_id,
+    token_order=excluded.token_order,
     outcome_name=excluded.outcome_name,
     is_winner=excluded.is_winner
 """
@@ -708,6 +710,7 @@ def _parse_token_rows(data: dict) -> list[dict]:
         rows.append({
             "token_id":     str(token_id),
             "market_id":    market_id,
+            "token_order":  i,
             "outcome_name": outcomes[i] if i < len(outcomes) else None,
             "is_winner":    is_winner,
         })
@@ -730,6 +733,27 @@ def _init_db(conn: sqlite3.Connection):
         rows = conn.execute(f"PRAGMA table_info(markets)").fetchall()
         if not any(r[1] == col for r in rows):
             conn.execute(f"ALTER TABLE markets ADD COLUMN {col} {col_type}")
+
+    token_cols = {r[1] for r in conn.execute("PRAGMA table_info(tokens)").fetchall()}
+    if "token_order" not in token_cols:
+        conn.execute("ALTER TABLE tokens ADD COLUMN token_order INTEGER")
+        token_cols.add("token_order")
+
+    if "token_order" in token_cols:
+        conn.execute(
+            """
+            UPDATE tokens
+            SET token_order = CASE
+                WHEN lower(trim(outcome_name)) = 'yes' THEN 0
+                WHEN lower(trim(outcome_name)) = 'no'  THEN 1
+                ELSE token_order
+            END
+            WHERE token_order IS NULL
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tokens_market_order ON tokens(market_id, token_order)"
+        )
     conn.commit()
 
 

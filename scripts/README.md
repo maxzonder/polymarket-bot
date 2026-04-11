@@ -59,6 +59,16 @@ python analyzer/market_level_features_v1_1.py
 python analyzer/market_level_features_v1_1.py --recompute
 ```
 
+### `analyze_token_side_bias.py`
+Read-only исследовательский скрипт для проверки, есть ли реальный gap между YES/NO
+в исторических данных. Считает cohort analysis по `swans_v2 JOIN tokens`, группирует
+по `(token_order, category, vol_bucket)` и сравнивает `swan_rate` и `label_20x_rate`.
+
+```bash
+python scripts/analyze_token_side_bias.py
+python scripts/analyze_token_side_bias.py --min-samples 50 --top 30
+```
+
 ### `build_feature_mart.py`  *(moved to `_legacy/`)*
 Строит token-level `feature_mart` в `polymarket_dataset.db`. Использовался `EntryFillScorer`
 и `ResolutionScorer` для знаменателей скоринга (общий счётчик рынков по категориям).
