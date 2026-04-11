@@ -166,7 +166,6 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             yes_score = scorer.score_from_db(
                 market_id="live_nr_yes",
                 volume=20000.0,
-                comment_count=0,
                 hours_to_close=24.0,
                 category="sports",
                 neg_risk=True,
@@ -175,7 +174,6 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             no_score = scorer.score_from_db(
                 market_id="live_nr_no",
                 volume=20000.0,
-                comment_count=0,
                 hours_to_close=24.0,
                 category="sports",
                 neg_risk=True,
@@ -184,7 +182,6 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             binary_score = scorer.score_from_db(
                 market_id="live_bin_yes",
                 volume=20000.0,
-                comment_count=0,
                 hours_to_close=24.0,
                 category="sports",
                 neg_risk=False,
@@ -204,7 +201,6 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             binary_score = scorer.score_from_db(
                 market_id="live_bin_yes",
                 volume=20000.0,
-                comment_count=0,
                 hours_to_close=24.0,
                 category="sports",
                 neg_risk=False,
@@ -213,7 +209,6 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             neg_risk_no_score = scorer.score_from_db(
                 market_id="live_nr_no",
                 volume=20000.0,
-                comment_count=0,
                 hours_to_close=24.0,
                 category="sports",
                 neg_risk=True,
@@ -224,6 +219,58 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             # Dedicated YES-neg-risk lookup must not change this blended scale.
             self.assertAlmostEqual(binary_score.analogy_score, 2.0 / 3.0, places=4)
             self.assertAlmostEqual(neg_risk_no_score.analogy_score, 2.0 / 3.0, places=4)
+
+    def test_comment_count_no_longer_affects_market_score(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "dataset.db"
+            self._build_dataset(db_path, include_neg_risk_yes=True)
+
+            scorer = MarketScorer(db_path=db_path)
+            low_comments = scorer.score(
+                MarketInfo(
+                    market_id="live_bin_low_comments",
+                    condition_id="c_low",
+                    question="Q low?",
+                    category="sports",
+                    token_ids=["yes", "no"],
+                    outcome_names=["Yes", "No"],
+                    best_ask=0.05,
+                    best_bid=0.04,
+                    last_trade_price=0.05,
+                    volume_usdc=20000.0,
+                    liquidity_usdc=10000.0,
+                    comment_count=0,
+                    fees_enabled=False,
+                    end_date_ts=None,
+                    hours_to_close=24.0,
+                    neg_risk=False,
+                    neg_risk_group_id=None,
+                )
+            )
+            high_comments = scorer.score(
+                MarketInfo(
+                    market_id="live_bin_high_comments",
+                    condition_id="c_high",
+                    question="Q high?",
+                    category="sports",
+                    token_ids=["yes", "no"],
+                    outcome_names=["Yes", "No"],
+                    best_ask=0.05,
+                    best_bid=0.04,
+                    last_trade_price=0.05,
+                    volume_usdc=20000.0,
+                    liquidity_usdc=10000.0,
+                    comment_count=5000,
+                    fees_enabled=False,
+                    end_date_ts=None,
+                    hours_to_close=24.0,
+                    neg_risk=False,
+                    neg_risk_group_id=None,
+                )
+            )
+
+            self.assertAlmostEqual(low_comments.total, high_comments.total, places=4)
+            self.assertEqual(low_comments.rationale, high_comments.rationale)
 
     def test_screener_keeps_neg_risk_yes_and_rejects_neg_risk_no(self) -> None:
         config = BotConfig()
