@@ -69,6 +69,25 @@ python scripts/analyze_token_side_bias.py
 python scripts/analyze_token_side_bias.py --min-samples 50 --top 30
 ```
 
+### `analyze_price_resolution.py`
+Research-скрипт по сырому `historical_tape.db`: материализует таблицы first-touch / resolution
+для вопроса вида “если токен дошёл до уровня 0.80 при запасе времени, как часто он потом
+резолвился в `$1`?”.
+
+Что строит:
+- `token_price_first_touch` — первый touch price-level по `ascending/descending`
+- `token_price_resolution_events` — enriched event table с `is_winner`, `time_to_close_sec`, `max_price_after_touch`
+- `price_resolution_heatmap` — `P(resolve=$1 | touch price p, time_to_close bucket, direction)`
+- `price_level_transition_matrix` — `P(touch p2 | already touched p1)`
+- `price_level_regret_stats` — regret/hold statistics для winner-кейсов
+
+Первый deliverable по умолчанию считает окна реакции `60s` и `300s`.
+
+```bash
+python scripts/analyze_price_resolution.py
+python scripts/analyze_price_resolution.py --reaction-window 60 --reaction-window 300 --min-touch-volume-usdc 20
+```
+
 ### `build_feature_mart.py`  *(moved to `_legacy/`)*
 Старый builder token-level `feature_mart` в `polymarket_dataset.db`.
 Заменён `market_level_features_v1_1.py` в v1.1 и оставлен только как legacy reference в `_legacy/`.
