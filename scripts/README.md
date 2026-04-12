@@ -89,6 +89,28 @@ python scripts/analyze_price_resolution.py
 python scripts/analyze_price_resolution.py --reaction-window 60 --reaction-window 300 --min-touch-volume-usdc 20
 ```
 
+### `analyze_maker_postonly_proxy.py`
+Research-скрипт для **proxy backtest** идеи `post-only maker entry` на historical tape.
+Не требует полного order book, но и не претендует на exact book replay: строит приближение
+для сценария “поставили passive bid, дали ему lifetime, если filled — держим до resolution”.
+
+Что строит:
+- `maker_entry_candidates` — trigger-кандидаты с precursor / volume / time-to-close контекстом
+- `maker_entry_proxy_fills` — optimistic/conservative fill proxy по каждой заявке
+- `maker_entry_proxy_summary` — fill rate, `P(win|filled)`, EV per placed / filled order
+
+Первый pass по умолчанию:
+- trigger zone `0.70 .. 0.75`
+- precursor `<= 0.70` за последние `15m`
+- post-only bid `0.80`
+- lifetime `10m`
+- optimistic + conservative queue haircut modes
+
+```bash
+python scripts/analyze_maker_postonly_proxy.py
+python scripts/analyze_maker_postonly_proxy.py --bid-price 0.80 --cancel-after-sec 600 --max-time-to-close-sec 1800
+```
+
 ### `build_feature_mart.py`  *(moved to `_legacy/`)*
 Старый builder token-level `feature_mart` в `polymarket_dataset.db`.
 Заменён `market_level_features_v1_1.py` в v1.1 и оставлен только как legacy reference в `_legacy/`.
