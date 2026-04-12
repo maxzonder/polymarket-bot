@@ -83,6 +83,7 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
             self.assertGreater(stats["heatmap_rows"], 0)
             self.assertGreater(stats["transition_rows"], 0)
             self.assertGreater(stats["regret_rows"], 0)
+            self.assertGreater(stats["diagnostic_rows"], 0)
 
             conn = sqlite3.connect(output_db)
             conn.row_factory = sqlite3.Row
@@ -103,6 +104,8 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
                 self.assertEqual(int(heatmap_row["n_tokens"]), 2)
                 self.assertEqual(int(heatmap_row["winner_count"]), 1)
                 self.assertAlmostEqual(float(heatmap_row["win_rate"]), 0.5)
+                self.assertAlmostEqual(float(heatmap_row["avg_touch_price"]), 0.815)
+                self.assertAlmostEqual(float(heatmap_row["avg_gross_edge"]), -0.315)
 
                 transition_row = conn.execute(
                     """
@@ -121,6 +124,8 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
                 self.assertEqual(int(transition_row["n_tokens"]), 2)
                 self.assertEqual(int(transition_row["reached_count"]), 1)
                 self.assertAlmostEqual(float(transition_row["reach_rate"]), 0.5)
+                self.assertAlmostEqual(float(transition_row["avg_minutes_to_target"]), 10.0 / 60.0)
+                self.assertAlmostEqual(float(transition_row["median_minutes_to_target"]), 10.0 / 60.0)
 
                 regret_row = conn.execute(
                     """
@@ -137,6 +142,40 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
                 self.assertIsNotNone(regret_row)
                 self.assertEqual(int(regret_row["winner_samples"]), 1)
                 self.assertAlmostEqual(float(regret_row["avg_max_price_after_touch"]), 1.0)
+
+                diag_winner = conn.execute(
+                    """
+                    SELECT *
+                    FROM price_resolution_touch_diagnostics
+                    WHERE reaction_window_sec=60
+                      AND price_level=0.8
+                      AND touch_direction='ascending'
+                      AND time_to_close_bucket='5m_15m'
+                      AND market_type='all'
+                      AND token_side='all'
+                      AND outcome_group='winner'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(diag_winner)
+                self.assertEqual(int(diag_winner["samples"]), 1)
+                self.assertAlmostEqual(float(diag_winner["avg_touch_price"]), 0.82)
+
+                diag_loser = conn.execute(
+                    """
+                    SELECT *
+                    FROM price_resolution_touch_diagnostics
+                    WHERE reaction_window_sec=60
+                      AND price_level=0.8
+                      AND touch_direction='ascending'
+                      AND time_to_close_bucket='5m_15m'
+                      AND market_type='all'
+                      AND token_side='all'
+                      AND outcome_group='loser'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(diag_loser)
+                self.assertEqual(int(diag_loser["samples"]), 1)
+                self.assertAlmostEqual(float(diag_loser["avg_touch_price"]), 0.81)
             finally:
                 conn.close()
 

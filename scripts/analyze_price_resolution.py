@@ -270,6 +270,8 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             n_tokens INTEGER NOT NULL,
             winner_count INTEGER NOT NULL,
             win_rate REAL NOT NULL,
+            avg_touch_price REAL NOT NULL,
+            avg_gross_edge REAL NOT NULL,
             avg_touch_volume_usdc REAL NOT NULL,
             median_minutes_to_resolution REAL NOT NULL,
             p10_minutes_to_resolution REAL NOT NULL,
@@ -295,6 +297,10 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             n_tokens INTEGER NOT NULL,
             reached_count INTEGER NOT NULL,
             reach_rate REAL NOT NULL,
+            avg_minutes_to_target REAL NOT NULL,
+            median_minutes_to_target REAL NOT NULL,
+            p10_minutes_to_target REAL NOT NULL,
+            p90_minutes_to_target REAL NOT NULL,
             PRIMARY KEY (
                 reaction_window_sec,
                 from_price_level,
@@ -303,6 +309,34 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
                 time_to_close_bucket,
                 market_type,
                 token_side
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS price_resolution_touch_diagnostics (
+            reaction_window_sec INTEGER NOT NULL,
+            price_level REAL NOT NULL,
+            touch_direction TEXT NOT NULL,
+            time_to_close_bucket TEXT NOT NULL,
+            market_type TEXT NOT NULL,
+            token_side TEXT NOT NULL,
+            outcome_group TEXT NOT NULL,
+            samples INTEGER NOT NULL,
+            avg_touch_price REAL NOT NULL,
+            avg_prev_price REAL NOT NULL,
+            avg_lookback_min_price REAL NOT NULL,
+            avg_lookback_max_price REAL NOT NULL,
+            avg_lookback_volume_usdc REAL NOT NULL,
+            avg_lookback_trade_count REAL NOT NULL,
+            avg_price_runup REAL NOT NULL,
+            avg_price_reversal_room REAL NOT NULL,
+            PRIMARY KEY (
+                reaction_window_sec,
+                price_level,
+                touch_direction,
+                time_to_close_bucket,
+                market_type,
+                token_side,
+                outcome_group
             )
         );
 
@@ -342,6 +376,7 @@ def reset_output_tables(conn: sqlite3.Connection) -> None:
         DELETE FROM price_resolution_heatmap;
         DELETE FROM price_level_transition_matrix;
         DELETE FROM price_level_regret_stats;
+        DELETE FROM price_resolution_touch_diagnostics;
         """
     )
     conn.commit()
@@ -725,6 +760,7 @@ def aggregate_heatmap_rows(
     for row in events:
         time_to_close = int(row["time_to_close_sec"])
         touch_volume = float(row["lookback_volume_usdc"] or 0.0)
+        touch_price = float(row["touch_price"] or 0.0)
         if time_to_close <= 0 or touch_volume < min_touch_volume_usdc:
             continue
         time_bucket = _time_to_close_bucket(time_to_close)
@@ -753,32 +789,41 @@ def aggregate_heatmap_rows(
                     {
                         "n_tokens": 0,
                         "winner_count": 0,
+                        "touch_prices": [],
                         "touch_volumes": [],
                         "minutes": [],
                     },
                 )
                 bucket["n_tokens"] = int(bucket["n_tokens"]) + 1
                 bucket["winner_count"] = int(bucket["winner_count"]) + int(row["is_winner"] or 0)
+                cast_touch_prices = bucket["touch_prices"]
                 cast_touch_volumes = bucket["touch_volumes"]
                 cast_minutes = bucket["minutes"]
+                assert isinstance(cast_touch_prices, list)
                 assert isinstance(cast_touch_volumes, list)
                 assert isinstance(cast_minutes, list)
+                cast_touch_prices.append(touch_price)
                 cast_touch_volumes.append(touch_volume)
                 cast_minutes.append(float(row["minutes_to_resolution"] or 0.0))
 
     rows: list[tuple] = []
     for key, bucket in sorted(buckets.items()):
+        touch_prices = sorted(float(v) for v in bucket["touch_prices"])
         touch_volumes = sorted(float(v) for v in bucket["touch_volumes"])
         minutes = sorted(float(v) for v in bucket["minutes"])
         n_tokens = int(bucket["n_tokens"])
         winner_count = int(bucket["winner_count"])
+        avg_touch_price = sum(touch_prices) / n_tokens if n_tokens else 0.0
         avg_touch_volume = sum(touch_volumes) / n_tokens if n_tokens else 0.0
+        win_rate = float(winner_count) / n_tokens if n_tokens else 0.0
         rows.append(
             (
                 *key,
                 n_tokens,
                 winner_count,
-                float(winner_count) / n_tokens if n_tokens else 0.0,
+                win_rate,
+                float(avg_touch_price),
+                float(win_rate - avg_touch_price),
                 float(avg_touch_volume),
                 _percentile(minutes, 0.50),
                 _percentile(minutes, 0.10),
@@ -800,12 +845,12 @@ def aggregate_transition_rows(
             continue
         events_by_token_direction[(str(row["token_id"]), str(row["touch_direction"]))].append(row)
 
-    buckets: dict[tuple, dict[str, int]] = {}
+    buckets: dict[tuple, dict[str, list[float] | int]] = {}
     for (_token_id, direction), rows in events_by_token_direction.items():
         ordered = sorted(rows, key=lambda r: float(r["price_level"]))
         if direction == "descending":
             ordered = sorted(rows, key=lambda r: float(r["price_level"]), reverse=True)
-        touched_levels = {float(row["price_level"]) for row in ordered}
+        touched_levels = {float(row["price_level"]): row for row in ordered}
         token_side = _token_side(ordered[0]["token_order"])
         market_type = _market_type(int(ordered[0]["neg_risk"] or 0))
         dimensions = [
@@ -831,7 +876,14 @@ def aggregate_transition_rows(
                     continue
                 time_bucket = _time_to_close_bucket(time_to_close)
                 for candidate_level in candidate_levels:
-                    reached = candidate_level in touched_levels
+                    target_row = touched_levels.get(float(candidate_level))
+                    reached = target_row is not None
+                    minutes_to_target = 0.0
+                    if reached:
+                        minutes_to_target = max(
+                            0.0,
+                            (int(target_row["first_touch_ts"]) - int(from_row["first_touch_ts"])) / 60.0,
+                        )
                     for dim_market_type, dim_token_side in dimensions:
                         key = (
                             int(reaction_window),
@@ -842,20 +894,29 @@ def aggregate_transition_rows(
                             dim_market_type,
                             dim_token_side,
                         )
-                        bucket = buckets.setdefault(key, {"n_tokens": 0, "reached_count": 0})
+                        bucket = buckets.setdefault(key, {"n_tokens": 0, "reached_count": 0, "minutes_to_target": []})
                         bucket["n_tokens"] += 1
                         bucket["reached_count"] += 1 if reached else 0
+                        if reached:
+                            cast_minutes = bucket["minutes_to_target"]
+                            assert isinstance(cast_minutes, list)
+                            cast_minutes.append(minutes_to_target)
 
     rows: list[tuple] = []
     for key, bucket in sorted(buckets.items()):
         n_tokens = int(bucket["n_tokens"])
         reached_count = int(bucket["reached_count"])
+        reached_minutes = sorted(float(v) for v in bucket["minutes_to_target"])
         rows.append(
             (
                 *key,
                 n_tokens,
                 reached_count,
                 float(reached_count) / n_tokens if n_tokens else 0.0,
+                sum(reached_minutes) / reached_count if reached_count else 0.0,
+                _percentile(reached_minutes, 0.50),
+                _percentile(reached_minutes, 0.10),
+                _percentile(reached_minutes, 0.90),
             )
         )
     return rows
@@ -917,6 +978,97 @@ def aggregate_regret_rows(
     return rows
 
 
+def aggregate_touch_diagnostics_rows(
+    events: Sequence[sqlite3.Row],
+    reaction_windows: Sequence[int],
+    min_touch_volume_usdc: float,
+) -> list[tuple]:
+    buckets: dict[tuple, dict[str, list[float] | int]] = {}
+    for row in events:
+        time_to_close = int(row["time_to_close_sec"] or 0)
+        touch_volume = float(row["lookback_volume_usdc"] or 0.0)
+        if time_to_close <= 0 or touch_volume < min_touch_volume_usdc:
+            continue
+        price_runup = float(row["touch_price"] or 0.0) - float(row["lookback_min_price"] or 0.0)
+        price_reversal_room = float(row["lookback_max_price"] or 0.0) - float(row["touch_price"] or 0.0)
+        token_side = _token_side(row["token_order"])
+        market_type = _market_type(int(row["neg_risk"] or 0))
+        time_bucket = _time_to_close_bucket(time_to_close)
+        outcome_group = "winner" if int(row["is_winner"] or 0) == 1 else "loser"
+        dimensions = [
+            ("all", "all"),
+            (market_type, "all"),
+            ("all", token_side),
+            (market_type, token_side),
+        ]
+        for reaction_window in reaction_windows:
+            if time_to_close < reaction_window:
+                continue
+            for dim_market_type, dim_token_side in dimensions:
+                key = (
+                    int(reaction_window),
+                    float(row["price_level"]),
+                    str(row["touch_direction"]),
+                    time_bucket,
+                    dim_market_type,
+                    dim_token_side,
+                    outcome_group,
+                )
+                bucket = buckets.setdefault(
+                    key,
+                    {
+                        "samples": 0,
+                        "touch_prices": [],
+                        "prev_prices": [],
+                        "lookback_min_prices": [],
+                        "lookback_max_prices": [],
+                        "lookback_volumes": [],
+                        "lookback_trade_counts": [],
+                        "price_runups": [],
+                        "price_reversal_rooms": [],
+                    },
+                )
+                bucket["samples"] = int(bucket["samples"]) + 1
+                for field, value in (
+                    ("touch_prices", float(row["touch_price"] or 0.0)),
+                    ("prev_prices", float(row["prev_price"] or 0.0)),
+                    ("lookback_min_prices", float(row["lookback_min_price"] or 0.0)),
+                    ("lookback_max_prices", float(row["lookback_max_price"] or 0.0)),
+                    ("lookback_volumes", touch_volume),
+                    ("lookback_trade_counts", float(row["lookback_trade_count"] or 0.0)),
+                    ("price_runups", price_runup),
+                    ("price_reversal_rooms", price_reversal_room),
+                ):
+                    cast_values = bucket[field]
+                    assert isinstance(cast_values, list)
+                    cast_values.append(value)
+
+    rows: list[tuple] = []
+    for key, bucket in sorted(buckets.items()):
+        samples = int(bucket["samples"])
+
+        def _avg(name: str) -> float:
+            values = bucket[name]
+            assert isinstance(values, list)
+            return sum(float(v) for v in values) / samples if samples else 0.0
+
+        rows.append(
+            (
+                *key,
+                samples,
+                _avg("touch_prices"),
+                _avg("prev_prices"),
+                _avg("lookback_min_prices"),
+                _avg("lookback_max_prices"),
+                _avg("lookback_volumes"),
+                _avg("lookback_trade_counts"),
+                _avg("price_runups"),
+                _avg("price_reversal_rooms"),
+            )
+        )
+    return rows
+
+
 def build_aggregate_tables(
     *,
     output_db_path: Path,
@@ -937,9 +1089,10 @@ def build_aggregate_tables(
             INSERT INTO price_resolution_heatmap(
                 reaction_window_sec, price_level, touch_direction, time_to_close_bucket,
                 market_type, token_side, n_tokens, winner_count, win_rate,
-                avg_touch_volume_usdc, median_minutes_to_resolution,
-                p10_minutes_to_resolution, p90_minutes_to_resolution
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                avg_touch_price, avg_gross_edge, avg_touch_volume_usdc,
+                median_minutes_to_resolution, p10_minutes_to_resolution,
+                p90_minutes_to_resolution
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             heatmap_rows,
         )
@@ -950,8 +1103,9 @@ def build_aggregate_tables(
             INSERT INTO price_level_transition_matrix(
                 reaction_window_sec, from_price_level, to_price_level, touch_direction,
                 time_to_close_bucket, market_type, token_side, n_tokens, reached_count,
-                reach_rate
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reach_rate, avg_minutes_to_target, median_minutes_to_target,
+                p10_minutes_to_target, p90_minutes_to_target
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             transition_rows,
         )
@@ -969,6 +1123,20 @@ def build_aggregate_tables(
             regret_rows,
         )
 
+        diagnostic_rows = aggregate_touch_diagnostics_rows(events, reaction_windows, min_touch_volume_usdc)
+        conn.executemany(
+            """
+            INSERT INTO price_resolution_touch_diagnostics(
+                reaction_window_sec, price_level, touch_direction, time_to_close_bucket,
+                market_type, token_side, outcome_group, samples, avg_touch_price,
+                avg_prev_price, avg_lookback_min_price, avg_lookback_max_price,
+                avg_lookback_volume_usdc, avg_lookback_trade_count,
+                avg_price_runup, avg_price_reversal_room
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            diagnostic_rows,
+        )
+
         conn.executemany(
             "INSERT INTO research_meta(key, value) VALUES (?, ?)",
             [
@@ -977,6 +1145,7 @@ def build_aggregate_tables(
                 ("heatmap_rows", str(len(heatmap_rows))),
                 ("transition_rows", str(len(transition_rows))),
                 ("regret_rows", str(len(regret_rows))),
+                ("diagnostic_rows", str(len(diagnostic_rows))),
             ],
         )
         conn.commit()
@@ -985,6 +1154,7 @@ def build_aggregate_tables(
             "heatmap_rows": len(heatmap_rows),
             "transition_rows": len(transition_rows),
             "regret_rows": len(regret_rows),
+            "diagnostic_rows": len(diagnostic_rows),
         }
     finally:
         conn.close()
@@ -1011,6 +1181,8 @@ def build_price_resolution_research(
     if not tape_db_path.exists():
         raise FileNotFoundError(f"tape DB not found: {tape_db_path}")
     output_db_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_db_path.exists():
+        output_db_path.unlink()
 
     price_levels = _generate_price_levels(price_step)
     build_stats = build_event_tables(

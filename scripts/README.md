@@ -77,9 +77,10 @@ Research-скрипт по сырому `historical_tape.db`: материали
 Что строит:
 - `token_price_first_touch` — первый touch price-level по `ascending/descending`
 - `token_price_resolution_events` — enriched event table с `is_winner`, `time_to_close_sec`, `max_price_after_touch`
-- `price_resolution_heatmap` — `P(resolve=$1 | touch price p, time_to_close bucket, direction)`
-- `price_level_transition_matrix` — `P(touch p2 | already touched p1)`
+- `price_resolution_heatmap` — `P(resolve=$1 | touch price p, time_to_close bucket, direction)` + `avg_touch_price` + first-order `avg_gross_edge`
+- `price_level_transition_matrix` — `P(touch p2 | already touched p1)` + timing to target
 - `price_level_regret_stats` — regret/hold statistics для winner-кейсов
+- `price_resolution_touch_diagnostics` — winner/loser touch diagnostics по признакам, видимым в момент сигнала
 
 Первый deliverable по умолчанию считает окна реакции `60s` и `300s`.
 
