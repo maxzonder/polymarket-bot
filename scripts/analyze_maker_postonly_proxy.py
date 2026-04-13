@@ -43,6 +43,7 @@ class TradePoint:
     timestamp: int
     price: float
     size: float
+    side: str
     market_id: str
     token_id: str
     source_file_id: int
@@ -290,7 +291,7 @@ def iter_token_trades(tape_db_path: Path) -> Iterable[tuple[str, list[TradePoint
     current_token_id: str | None = None
     bucket: list[TradePoint] = []
     query = (
-        "SELECT source_file_id, seq, timestamp, market_id, token_id, price, size "
+        "SELECT source_file_id, seq, timestamp, market_id, token_id, price, size, side "
         "FROM tape ORDER BY token_id ASC, timestamp ASC, source_file_id ASC, seq ASC"
     )
     try:
@@ -302,6 +303,7 @@ def iter_token_trades(tape_db_path: Path) -> Iterable[tuple[str, list[TradePoint
                 token_id=token_id,
                 price=float(row["price"]),
                 size=float(row["size"]),
+                side=str(row["side"] or "").upper(),
                 source_file_id=int(row["source_file_id"]),
                 seq=int(row["seq"]),
             )
@@ -394,12 +396,16 @@ def build_fill_rows(
         trade for trade in trades
         if window_start <= trade.timestamp <= window_end
     ]
-    raw_fillable_size = sum(trade.size for trade in future_trades if trade.price <= candidate.bid_price + 1e-9)
+
+    def _can_fill_passive_buy(trade: TradePoint) -> bool:
+        return trade.price <= candidate.bid_price + 1e-9 and trade.side in ("SELL", "")
+
+    raw_fillable_size = sum(trade.size for trade in future_trades if _can_fill_passive_buy(trade))
 
     def _first_fill_ts(required_size: float) -> int | None:
         cum = 0.0
         for trade in future_trades:
-            if trade.price <= candidate.bid_price + 1e-9:
+            if _can_fill_passive_buy(trade):
                 cum += trade.size
                 if cum + 1e-9 >= required_size:
                     return trade.timestamp
@@ -607,6 +613,7 @@ def build_maker_postonly_proxy_research(
             ("cancel_after_sec", str(cancel_after_sec)),
             ("rest_delay_sec", str(rest_delay_sec)),
             ("conservative_queue_multiplier", f"{conservative_queue_multiplier:.4f}"),
+            ("fill_side_policy", "passive_buy_fills_on_sell_or_unknown_side"),
         ],
     )
     output_conn.commit()

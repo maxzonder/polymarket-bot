@@ -37,15 +37,15 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 conservative_queue_multiplier=2.0,
             )
 
-            self.assertEqual(stats["candidates"], 2)
-            self.assertEqual(stats["fill_rows"], 4)
+            self.assertEqual(stats["candidates"], 3)
+            self.assertEqual(stats["fill_rows"], 6)
             self.assertGreater(stats["summary_rows"], 0)
 
             conn = sqlite3.connect(output_db)
             conn.row_factory = sqlite3.Row
             try:
                 candidates = conn.execute("SELECT * FROM maker_entry_candidates ORDER BY token_id").fetchall()
-                self.assertEqual(len(candidates), 2)
+                self.assertEqual(len(candidates), 3)
                 self.assertEqual(candidates[0]["token_id"], "tokA")
                 self.assertEqual(candidates[0]["time_to_close_bucket"], "15m_60m")
                 self.assertEqual(candidates[0]["relative_time_bucket"], "20_30pct")
@@ -81,6 +81,16 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 self.assertIsNotNone(loser_fill)
                 self.assertEqual(loser_fill["fill_status"], "unfilled")
 
+                buy_side_only_flow = conn.execute(
+                    """
+                    SELECT * FROM maker_entry_proxy_fills
+                    WHERE token_id='tokC' AND proxy_mode='optimistic'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(buy_side_only_flow)
+                self.assertEqual(buy_side_only_flow["fill_status"], "unfilled")
+                self.assertAlmostEqual(float(buy_side_only_flow["cumulative_fillable_size"]), 0.0)
+
                 summary = conn.execute(
                     """
                     SELECT * FROM maker_entry_proxy_summary
@@ -93,9 +103,10 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                     """
                 ).fetchone()
                 self.assertIsNotNone(summary)
-                self.assertEqual(int(summary["n_candidates"]), 1)
+                self.assertEqual(int(summary["n_candidates"]), 2)
                 self.assertEqual(int(summary["filled_count"]), 1)
                 self.assertAlmostEqual(float(summary["avg_ev_per_filled_share"]), 0.20)
+                self.assertAlmostEqual(float(summary["avg_ev_per_placed_share"]), 0.10)
             finally:
                 conn.close()
 
@@ -124,6 +135,7 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
             [
                 ("m1", "crypto", 0, 1, 2.0, 1800),
                 ("m2", "politics", 0, 0, 1.0, 1800),
+                ("m3", "crypto", 0, 1, 2.0, 1800),
             ],
         )
         conn.executemany(
@@ -131,6 +143,7 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
             [
                 ("tokA", "m1", 1, 0),
                 ("tokB", "m2", 0, 0),
+                ("tokC", "m3", 0, 0),
             ],
         )
         conn.commit()
@@ -166,6 +179,10 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 (2, 1, 60, "m2", "tokB", 0.69, 4.0, "BUY"),
                 (2, 2, 120, "m2", "tokB", 0.74, 2.0, "BUY"),
                 (2, 3, 220, "m2", "tokB", 0.85, 1.0, "BUY"),
+                (3, 0, 0, "m3", "tokC", 0.60, 4.0, "BUY"),
+                (3, 1, 60, "m3", "tokC", 0.68, 4.0, "BUY"),
+                (3, 2, 120, "m3", "tokC", 0.72, 2.0, "BUY"),
+                (3, 3, 130, "m3", "tokC", 0.79, 10.0, "BUY"),
             ],
         )
         conn.commit()
