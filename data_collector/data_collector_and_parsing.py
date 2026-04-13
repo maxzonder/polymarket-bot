@@ -47,6 +47,7 @@ DATA_API_BASE = "https://data-api.polymarket.com"
 
 MARKETS_PAGE_SIZE   = 100
 MARKETS_PAGE_SLEEP  = 0.05
+MARKETS_VOLUME_MIN  = 50
 TRADES_PAGE_LIMIT   = 1000
 TRADES_MAX_OFFSET   = 3000
 TRADES_SLEEP        = 0.1
@@ -66,7 +67,7 @@ def _market_json_path(day_str: str, market_id: str) -> str:
     return os.path.join(DATABASE_DIR, day_str, f"{market_id}.json")
 
 
-def _fetch_markets_for_date(day: date) -> list[dict]:
+def _fetch_markets_for_date(day: date, volume_min: float = MARKETS_VOLUME_MIN) -> list[dict]:
     day_str  = day.isoformat()
     markets: list[dict] = []
     offset = 0
@@ -77,7 +78,7 @@ def _fetch_markets_for_date(day: date) -> list[dict]:
             "include_tag": "true",
             "end_date_min": f"{day_str}T00:00:00Z",
             "end_date_max": f"{day_str}T23:59:59Z",
-            "volume_num_min": 50,
+            "volume_num_min": volume_min,
             "limit": MARKETS_PAGE_SIZE,
             "offset": offset,
         }
@@ -104,13 +105,13 @@ def _save_market_json(day_str: str, market: dict) -> str:
     return market_id
 
 
-def _collect_markets_day(day: date):
+def _collect_markets_day(day: date, volume_min: float = MARKETS_VOLUME_MIN):
     day_str = day.isoformat()
     t0 = time.monotonic()
-    logger.info(f"[markets][{day_str}] Fetching...")
+    logger.info(f"[markets][{day_str}] Fetching... (volume >= {volume_min})")
 
     try:
-        markets = _fetch_markets_for_date(day)
+        markets = _fetch_markets_for_date(day, volume_min=volume_min)
     except Exception as e:
         logger.error(f"[markets][{day_str}] Failed — {e}")
         return
@@ -144,11 +145,11 @@ def _collect_markets_day(day: date):
         logger.info(f"[markets][{day_str}] Got {total} — all skipped")
 
 
-def collect_markets(start: date, end: date):
-    logger.info(f"Markets download: {start} → {end}")
+def collect_markets(start: date, end: date, volume_min: float = MARKETS_VOLUME_MIN):
+    logger.info(f"Markets download: {start} → {end} (volume >= {volume_min})")
     current = start
     while current <= end:
-        _collect_markets_day(current)
+        _collect_markets_day(current, volume_min=volume_min)
         current += timedelta(days=1)
     logger.info(f"Markets download done: {start} → {end}")
 
@@ -846,6 +847,7 @@ def run(
     skip_markets: bool = False,
     skip_trades: bool = False,
     skip_parse: bool = False,
+    volume_min: float = MARKETS_VOLUME_MIN,
     filter_amount: float = 10,
     max_duration_days: Optional[int] = MAX_MARKET_DURATION_DAYS,
 ) -> None:
@@ -853,7 +855,7 @@ def run(
 
     if not skip_markets:
         logger.info("=== Step 1/3: Download markets ===")
-        collect_markets(start, end)
+        collect_markets(start, end, volume_min=volume_min)
     else:
         logger.info("=== Step 1/3: Download markets [SKIPPED] ===")
 
@@ -882,6 +884,9 @@ if __name__ == "__main__":
     ap.add_argument("--skip-markets", action="store_true", help="Skip market JSON download")
     ap.add_argument("--skip-trades",  action="store_true", help="Skip trades download")
     ap.add_argument("--skip-parse",   action="store_true", help="Skip DB parsing step")
+    ap.add_argument("--volume-min", type=float, default=MARKETS_VOLUME_MIN, metavar="USDC",
+                    help=f"Minimum market volume passed to Gamma volume_num_min (default: {MARKETS_VOLUME_MIN}). "
+                         "Pass 0 to disable the market-volume filter.")
     ap.add_argument("--filter-amount", type=float, default=10, metavar="USDC",
                     help="Minimum trade size in USDC passed to filterAmount (default: 10). "
                          "Accepts fractional values (e.g. 0.1). Lower values give finer price history.")
@@ -896,6 +901,7 @@ if __name__ == "__main__":
         skip_markets=args.skip_markets,
         skip_trades=args.skip_trades,
         skip_parse=args.skip_parse,
+        volume_min=args.volume_min,
         filter_amount=args.filter_amount,
         max_duration_days=args.max_market_duration_days or None,
     )
