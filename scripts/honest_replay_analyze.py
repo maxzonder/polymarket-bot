@@ -782,6 +782,8 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           m.neg_risk_market_id as neg_risk_group_id,
           m.start_date as start_date_ts,
           m.end_date as end_date_ts,
+          m.duration_hours as market_duration_hours,
+          m.listing_duration_hours as listing_duration_hours,
           round(coalesce(m.volume, 0), 2) as volume_usdc,
           count(*) as positions,
           sum(case when p.status='resolved' then 1 else 0 end) as resolved_positions,
@@ -797,7 +799,7 @@ def _top_market_rows(cur: sqlite3.Cursor, top: int, *, winners: bool) -> list[di
           max(coalesce(p.closed_at, p.opened_at)) as last_activity_at
         from positions p
         left join dataset.markets m on m.id = p.market_id
-        group by p.market_id, question, category, neg_risk, neg_risk_group_id, start_date_ts, end_date_ts, volume_usdc
+        group by p.market_id, question, category, neg_risk, neg_risk_group_id, start_date_ts, end_date_ts, market_duration_hours, listing_duration_hours, volume_usdc
         having sum(coalesce(p.realized_pnl, 0)) {having}
         order by pnl {ordering}, buy desc
         limit {int(top)}
@@ -1143,8 +1145,13 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
         if row.get("end_date_ts") is not None and row.get("first_opened_at") is not None:
             hours_to_close = (float(row["end_date_ts"]) - float(row["first_opened_at"])) / 3600.0
         market_duration = None
-        if row.get("start_date_ts") is not None and row.get("end_date_ts") is not None:
+        if row.get("market_duration_hours") is not None:
+            market_duration = float(row["market_duration_hours"])
+        elif row.get("start_date_ts") is not None and row.get("end_date_ts") is not None:
             market_duration = (float(row["end_date_ts"]) - float(row["start_date_ts"])) / 3600.0
+        listing_duration = None
+        if row.get("listing_duration_hours") is not None:
+            listing_duration = float(row["listing_duration_hours"])
         path_summary, spark = _token_price_path(tape_cur, str(row["market_id"]), str(rep.get("token_id") or ""))
         sell_ladder = _market_sell_ladder(cur, str(row["market_id"]))
         category_weight = category_weights.get(row["category"])
@@ -1160,13 +1167,16 @@ def _print_market_cards(data: dict, *, winners: bool, top: int) -> None:
             f" | closes: {_fmt_ts(row.get('end_date_ts'))}"
             f" | volume: {_fmt_money(row.get('volume_usdc'), 2)}"
         )
+        duration_bits = [f"market duration: {_fmt_hours(market_duration)}"]
+        if listing_duration is not None:
+            duration_bits.append(f"listing duration: {_fmt_hours(listing_duration)}")
         print(
             "  - "
             f"positions: {_fmt_int(row['positions'])}"
             f" | resolved: {_fmt_int(row['resolved_positions'])}"
             f" | winners: {_fmt_int(row['winners'])}"
             f" | open: {_fmt_int(row['open_positions'])}"
-            f" | market duration: {_fmt_hours(market_duration)}"
+            f" | {' | '.join(duration_bits)}"
             f" | first-entry time-to-close: {_fmt_hours(hours_to_close)}"
         )
         ladder_text = ", ".join(
