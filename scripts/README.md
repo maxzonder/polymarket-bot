@@ -95,9 +95,9 @@ Research-скрипт для **proxy backtest** идеи `post-only maker entry`
 для сценария “поставили passive bid, дали ему lifetime, если filled — держим до resolution”.
 
 Что строит:
-- `maker_entry_candidates` — trigger-кандидаты с precursor / volume / time-to-close контекстом
+- `maker_entry_candidates` — trigger-кандидаты с precursor / volume / absolute + relative time-to-close контекстом
 - `maker_entry_proxy_fills` — optimistic/conservative fill proxy по каждой заявке
-- `maker_entry_proxy_summary` — fill rate, `P(win|filled)`, EV per placed / filled order
+- `maker_entry_proxy_summary` — fill rate, `P(win|filled)`, EV per placed / filled order в разрезе absolute и relative bucket
 
 Первый pass по умолчанию:
 - trigger zone `0.70 .. 0.75`
@@ -105,6 +105,12 @@ Research-скрипт для **proxy backtest** идеи `post-only maker entry`
 - post-only bid `0.80`
 - lifetime `10m`
 - optimistic + conservative queue haircut modes
+- relative bucket по доле оставшейся жизни рынка:
+  - `0_5pct`
+  - `5_10pct`
+  - `10_20pct`
+  - `20_30pct`
+  - `gt_30pct`
 
 ```bash
 python scripts/analyze_maker_postonly_proxy.py

@@ -48,6 +48,8 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 self.assertEqual(len(candidates), 2)
                 self.assertEqual(candidates[0]["token_id"], "tokA")
                 self.assertEqual(candidates[0]["time_to_close_bucket"], "15m_60m")
+                self.assertEqual(candidates[0]["relative_time_bucket"], "20_30pct")
+                self.assertAlmostEqual(float(candidates[0]["remaining_frac"]), 1680 / 7200, places=4)
 
                 optimistic_fill = conn.execute(
                     """
@@ -85,6 +87,7 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                     WHERE proxy_mode='optimistic'
                       AND bid_price=0.8
                       AND time_to_close_bucket='15m_60m'
+                      AND relative_time_bucket='20_30pct'
                       AND category='crypto'
                       AND fees_enabled=1
                     """
@@ -105,6 +108,7 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 category TEXT,
                 neg_risk INTEGER,
                 fees_enabled INTEGER,
+                duration_hours REAL,
                 closed_time INTEGER
             );
             CREATE TABLE tokens (
@@ -116,10 +120,10 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
             """
         )
         conn.executemany(
-            "INSERT INTO markets(id, category, neg_risk, fees_enabled, closed_time) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO markets(id, category, neg_risk, fees_enabled, duration_hours, closed_time) VALUES (?, ?, ?, ?, ?, ?)",
             [
-                ("m1", "crypto", 0, 1, 1800),
-                ("m2", "politics", 0, 0, 1800),
+                ("m1", "crypto", 0, 1, 2.0, 1800),
+                ("m2", "politics", 0, 0, 1.0, 1800),
             ],
         )
         conn.executemany(

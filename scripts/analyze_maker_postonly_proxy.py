@@ -34,6 +34,7 @@ class TokenMeta:
     category: str
     neg_risk: int
     fees_enabled: int
+    duration_hours: float
     closed_time: int
 
 
@@ -59,6 +60,9 @@ class MakerCandidate:
     cancel_after_sec: int
     time_to_close_sec: int
     time_to_close_bucket: str
+    total_duration_sec: int
+    remaining_frac: float
+    relative_time_bucket: str
     lookback_min_price: float
     lookback_max_price: float
     lookback_volume_usdc: float
@@ -127,6 +131,21 @@ def _time_to_close_bucket(seconds: int) -> str:
     return "gt_7d"
 
 
+def _relative_time_bucket(time_to_close_sec: int, total_duration_sec: int) -> tuple[float, str]:
+    if total_duration_sec <= 0:
+        return 0.0, "unknown"
+    frac = max(0.0, float(time_to_close_sec) / float(total_duration_sec))
+    if frac <= 0.05:
+        return frac, "0_5pct"
+    if frac <= 0.10:
+        return frac, "5_10pct"
+    if frac <= 0.20:
+        return frac, "10_20pct"
+    if frac <= 0.30:
+        return frac, "20_30pct"
+    return frac, "gt_30pct"
+
+
 def ensure_output_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -149,6 +168,9 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             cancel_after_sec INTEGER NOT NULL,
             time_to_close_sec INTEGER NOT NULL,
             time_to_close_bucket TEXT NOT NULL,
+            total_duration_sec INTEGER NOT NULL,
+            remaining_frac REAL NOT NULL,
+            relative_time_bucket TEXT NOT NULL,
             lookback_min_price REAL NOT NULL,
             lookback_max_price REAL NOT NULL,
             lookback_volume_usdc REAL NOT NULL,
@@ -177,6 +199,7 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             bid_price REAL NOT NULL,
             order_size_shares REAL NOT NULL,
             time_to_close_bucket TEXT NOT NULL,
+            relative_time_bucket TEXT NOT NULL,
             category TEXT NOT NULL,
             neg_risk INTEGER NOT NULL,
             fees_enabled INTEGER NOT NULL,
@@ -190,6 +213,7 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             proxy_mode TEXT NOT NULL,
             bid_price REAL NOT NULL,
             time_to_close_bucket TEXT NOT NULL,
+            relative_time_bucket TEXT NOT NULL,
             category TEXT NOT NULL,
             fees_enabled INTEGER NOT NULL,
             n_candidates INTEGER NOT NULL,
@@ -205,7 +229,7 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             avg_ev_per_filled_order REAL NOT NULL,
             median_time_to_fill_sec REAL NOT NULL,
             avg_fillable_size REAL NOT NULL,
-            PRIMARY KEY (proxy_mode, bid_price, time_to_close_bucket, category, fees_enabled)
+            PRIMARY KEY (proxy_mode, bid_price, time_to_close_bucket, relative_time_bucket, category, fees_enabled)
         );
         """
     )
@@ -236,6 +260,7 @@ def load_token_meta(dataset_db_path: Path) -> dict[str, TokenMeta]:
             COALESCE(m.category, 'unknown') AS category,
             COALESCE(m.neg_risk, 0) AS neg_risk,
             COALESCE(m.fees_enabled, 0) AS fees_enabled,
+            COALESCE(m.duration_hours, 0) AS duration_hours,
             COALESCE(m.closed_time, 0) AS closed_time
         FROM tokens t
         JOIN markets m ON m.id = t.market_id
@@ -252,6 +277,7 @@ def load_token_meta(dataset_db_path: Path) -> dict[str, TokenMeta]:
             category=str(row["category"]),
             neg_risk=int(row["neg_risk"] or 0),
             fees_enabled=int(row["fees_enabled"] or 0),
+            duration_hours=float(row["duration_hours"] or 0.0),
             closed_time=int(row["closed_time"] or 0),
         )
         for row in rows
@@ -308,9 +334,11 @@ def find_first_candidate(
     cancel_after_sec: int,
 ) -> MakerCandidate | None:
     window = RollingTradeWindow(max(precursor_lookback_sec, lookback_volume_sec))
+    total_duration_sec = max(0, int(round(meta.duration_hours * 3600)))
     for trade in trades:
         window.expire(trade.timestamp)
         time_to_close_sec = meta.closed_time - trade.timestamp
+        remaining_frac, relative_time_bucket = _relative_time_bucket(time_to_close_sec, total_duration_sec)
         lookback_min = window.min_price
         lookback_max = window.max_price
         lookback_vol = window.volume_usdc
@@ -334,6 +362,9 @@ def find_first_candidate(
                 cancel_after_sec=cancel_after_sec,
                 time_to_close_sec=time_to_close_sec,
                 time_to_close_bucket=_time_to_close_bucket(time_to_close_sec),
+                total_duration_sec=total_duration_sec,
+                remaining_frac=remaining_frac,
+                relative_time_bucket=relative_time_bucket,
                 lookback_min_price=float(lookback_min or trade.price),
                 lookback_max_price=float(lookback_max or trade.price),
                 lookback_volume_usdc=float(lookback_vol),
@@ -403,6 +434,7 @@ def build_fill_rows(
                 candidate.bid_price,
                 candidate.order_size_shares,
                 candidate.time_to_close_bucket,
+                candidate.relative_time_bucket,
                 candidate.category,
                 candidate.neg_risk,
                 candidate.fees_enabled,
@@ -420,9 +452,10 @@ def write_candidates(conn: sqlite3.Connection, rows: Iterable[tuple]) -> None:
         INSERT OR REPLACE INTO maker_entry_candidates(
             market_id, token_id, trigger_ts, trigger_price, bid_price, order_size_shares,
             cancel_after_sec, time_to_close_sec, time_to_close_bucket,
+            total_duration_sec, remaining_frac, relative_time_bucket,
             lookback_min_price, lookback_max_price, lookback_volume_usdc,
             lookback_trade_count, precursor_hit, category, neg_risk, fees_enabled, is_winner
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -435,8 +468,8 @@ def write_fills(conn: sqlite3.Connection, rows: Iterable[tuple]) -> None:
             market_id, token_id, trigger_ts, proxy_mode, accepted_proxy, fill_status,
             first_fill_ts, time_to_fill_sec, cumulative_fillable_size, required_fill_size,
             fill_price, cancel_after_sec, bid_price, order_size_shares, time_to_close_bucket,
-            category, neg_risk, fees_enabled, is_winner, pnl_per_share, pnl_per_order
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            relative_time_bucket, category, neg_risk, fees_enabled, is_winner, pnl_per_share, pnl_per_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -451,6 +484,7 @@ def build_summary(conn: sqlite3.Connection) -> int:
                 proxy_mode,
                 bid_price,
                 time_to_close_bucket,
+                relative_time_bucket,
                 category,
                 fees_enabled,
                 accepted_proxy,
@@ -461,11 +495,11 @@ def build_summary(conn: sqlite3.Connection) -> int:
                 cumulative_fillable_size,
                 time_to_fill_sec,
                 ROW_NUMBER() OVER (
-                    PARTITION BY proxy_mode, bid_price, time_to_close_bucket, category, fees_enabled
+                    PARTITION BY proxy_mode, bid_price, time_to_close_bucket, relative_time_bucket, category, fees_enabled
                     ORDER BY time_to_fill_sec
                 ) AS rn,
                 COUNT(*) OVER (
-                    PARTITION BY proxy_mode, bid_price, time_to_close_bucket, category, fees_enabled
+                    PARTITION BY proxy_mode, bid_price, time_to_close_bucket, relative_time_bucket, category, fees_enabled
                 ) AS cnt
             FROM maker_entry_proxy_fills
         ), summary AS (
@@ -473,6 +507,7 @@ def build_summary(conn: sqlite3.Connection) -> int:
                 proxy_mode,
                 bid_price,
                 time_to_close_bucket,
+                relative_time_bucket,
                 category,
                 fees_enabled,
                 COUNT(*) AS n_candidates,
@@ -489,12 +524,13 @@ def build_summary(conn: sqlite3.Connection) -> int:
                 AVG(CASE WHEN is_filled=1 THEN cumulative_fillable_size END) AS avg_fillable_size,
                 MIN(CASE WHEN rn = CAST(((cnt + 1) / 2) AS INT) THEN time_to_fill_sec END) AS median_time_to_fill_sec
             FROM ranked
-            GROUP BY proxy_mode, bid_price, time_to_close_bucket, category, fees_enabled
+            GROUP BY proxy_mode, bid_price, time_to_close_bucket, relative_time_bucket, category, fees_enabled
         )
         SELECT
             proxy_mode,
             bid_price,
             time_to_close_bucket,
+            relative_time_bucket,
             category,
             fees_enabled,
             n_candidates,
@@ -516,13 +552,13 @@ def build_summary(conn: sqlite3.Connection) -> int:
     conn.executemany(
         """
         INSERT INTO maker_entry_proxy_summary(
-            proxy_mode, bid_price, time_to_close_bucket, category, fees_enabled,
+            proxy_mode, bid_price, time_to_close_bucket, relative_time_bucket, category, fees_enabled,
             n_candidates, accepted_count, filled_count, winner_count_if_filled,
             fill_rate, accept_rate, win_rate_if_filled,
             avg_ev_per_placed_share, avg_ev_per_filled_share,
             avg_ev_per_placed_order, avg_ev_per_filled_order,
             median_time_to_fill_sec, avg_fillable_size
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -620,6 +656,9 @@ def build_maker_postonly_proxy_research(
                 candidate.cancel_after_sec,
                 candidate.time_to_close_sec,
                 candidate.time_to_close_bucket,
+                candidate.total_duration_sec,
+                candidate.remaining_frac,
+                candidate.relative_time_bucket,
                 candidate.lookback_min_price,
                 candidate.lookback_max_price,
                 candidate.lookback_volume_usdc,
