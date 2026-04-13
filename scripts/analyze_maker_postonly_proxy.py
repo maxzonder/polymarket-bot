@@ -367,16 +367,29 @@ def load_token_meta(dataset_db_path: Path) -> dict[str, TokenMeta]:
     }
 
 
-def iter_token_trades(tape_db_path: Path) -> Iterable[tuple[str, list[TradePoint]]]:
+def iter_token_trades(tape_db_path: Path, selected_token_ids: set[str] | None = None) -> Iterable[tuple[str, list[TradePoint]]]:
     conn = sqlite3.connect(tape_db_path)
     conn.row_factory = sqlite3.Row
     current_token_id: str | None = None
     bucket: list[TradePoint] = []
-    query = (
-        "SELECT source_file_id, seq, timestamp, market_id, token_id, price, size, side "
-        "FROM tape ORDER BY token_id ASC, timestamp ASC, source_file_id ASC, seq ASC"
-    )
     try:
+        if selected_token_ids:
+            conn.execute("CREATE TEMP TABLE selected_tokens (id TEXT PRIMARY KEY)")
+            conn.executemany(
+                "INSERT INTO selected_tokens(id) VALUES (?)",
+                ((token_id,) for token_id in sorted(selected_token_ids)),
+            )
+            query = (
+                "SELECT source_file_id, seq, timestamp, market_id, token_id, price, size, side "
+                "FROM tape WHERE token_id IN (SELECT id FROM selected_tokens) "
+                "ORDER BY token_id ASC, timestamp ASC, source_file_id ASC, seq ASC"
+            )
+        else:
+            query = (
+                "SELECT source_file_id, seq, timestamp, market_id, token_id, price, size, side "
+                "FROM tape ORDER BY token_id ASC, timestamp ASC, source_file_id ASC, seq ASC"
+            )
+
         for row in conn.execute(query):
             token_id = str(row["token_id"])
             trade = TradePoint(
@@ -745,6 +758,9 @@ def build_maker_postonly_proxy_research(
     max_time_to_close_frac: float,
     max_time_to_close_min_sec: int,
     temporal_filter_mode: str,
+    min_duration_hours: float,
+    max_duration_hours: float,
+    progress_every_tokens: int,
     bid_price: float,
     order_size_shares: float,
     cancel_after_sec: int,
@@ -778,6 +794,9 @@ def build_maker_postonly_proxy_research(
             ("max_time_to_close_frac", f"{max_time_to_close_frac:.4f}"),
             ("max_time_to_close_min_sec", str(max_time_to_close_min_sec)),
             ("temporal_filter_mode", temporal_filter_mode),
+            ("min_duration_hours", f"{min_duration_hours:.6f}"),
+            ("max_duration_hours", f"{max_duration_hours:.6f}"),
+            ("progress_every_tokens", str(progress_every_tokens)),
             ("bid_price", f"{bid_price:.4f}"),
             ("order_size_shares", f"{order_size_shares:.4f}"),
             ("cancel_after_sec", str(cancel_after_sec)),
@@ -792,6 +811,8 @@ def build_maker_postonly_proxy_research(
     stats = {
         "tokens_seen": 0,
         "eligible_tokens": 0,
+        "duration_filtered_out": 0,
+        "selected_tokens": 0,
         "candidates": 0,
         "fill_rows": 0,
         "summary_rows": 0,
@@ -800,7 +821,21 @@ def build_maker_postonly_proxy_research(
     candidate_rows: list[tuple] = []
     fill_rows: list[tuple] = []
 
-    for token_id, trades in iter_token_trades(tape_db_path):
+    selected_token_ids = {
+        token_id
+        for token_id, meta in token_meta.items()
+        if not (min_duration_hours > 0 and meta.duration_hours + 1e-9 < min_duration_hours)
+        and not (max_duration_hours > 0 and meta.duration_hours - 1e-9 > max_duration_hours)
+    }
+    stats["selected_tokens"] = len(selected_token_ids)
+    stats["duration_filtered_out"] = max(0, len(token_meta) - len(selected_token_ids))
+    logger.info(
+        "Selected %s tokens after duration filter (filtered_out=%s)",
+        stats["selected_tokens"],
+        stats["duration_filtered_out"],
+    )
+
+    for token_id, trades in iter_token_trades(tape_db_path, selected_token_ids=selected_token_ids):
         stats["tokens_seen"] += 1
         meta = token_meta.get(token_id)
         if meta is None:
@@ -830,6 +865,15 @@ def build_maker_postonly_proxy_research(
             cancel_after_sec=cancel_after_sec,
         )
         if candidate is None:
+            if progress_every_tokens > 0 and stats["tokens_seen"] % progress_every_tokens == 0:
+                logger.info(
+                    "progress tokens_seen=%s eligible_tokens=%s duration_filtered_out=%s candidates=%s fill_rows=%s",
+                    stats["tokens_seen"],
+                    stats["eligible_tokens"],
+                    stats["duration_filtered_out"],
+                    stats["candidates"],
+                    stats["fill_rows"],
+                )
             continue
         stats["candidates"] += 1
         candidate_rows.append(
@@ -877,9 +921,31 @@ def build_maker_postonly_proxy_research(
         stats["fill_rows"] += len(new_fill_rows)
         fill_rows.extend(new_fill_rows)
 
+        if progress_every_tokens > 0 and stats["tokens_seen"] % progress_every_tokens == 0:
+            logger.info(
+                "progress tokens_seen=%s eligible_tokens=%s duration_filtered_out=%s candidates=%s fill_rows=%s",
+                stats["tokens_seen"],
+                stats["eligible_tokens"],
+                stats["duration_filtered_out"],
+                stats["candidates"],
+                stats["fill_rows"],
+            )
+
+    logger.info(
+        "Finished token scan tokens_seen=%s eligible_tokens=%s duration_filtered_out=%s candidates=%s fill_rows=%s",
+        stats["tokens_seen"],
+        stats["eligible_tokens"],
+        stats["duration_filtered_out"],
+        stats["candidates"],
+        stats["fill_rows"],
+    )
+
+    logger.info("Writing %s candidate rows", len(candidate_rows))
     write_candidates(output_conn, candidate_rows)
+    logger.info("Writing %s fill rows", len(fill_rows))
     write_fills(output_conn, fill_rows)
     stats["summary_rows"] = build_summary(output_conn)
+    logger.info("Built %s summary rows", stats["summary_rows"])
     output_conn.close()
     return stats
 
@@ -905,6 +971,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-time-to-close-sec", type=int, default=30 * 60)
     parser.add_argument("--max-time-to-close-frac", type=float, default=0.25)
     parser.add_argument("--max-time-to-close-min-sec", type=int, default=5 * 60)
+    parser.add_argument("--min-duration-hours", type=float, default=0.0)
+    parser.add_argument("--max-duration-hours", type=float, default=0.0)
+    parser.add_argument("--progress-every-tokens", type=int, default=5000)
     parser.add_argument("--bid-price", type=float, default=0.80)
     parser.add_argument("--order-size-shares", type=float, default=100.0)
     parser.add_argument("--cancel-after-sec", type=int, default=10 * 60)
@@ -938,6 +1007,9 @@ def main() -> None:
         max_time_to_close_frac=args.max_time_to_close_frac,
         max_time_to_close_min_sec=args.max_time_to_close_min_sec,
         temporal_filter_mode=args.temporal_filter_mode,
+        min_duration_hours=args.min_duration_hours,
+        max_duration_hours=args.max_duration_hours,
+        progress_every_tokens=args.progress_every_tokens,
         bid_price=args.bid_price,
         order_size_shares=args.order_size_shares,
         cancel_after_sec=args.cancel_after_sec,

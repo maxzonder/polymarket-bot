@@ -39,6 +39,9 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 max_time_to_close_frac=0.25,
                 max_time_to_close_min_sec=300,
                 temporal_filter_mode="hybrid",
+                min_duration_hours=0.0,
+                max_duration_hours=0.0,
+                progress_every_tokens=1,
                 bid_price=0.80,
                 order_size_shares=10.0,
                 cancel_after_sec=600,
@@ -142,6 +145,58 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                     """
                 ).fetchone()
                 self.assertEqual(int(filtered_out["cnt"]), 0)
+            finally:
+                conn.close()
+
+    def test_duration_filter_can_isolate_15_min_markets(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_db = root / "polymarket_dataset.db"
+            tape_db = root / "historical_tape.db"
+            output_db = root / "maker_postonly_proxy.db"
+
+            self._create_dataset_db(dataset_db)
+            self._create_tape_db(tape_db)
+
+            stats = build_maker_postonly_proxy_research(
+                dataset_db_path=dataset_db,
+                tape_db_path=tape_db,
+                output_db_path=output_db,
+                trigger_price_min=0.70,
+                trigger_price_max=0.75,
+                precursor_max_price=0.70,
+                precursor_lookback_sec=900,
+                precursor_lookback_frac=0.25,
+                precursor_lookback_min_sec=300,
+                precursor_lookback_max_sec=900,
+                lookback_volume_sec=60,
+                lookback_volume_frac=(1.0 / 60.0),
+                lookback_volume_min_sec=30,
+                lookback_volume_max_sec=300,
+                min_lookback_volume_usdc=0.0,
+                max_time_to_close_sec=1800,
+                max_time_to_close_frac=0.25,
+                max_time_to_close_min_sec=300,
+                temporal_filter_mode="hybrid",
+                min_duration_hours=0.24,
+                max_duration_hours=0.26,
+                progress_every_tokens=1,
+                bid_price=0.80,
+                order_size_shares=10.0,
+                cancel_after_sec=600,
+                rest_delay_sec=0,
+                conservative_queue_multiplier=2.0,
+            )
+
+            self.assertEqual(stats["duration_filtered_out"], 3)
+            self.assertEqual(stats["eligible_tokens"], 1)
+            self.assertEqual(stats["candidates"], 1)
+
+            conn = sqlite3.connect(output_db)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute("SELECT token_id FROM maker_entry_candidates ORDER BY token_id").fetchall()
+                self.assertEqual([row["token_id"] for row in rows], ["tokD"])
             finally:
                 conn.close()
 
