@@ -64,11 +64,22 @@ class MakerCandidate:
     total_duration_sec: int
     remaining_frac: float
     relative_time_bucket: str
+    effective_precursor_lookback_sec: int
+    effective_volume_lookback_sec: int
+    effective_max_time_to_close_sec: int
     lookback_min_price: float
     lookback_max_price: float
     lookback_volume_usdc: float
     lookback_trade_count: int
     precursor_hit: int
+    trend_anchor_far_offset_sec: int
+    trend_anchor_mid_offset_sec: int
+    trend_anchor_near_offset_sec: int
+    trend_anchor_far_price: float
+    trend_anchor_mid_price: float
+    trend_anchor_near_price: float
+    trend_label: str
+    trend_strength: float
     category: str
     neg_risk: int
     fees_enabled: int
@@ -110,6 +121,66 @@ class RollingTradeWindow:
         if not self._rows:
             return None
         return max(row[1] for row in self._rows)
+
+    def latest_price_at_or_before(self, target_ts: int) -> float | None:
+        if not self._rows:
+            return None
+        if target_ts <= self._rows[0][0]:
+            return float(self._rows[0][1])
+        for ts, price, _size in reversed(self._rows):
+            if ts <= target_ts:
+                return float(price)
+        return float(self._rows[0][1])
+
+
+def _resolve_effective_window_sec(
+    total_duration_sec: int,
+    *,
+    absolute_sec: int,
+    relative_frac: float,
+    min_sec: int,
+    max_sec: int,
+    mode: str,
+) -> int:
+    candidates: list[float] = []
+
+    if mode in ("absolute", "hybrid") and absolute_sec > 0:
+        candidates.append(float(absolute_sec))
+
+    if mode in ("relative", "hybrid") and relative_frac > 0 and total_duration_sec > 0:
+        rel_sec = float(total_duration_sec) * float(relative_frac)
+        rel_sec = max(float(min_sec), rel_sec)
+        if max_sec > 0:
+            rel_sec = min(float(max_sec), rel_sec)
+        candidates.append(rel_sec)
+
+    if not candidates:
+        return max(0, int(absolute_sec))
+
+    if mode == "hybrid":
+        return max(1, int(round(min(candidates))))
+    return max(1, int(round(candidates[-1])))
+
+
+def _classify_trend(
+    far_price: float,
+    mid_price: float,
+    near_price: float,
+    trigger_price: float,
+    *,
+    min_step: float = 0.01,
+) -> tuple[str, float]:
+    points = [float(far_price), float(mid_price), float(near_price), float(trigger_price)]
+    diffs = [points[idx + 1] - points[idx] for idx in range(len(points) - 1)]
+    trend_strength = float(trigger_price - far_price)
+
+    if max(points) - min(points) < min_step:
+        return "flat", trend_strength
+    if all(diff >= min_step for diff in diffs):
+        return "ascending", trend_strength
+    if all(diff <= -min_step for diff in diffs):
+        return "descending", trend_strength
+    return "mixed", trend_strength
 
 
 def _time_to_close_bucket(seconds: int) -> str:
@@ -172,11 +243,22 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             total_duration_sec INTEGER NOT NULL,
             remaining_frac REAL NOT NULL,
             relative_time_bucket TEXT NOT NULL,
+            effective_precursor_lookback_sec INTEGER NOT NULL,
+            effective_volume_lookback_sec INTEGER NOT NULL,
+            effective_max_time_to_close_sec INTEGER NOT NULL,
             lookback_min_price REAL NOT NULL,
             lookback_max_price REAL NOT NULL,
             lookback_volume_usdc REAL NOT NULL,
             lookback_trade_count INTEGER NOT NULL,
             precursor_hit INTEGER NOT NULL,
+            trend_anchor_far_offset_sec INTEGER NOT NULL,
+            trend_anchor_mid_offset_sec INTEGER NOT NULL,
+            trend_anchor_near_offset_sec INTEGER NOT NULL,
+            trend_anchor_far_price REAL NOT NULL,
+            trend_anchor_mid_price REAL NOT NULL,
+            trend_anchor_near_price REAL NOT NULL,
+            trend_label TEXT NOT NULL,
+            trend_strength REAL NOT NULL,
             category TEXT NOT NULL,
             neg_risk INTEGER NOT NULL,
             fees_enabled INTEGER NOT NULL,
@@ -328,28 +410,81 @@ def find_first_candidate(
     trigger_price_max: float,
     precursor_max_price: float,
     precursor_lookback_sec: int,
+    precursor_lookback_frac: float,
+    precursor_lookback_min_sec: int,
+    precursor_lookback_max_sec: int,
     lookback_volume_sec: int,
+    lookback_volume_frac: float,
+    lookback_volume_min_sec: int,
+    lookback_volume_max_sec: int,
     min_lookback_volume_usdc: float,
     max_time_to_close_sec: int,
+    max_time_to_close_frac: float,
+    max_time_to_close_min_sec: int,
+    temporal_filter_mode: str,
     bid_price: float,
     order_size_shares: float,
     cancel_after_sec: int,
 ) -> MakerCandidate | None:
-    window = RollingTradeWindow(max(precursor_lookback_sec, lookback_volume_sec))
     total_duration_sec = max(0, int(round(meta.duration_hours * 3600)))
+    effective_precursor_lookback_sec = _resolve_effective_window_sec(
+        total_duration_sec,
+        absolute_sec=precursor_lookback_sec,
+        relative_frac=precursor_lookback_frac,
+        min_sec=precursor_lookback_min_sec,
+        max_sec=precursor_lookback_max_sec,
+        mode=temporal_filter_mode,
+    )
+    effective_volume_lookback_sec = _resolve_effective_window_sec(
+        total_duration_sec,
+        absolute_sec=lookback_volume_sec,
+        relative_frac=lookback_volume_frac,
+        min_sec=lookback_volume_min_sec,
+        max_sec=lookback_volume_max_sec,
+        mode=temporal_filter_mode,
+    )
+    effective_max_time_to_close_sec = _resolve_effective_window_sec(
+        total_duration_sec,
+        absolute_sec=max_time_to_close_sec,
+        relative_frac=max_time_to_close_frac,
+        min_sec=max_time_to_close_min_sec,
+        max_sec=0,
+        mode=temporal_filter_mode,
+    )
+
+    precursor_window = RollingTradeWindow(effective_precursor_lookback_sec)
+    volume_window = RollingTradeWindow(effective_volume_lookback_sec)
+
     for trade in trades:
-        window.expire(trade.timestamp)
+        precursor_window.expire(trade.timestamp)
+        volume_window.expire(trade.timestamp)
         time_to_close_sec = meta.closed_time - trade.timestamp
         remaining_frac, relative_time_bucket = _relative_time_bucket(time_to_close_sec, total_duration_sec)
-        lookback_min = window.min_price
-        lookback_max = window.max_price
-        lookback_vol = window.volume_usdc
-        lookback_n = window.trade_count
+        lookback_min = precursor_window.min_price
+        lookback_max = precursor_window.max_price
+        lookback_vol = volume_window.volume_usdc
+        lookback_n = volume_window.trade_count
         precursor_hit = int(lookback_min is not None and lookback_min <= precursor_max_price)
+
+        far_offset_sec = max(1, effective_precursor_lookback_sec)
+        mid_offset_sec = max(1, int(round(effective_precursor_lookback_sec * 0.50)))
+        near_offset_sec = max(1, int(round(effective_precursor_lookback_sec * 0.20)))
+        far_price = precursor_window.latest_price_at_or_before(trade.timestamp - far_offset_sec)
+        mid_price = precursor_window.latest_price_at_or_before(trade.timestamp - mid_offset_sec)
+        near_price = precursor_window.latest_price_at_or_before(trade.timestamp - near_offset_sec)
+        trend_label = "unknown"
+        trend_strength = 0.0
+        if far_price is not None and mid_price is not None and near_price is not None:
+            trend_label, trend_strength = _classify_trend(
+                far_price,
+                mid_price,
+                near_price,
+                trade.price,
+            )
 
         if (
             trigger_price_min <= trade.price <= trigger_price_max
-            and 0 < time_to_close_sec <= max_time_to_close_sec
+            and 0 < time_to_close_sec <= effective_max_time_to_close_sec
             and precursor_hit == 1
             and lookback_vol >= min_lookback_volume_usdc
             and bid_price >= trade.price
@@ -367,18 +502,30 @@ def find_first_candidate(
                 total_duration_sec=total_duration_sec,
                 remaining_frac=remaining_frac,
                 relative_time_bucket=relative_time_bucket,
+                effective_precursor_lookback_sec=effective_precursor_lookback_sec,
+                effective_volume_lookback_sec=effective_volume_lookback_sec,
+                effective_max_time_to_close_sec=effective_max_time_to_close_sec,
                 lookback_min_price=float(lookback_min or trade.price),
                 lookback_max_price=float(lookback_max or trade.price),
                 lookback_volume_usdc=float(lookback_vol),
                 lookback_trade_count=int(lookback_n),
                 precursor_hit=1,
+                trend_anchor_far_offset_sec=far_offset_sec,
+                trend_anchor_mid_offset_sec=mid_offset_sec,
+                trend_anchor_near_offset_sec=near_offset_sec,
+                trend_anchor_far_price=float(far_price if far_price is not None else trade.price),
+                trend_anchor_mid_price=float(mid_price if mid_price is not None else trade.price),
+                trend_anchor_near_price=float(near_price if near_price is not None else trade.price),
+                trend_label=trend_label,
+                trend_strength=float(trend_strength),
                 category=meta.category,
                 neg_risk=meta.neg_risk,
                 fees_enabled=meta.fees_enabled,
                 is_winner=meta.is_winner,
             )
 
-        window.add(trade.timestamp, trade.price, trade.size)
+        precursor_window.add(trade.timestamp, trade.price, trade.size)
+        volume_window.add(trade.timestamp, trade.price, trade.size)
     return None
 
 
@@ -459,9 +606,14 @@ def write_candidates(conn: sqlite3.Connection, rows: Iterable[tuple]) -> None:
             market_id, token_id, trigger_ts, trigger_price, bid_price, order_size_shares,
             cancel_after_sec, time_to_close_sec, time_to_close_bucket,
             total_duration_sec, remaining_frac, relative_time_bucket,
+            effective_precursor_lookback_sec, effective_volume_lookback_sec, effective_max_time_to_close_sec,
             lookback_min_price, lookback_max_price, lookback_volume_usdc,
-            lookback_trade_count, precursor_hit, category, neg_risk, fees_enabled, is_winner
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            lookback_trade_count, precursor_hit,
+            trend_anchor_far_offset_sec, trend_anchor_mid_offset_sec, trend_anchor_near_offset_sec,
+            trend_anchor_far_price, trend_anchor_mid_price, trend_anchor_near_price,
+            trend_label, trend_strength,
+            category, neg_risk, fees_enabled, is_winner
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -581,9 +733,18 @@ def build_maker_postonly_proxy_research(
     trigger_price_max: float,
     precursor_max_price: float,
     precursor_lookback_sec: int,
+    precursor_lookback_frac: float,
+    precursor_lookback_min_sec: int,
+    precursor_lookback_max_sec: int,
     lookback_volume_sec: int,
+    lookback_volume_frac: float,
+    lookback_volume_min_sec: int,
+    lookback_volume_max_sec: int,
     min_lookback_volume_usdc: float,
     max_time_to_close_sec: int,
+    max_time_to_close_frac: float,
+    max_time_to_close_min_sec: int,
+    temporal_filter_mode: str,
     bid_price: float,
     order_size_shares: float,
     cancel_after_sec: int,
@@ -605,15 +766,25 @@ def build_maker_postonly_proxy_research(
             ("trigger_price_max", f"{trigger_price_max:.4f}"),
             ("precursor_max_price", f"{precursor_max_price:.4f}"),
             ("precursor_lookback_sec", str(precursor_lookback_sec)),
+            ("precursor_lookback_frac", f"{precursor_lookback_frac:.4f}"),
+            ("precursor_lookback_min_sec", str(precursor_lookback_min_sec)),
+            ("precursor_lookback_max_sec", str(precursor_lookback_max_sec)),
             ("lookback_volume_sec", str(lookback_volume_sec)),
+            ("lookback_volume_frac", f"{lookback_volume_frac:.6f}"),
+            ("lookback_volume_min_sec", str(lookback_volume_min_sec)),
+            ("lookback_volume_max_sec", str(lookback_volume_max_sec)),
             ("min_lookback_volume_usdc", f"{min_lookback_volume_usdc:.4f}"),
             ("max_time_to_close_sec", str(max_time_to_close_sec)),
+            ("max_time_to_close_frac", f"{max_time_to_close_frac:.4f}"),
+            ("max_time_to_close_min_sec", str(max_time_to_close_min_sec)),
+            ("temporal_filter_mode", temporal_filter_mode),
             ("bid_price", f"{bid_price:.4f}"),
             ("order_size_shares", f"{order_size_shares:.4f}"),
             ("cancel_after_sec", str(cancel_after_sec)),
             ("rest_delay_sec", str(rest_delay_sec)),
             ("conservative_queue_multiplier", f"{conservative_queue_multiplier:.4f}"),
             ("fill_side_policy", "passive_buy_fills_on_sell_or_unknown_side"),
+            ("trend_anchor_fractions", "1.00,0.50,0.20"),
         ],
     )
     output_conn.commit()
@@ -642,9 +813,18 @@ def build_maker_postonly_proxy_research(
             trigger_price_max=trigger_price_max,
             precursor_max_price=precursor_max_price,
             precursor_lookback_sec=precursor_lookback_sec,
+            precursor_lookback_frac=precursor_lookback_frac,
+            precursor_lookback_min_sec=precursor_lookback_min_sec,
+            precursor_lookback_max_sec=precursor_lookback_max_sec,
             lookback_volume_sec=lookback_volume_sec,
+            lookback_volume_frac=lookback_volume_frac,
+            lookback_volume_min_sec=lookback_volume_min_sec,
+            lookback_volume_max_sec=lookback_volume_max_sec,
             min_lookback_volume_usdc=min_lookback_volume_usdc,
             max_time_to_close_sec=max_time_to_close_sec,
+            max_time_to_close_frac=max_time_to_close_frac,
+            max_time_to_close_min_sec=max_time_to_close_min_sec,
+            temporal_filter_mode=temporal_filter_mode,
             bid_price=bid_price,
             order_size_shares=order_size_shares,
             cancel_after_sec=cancel_after_sec,
@@ -666,11 +846,22 @@ def build_maker_postonly_proxy_research(
                 candidate.total_duration_sec,
                 candidate.remaining_frac,
                 candidate.relative_time_bucket,
+                candidate.effective_precursor_lookback_sec,
+                candidate.effective_volume_lookback_sec,
+                candidate.effective_max_time_to_close_sec,
                 candidate.lookback_min_price,
                 candidate.lookback_max_price,
                 candidate.lookback_volume_usdc,
                 candidate.lookback_trade_count,
                 candidate.precursor_hit,
+                candidate.trend_anchor_far_offset_sec,
+                candidate.trend_anchor_mid_offset_sec,
+                candidate.trend_anchor_near_offset_sec,
+                candidate.trend_anchor_far_price,
+                candidate.trend_anchor_mid_price,
+                candidate.trend_anchor_near_price,
+                candidate.trend_label,
+                candidate.trend_strength,
                 candidate.category,
                 candidate.neg_risk,
                 candidate.fees_enabled,
@@ -701,10 +892,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trigger-price-min", type=float, default=0.70)
     parser.add_argument("--trigger-price-max", type=float, default=0.75)
     parser.add_argument("--precursor-max-price", type=float, default=0.70)
+    parser.add_argument("--temporal-filter-mode", choices=("absolute", "relative", "hybrid"), default="hybrid")
     parser.add_argument("--precursor-lookback-sec", type=int, default=15 * 60)
+    parser.add_argument("--precursor-lookback-frac", type=float, default=0.25)
+    parser.add_argument("--precursor-lookback-min-sec", type=int, default=5 * 60)
+    parser.add_argument("--precursor-lookback-max-sec", type=int, default=15 * 60)
     parser.add_argument("--lookback-volume-sec", type=int, default=60)
+    parser.add_argument("--lookback-volume-frac", type=float, default=(1.0 / 60.0))
+    parser.add_argument("--lookback-volume-min-sec", type=int, default=30)
+    parser.add_argument("--lookback-volume-max-sec", type=int, default=5 * 60)
     parser.add_argument("--min-lookback-volume-usdc", type=float, default=30.0)
     parser.add_argument("--max-time-to-close-sec", type=int, default=30 * 60)
+    parser.add_argument("--max-time-to-close-frac", type=float, default=0.25)
+    parser.add_argument("--max-time-to-close-min-sec", type=int, default=5 * 60)
     parser.add_argument("--bid-price", type=float, default=0.80)
     parser.add_argument("--order-size-shares", type=float, default=100.0)
     parser.add_argument("--cancel-after-sec", type=int, default=10 * 60)
@@ -726,9 +926,18 @@ def main() -> None:
         trigger_price_max=args.trigger_price_max,
         precursor_max_price=args.precursor_max_price,
         precursor_lookback_sec=args.precursor_lookback_sec,
+        precursor_lookback_frac=args.precursor_lookback_frac,
+        precursor_lookback_min_sec=args.precursor_lookback_min_sec,
+        precursor_lookback_max_sec=args.precursor_lookback_max_sec,
         lookback_volume_sec=args.lookback_volume_sec,
+        lookback_volume_frac=args.lookback_volume_frac,
+        lookback_volume_min_sec=args.lookback_volume_min_sec,
+        lookback_volume_max_sec=args.lookback_volume_max_sec,
         min_lookback_volume_usdc=args.min_lookback_volume_usdc,
         max_time_to_close_sec=args.max_time_to_close_sec,
+        max_time_to_close_frac=args.max_time_to_close_frac,
+        max_time_to_close_min_sec=args.max_time_to_close_min_sec,
+        temporal_filter_mode=args.temporal_filter_mode,
         bid_price=args.bid_price,
         order_size_shares=args.order_size_shares,
         cancel_after_sec=args.cancel_after_sec,

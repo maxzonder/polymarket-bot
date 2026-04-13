@@ -27,9 +27,18 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 trigger_price_max=0.75,
                 precursor_max_price=0.70,
                 precursor_lookback_sec=900,
+                precursor_lookback_frac=0.25,
+                precursor_lookback_min_sec=300,
+                precursor_lookback_max_sec=900,
                 lookback_volume_sec=60,
+                lookback_volume_frac=(1.0 / 60.0),
+                lookback_volume_min_sec=30,
+                lookback_volume_max_sec=300,
                 min_lookback_volume_usdc=0.0,
                 max_time_to_close_sec=1800,
+                max_time_to_close_frac=0.25,
+                max_time_to_close_min_sec=300,
+                temporal_filter_mode="hybrid",
                 bid_price=0.80,
                 order_size_shares=10.0,
                 cancel_after_sec=600,
@@ -50,6 +59,8 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 self.assertEqual(candidates[0]["time_to_close_bucket"], "15m_60m")
                 self.assertEqual(candidates[0]["relative_time_bucket"], "20_30pct")
                 self.assertAlmostEqual(float(candidates[0]["remaining_frac"]), 1680 / 7200, places=4)
+                self.assertEqual(int(candidates[0]["effective_precursor_lookback_sec"]), 900)
+                self.assertEqual(candidates[0]["trend_label"], "mixed")
 
                 optimistic_fill = conn.execute(
                     """
@@ -75,7 +86,7 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 loser_fill = conn.execute(
                     """
                     SELECT * FROM maker_entry_proxy_fills
-                    WHERE token_id='tokB' AND proxy_mode='optimistic'
+                    WHERE token_id='tokC' AND proxy_mode='optimistic'
                     """
                 ).fetchone()
                 self.assertIsNotNone(loser_fill)
@@ -107,6 +118,30 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 self.assertEqual(int(summary["filled_count"]), 1)
                 self.assertAlmostEqual(float(summary["avg_ev_per_filled_share"]), 0.20)
                 self.assertAlmostEqual(float(summary["avg_ev_per_placed_share"]), 0.10)
+
+                short_market = conn.execute(
+                    """
+                    SELECT * FROM maker_entry_candidates
+                    WHERE token_id='tokD'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(short_market)
+                self.assertEqual(int(short_market["effective_precursor_lookback_sec"]), 300)
+                self.assertEqual(int(short_market["effective_volume_lookback_sec"]), 30)
+                self.assertEqual(int(short_market["effective_max_time_to_close_sec"]), 300)
+                self.assertEqual(short_market["trend_label"], "ascending")
+                self.assertAlmostEqual(float(short_market["trend_anchor_far_price"]), 0.60)
+                self.assertAlmostEqual(float(short_market["trend_anchor_mid_price"]), 0.66)
+                self.assertAlmostEqual(float(short_market["trend_anchor_near_price"]), 0.69)
+
+                filtered_out = conn.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM maker_entry_candidates
+                    WHERE token_id='tokB'
+                    """
+                ).fetchone()
+                self.assertEqual(int(filtered_out["cnt"]), 0)
             finally:
                 conn.close()
 
@@ -136,6 +171,7 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 ("m1", "crypto", 0, 1, 2.0, 1800),
                 ("m2", "politics", 0, 0, 1.0, 1800),
                 ("m3", "crypto", 0, 1, 2.0, 1800),
+                ("m4", "crypto", 0, 1, 0.25, 900),
             ],
         )
         conn.executemany(
@@ -144,6 +180,7 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 ("tokA", "m1", 1, 0),
                 ("tokB", "m2", 0, 0),
                 ("tokC", "m3", 0, 0),
+                ("tokD", "m4", 1, 0),
             ],
         )
         conn.commit()
@@ -183,6 +220,11 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 (3, 1, 60, "m3", "tokC", 0.68, 4.0, "BUY"),
                 (3, 2, 120, "m3", "tokC", 0.72, 2.0, "BUY"),
                 (3, 3, 130, "m3", "tokC", 0.79, 10.0, "BUY"),
+                (4, 0, 300, "m4", "tokD", 0.60, 2.0, "BUY"),
+                (4, 1, 450, "m4", "tokD", 0.66, 2.0, "BUY"),
+                (4, 2, 540, "m4", "tokD", 0.69, 2.0, "BUY"),
+                (4, 3, 600, "m4", "tokD", 0.72, 2.0, "BUY"),
+                (4, 4, 630, "m4", "tokD", 0.80, 10.0, "SELL"),
             ],
         )
         conn.commit()
