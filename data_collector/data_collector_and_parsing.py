@@ -376,31 +376,33 @@ def collect_trades(start: date, end: date, filter_amount: float = 10, max_durati
 
 _DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS markets (
-    id                  TEXT PRIMARY KEY,
-    question            TEXT,
-    description         TEXT,
-    category            TEXT,
-    slug                TEXT,
-    event_title         TEXT,
-    event_slug          TEXT,
-    event_description   TEXT,
-    tags                TEXT,
-    ticker              TEXT,
-    resolution_source   TEXT,
-    start_date          INTEGER,
-    end_date            INTEGER,
-    closed_time         INTEGER,
-    duration_hours      REAL,
-    volume              REAL,
-    liquidity           REAL,
-    comment_count       INTEGER,
-    fees_enabled        INTEGER,
-    neg_risk            INTEGER,
-    neg_risk_market_id  TEXT,
-    group_item_title    TEXT,
-    cyom                INTEGER,
-    restricted          INTEGER,
-    volume_1wk          REAL
+    id                    TEXT PRIMARY KEY,
+    question              TEXT,
+    description           TEXT,
+    category              TEXT,
+    slug                  TEXT,
+    event_title           TEXT,
+    event_slug            TEXT,
+    event_description     TEXT,
+    tags                  TEXT,
+    ticker                TEXT,
+    resolution_source     TEXT,
+    start_date            INTEGER,
+    event_start_time      INTEGER,
+    end_date              INTEGER,
+    closed_time           INTEGER,
+    duration_hours        REAL,
+    listing_duration_hours REAL,
+    volume                REAL,
+    liquidity             REAL,
+    comment_count         INTEGER,
+    fees_enabled          INTEGER,
+    neg_risk              INTEGER,
+    neg_risk_market_id    TEXT,
+    group_item_title      TEXT,
+    cyom                  INTEGER,
+    restricted            INTEGER,
+    volume_1wk            REAL
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
@@ -419,13 +421,13 @@ _MARKET_UPSERT = """
 INSERT INTO markets (
     id, question, description, category, slug,
     event_title, event_slug, event_description, tags, ticker,
-    resolution_source, start_date, end_date, closed_time, duration_hours,
+    resolution_source, start_date, event_start_time, end_date, closed_time, duration_hours, listing_duration_hours,
     volume, liquidity, comment_count, fees_enabled,
     neg_risk, neg_risk_market_id, group_item_title, cyom, restricted, volume_1wk
 ) VALUES (
     :id, :question, :description, :category, :slug,
     :event_title, :event_slug, :event_description, :tags, :ticker,
-    :resolution_source, :start_date, :end_date, :closed_time, :duration_hours,
+    :resolution_source, :start_date, :event_start_time, :end_date, :closed_time, :duration_hours, :listing_duration_hours,
     :volume, :liquidity, :comment_count, :fees_enabled,
     :neg_risk, :neg_risk_market_id, :group_item_title, :cyom, :restricted, :volume_1wk
 )
@@ -441,9 +443,11 @@ ON CONFLICT(id) DO UPDATE SET
     ticker=excluded.ticker,
     resolution_source=excluded.resolution_source,
     start_date=excluded.start_date,
+    event_start_time=excluded.event_start_time,
     end_date=excluded.end_date,
     closed_time=excluded.closed_time,
     duration_hours=excluded.duration_hours,
+    listing_duration_hours=excluded.listing_duration_hours,
     volume=excluded.volume,
     liquidity=excluded.liquidity,
     comment_count=excluded.comment_count,
@@ -645,9 +649,22 @@ def _parse_market_row(data: dict) -> Optional[dict]:
     events = data.get("events") or []
     ev = (events[0] or {}) if events else {}
 
-    start_ts  = _parse_ts(data.get("startDate"))
-    end_ts    = _parse_ts(data.get("endDate"))
+    start_ts = _parse_ts(data.get("startDate"))
+    event_start_ts = (
+        _parse_ts(ev.get("startTime"))
+        or _parse_ts(ev.get("eventStartTime"))
+        or _parse_ts(data.get("eventStartTime"))
+    )
+    end_ts = _parse_ts(data.get("endDate"))
     closed_ts = _parse_ts(data.get("closedTime"))
+
+    trading_duration_hours = None
+    if end_ts and event_start_ts:
+        trading_duration_hours = (end_ts - event_start_ts) / 3600.0
+    elif end_ts and start_ts:
+        trading_duration_hours = (end_ts - start_ts) / 3600.0
+
+    listing_duration_hours = (closed_ts - start_ts) / 3600.0 if start_ts and closed_ts else None
 
     volume = data.get("volumeNum")
     if volume is None:
@@ -671,9 +688,11 @@ def _parse_market_row(data: dict) -> Optional[dict]:
         "ticker":            ev.get("ticker") or None,
         "resolution_source": data.get("resolutionSource", ""),
         "start_date":        start_ts,
+        "event_start_time":  event_start_ts,
         "end_date":          end_ts,
         "closed_time":       closed_ts,
-        "duration_hours":    (closed_ts - start_ts) / 3600.0 if start_ts and closed_ts else None,
+        "duration_hours":    trading_duration_hours,
+        "listing_duration_hours": listing_duration_hours,
         "volume":            volume,
         "liquidity":         data.get("liquidity"),
         "comment_count":     ev.get("commentCount"),
@@ -730,6 +749,8 @@ def _init_db(conn: sqlite3.Connection):
         ("tags", "TEXT"),
         ("ticker", "TEXT"),
         ("neg_risk_market_id", "TEXT"),
+        ("event_start_time", "INTEGER"),
+        ("listing_duration_hours", "REAL"),
     ]:
         rows = conn.execute(f"PRAGMA table_info(markets)").fetchall()
         if not any(r[1] == col for r in rows):

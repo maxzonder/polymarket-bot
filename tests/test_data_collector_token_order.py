@@ -3,10 +3,34 @@ from __future__ import annotations
 import sqlite3
 import unittest
 
-from data_collector.data_collector_and_parsing import _init_db, _parse_token_rows
+from data_collector.data_collector_and_parsing import _init_db, _parse_market_row, _parse_token_rows
 
 
 class DataCollectorTokenOrderTests(unittest.TestCase):
+    def test_parse_market_row_prefers_event_start_time_for_duration(self) -> None:
+        row = _parse_market_row(
+            {
+                "id": "m1",
+                "question": "Bitcoin Up or Down - April 1, 8:00AM-8:05AM ET",
+                "startDate": "2026-03-31T12:09:41.466686Z",
+                "endDate": "2026-04-01T12:05:00Z",
+                "closedTime": "2026-04-01 12:05:25+00",
+                "events": [
+                    {
+                        "title": "Bitcoin Up or Down - April 1, 8:00AM-8:05AM ET",
+                        "startTime": "2026-04-01T12:00:00Z",
+                        "endDate": "2026-04-01T12:05:00Z",
+                    }
+                ],
+            }
+        )
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["duration_hours"], 5 / 60)
+        self.assertAlmostEqual(row["listing_duration_hours"], 23.92888888888889)
+        self.assertEqual(row["event_start_time"], 1775044800)
+
     def test_parse_token_rows_persists_gamma_token_order(self) -> None:
         rows = _parse_token_rows(
             {
