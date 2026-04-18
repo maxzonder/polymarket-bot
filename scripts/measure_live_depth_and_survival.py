@@ -300,6 +300,8 @@ class LiveDepthCollector:
                     if series and isinstance(series[0], dict):
                         recurrence = series[0].get("recurrence")
                         series_slug = series[0].get("slug")
+                    if not series_slug:
+                        series_slug = event0.get("seriesSlug")
                 if not start_iso:
                     start_iso = raw.get("startDate") or raw.get("startDateIso") or raw.get("gameStartTime")
                 if not end_iso:
@@ -326,7 +328,23 @@ class LiveDepthCollector:
                     stats["skipped_recurrence"] += 1
                     continue
 
-                target_metric = remaining_seconds if self.args.duration_metric == "time_remaining" else duration_seconds
+                series_slug_lower = str(series_slug or "").lower()
+                implied_duration_seconds = None
+                if series_slug_lower.endswith("-15m") or "-15m" in series_slug_lower:
+                    implied_duration_seconds = 900
+                elif series_slug_lower.endswith("-5m") or "-5m" in series_slug_lower:
+                    implied_duration_seconds = 300
+                elif str(recurrence or "").lower() == "15m":
+                    implied_duration_seconds = 900
+                elif str(recurrence or "").lower() == "5m":
+                    implied_duration_seconds = 300
+
+                if self.args.duration_metric == "time_remaining":
+                    target_metric = remaining_seconds
+                elif self.args.duration_metric == "lifecycle":
+                    target_metric = duration_seconds
+                else:
+                    target_metric = implied_duration_seconds if implied_duration_seconds is not None else duration_seconds
                 if target_metric is None:
                     stats["skipped_bad_time"] += 1
                     continue
@@ -355,7 +373,7 @@ class LiveDepthCollector:
                             outcome=str(outcome),
                             end_time_iso=str(end_iso),
                             start_time_iso=str(start_iso) if start_iso else None,
-                            duration_seconds=duration_seconds,
+                            duration_seconds=implied_duration_seconds if implied_duration_seconds is not None else duration_seconds,
                             seconds_to_end=remaining_seconds,
                             recurrence=str(recurrence) if recurrence is not None else None,
                             series_slug=str(series_slug) if series_slug is not None else None,
@@ -748,7 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-interval-sec", type=int, default=60)
     parser.add_argument("--min-duration-seconds", type=int, default=DEFAULT_DURATION_MIN)
     parser.add_argument("--max-duration-seconds", type=int, default=DEFAULT_DURATION_MAX)
-    parser.add_argument("--duration-metric", choices=("lifecycle", "time_remaining"), default="time_remaining")
+    parser.add_argument("--duration-metric", choices=("lifecycle", "time_remaining", "implied_series"), default="implied_series")
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")
     parser.add_argument("--max-discovery-rows", type=int, default=500)
