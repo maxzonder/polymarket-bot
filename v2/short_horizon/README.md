@@ -1,0 +1,28 @@
+# short_horizon — MVP short-horizon Polymarket bot
+
+This directory is the home for the **separate short-horizon bot/framework MVP** described in:
+- issue `#117` — design brief
+- issue `#118` — Phase 0 + Phase 1 implementation roadmap
+
+## Scope
+
+The MVP is intentionally narrowed to the single validated slice from `#115`:
+- `15m` exact markets
+- `ascending`
+- relative bucket `20_40pct`
+- price levels `{0.55, 0.65, 0.70}`
+- fee-aware taker on first touch
+- resolution exit
+- all-side aggregate first
+
+This folder is for the new execution-grade bot path.
+It is **separate** from:
+- the swan bot
+- the existing `v2` observation-only experiments
+
+## Phase 0 artifacts
+
+Phase 0 design and decision artifacts live in:
+- `docs/phase0/`
+
+These docs are intended to be concrete enough that a developer can implement Phase 1 without reopening core design debates.

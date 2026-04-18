@@ -1,0 +1,59 @@
+# P0-G — conservative default config for the short-horizon MVP
+
+strategy_id: short_horizon_15m_touch_v1
+mode_default: replay
+
+market_discovery:
+  refresh_interval_seconds: 30
+  target_duration_seconds: 900
+  duration_tolerance_seconds: 60
+  required_market_status: active
+
+lifecycle:
+  bucket_mode: relative
+  bucket_start_fraction: 0.20
+  bucket_end_fraction: 0.40
+
+triggers:
+  price_levels: [0.55, 0.65, 0.70]
+  direction: ascending
+  trigger_source: best_ask
+  max_entry_drift_ticks: 1
+  tick_size: 0.01
+  rearm_within_lifecycle: false
+
+fees:
+  fee_metadata_ttl_seconds: 60
+  reject_if_fee_metadata_stale: true
+
+execution:
+  entry_style: takerable_limit
+  exit_style: resolution_only
+  target_trade_size_usdc: 10
+  decision_latency_budget_ms: 500
+  stale_market_data_threshold_ms: 2000
+  send_timeout_ms: 3000
+  cancel_timeout_ms: 3000
+  replace_timeout_ms: 3000
+  reconciliation_block_on_unknown: true
+
+risk:
+  max_notional_per_strategy_usdc: 200
+  max_daily_loss_usdc: 50
+  max_consecutive_rejects: 5
+  max_open_orders_total: 10
+  max_open_orders_per_market: 1
+  max_live_positions_total: 10
+  max_live_positions_per_market: 1
+  micro_live_total_stake_cap_usdc: 100
+
+strategy:
+  hold_to_resolution: true
+  use_stop_loss: false
+  all_side_aggregate_first: true
+  no_only_refinement_enabled: false
+
+telemetry:
+  persist_raw_event_log: true
+  log_skip_reasons: true
+  log_reconciliation_events: true
