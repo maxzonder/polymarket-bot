@@ -23,9 +23,14 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 dataset_db_path=dataset_db,
                 tape_db_path=tape_db,
                 output_db_path=output_db,
+                candidate_mode="legacy",
                 trigger_price_min=0.70,
                 trigger_price_max=0.75,
                 precursor_max_price=0.70,
+                direction_gap=0.10,
+                direction_lookback_sec=300,
+                touch_volume_lookback_sec=60,
+                touch_direction="ascending",
                 precursor_lookback_sec=900,
                 precursor_lookback_frac=0.25,
                 precursor_lookback_min_sec=300,
@@ -162,9 +167,14 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
                 dataset_db_path=dataset_db,
                 tape_db_path=tape_db,
                 output_db_path=output_db,
+                candidate_mode="legacy",
                 trigger_price_min=0.70,
                 trigger_price_max=0.75,
                 precursor_max_price=0.70,
+                direction_gap=0.10,
+                direction_lookback_sec=300,
+                touch_volume_lookback_sec=60,
+                touch_direction="ascending",
                 precursor_lookback_sec=900,
                 precursor_lookback_frac=0.25,
                 precursor_lookback_min_sec=300,
@@ -197,6 +207,73 @@ class AnalyzeMakerPostonlyProxyTests(unittest.TestCase):
             try:
                 rows = conn.execute("SELECT token_id FROM maker_entry_candidates ORDER BY token_id").fetchall()
                 self.assertEqual([row["token_id"] for row in rows], ["tokD"])
+            finally:
+                conn.close()
+
+    def test_touch_mode_reuses_touch_event_layer_and_still_requires_pullback(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_db = root / "polymarket_dataset.db"
+            tape_db = root / "historical_tape.db"
+            output_db = root / "maker_postonly_proxy.db"
+
+            self._create_dataset_db(dataset_db)
+            self._create_tape_db(tape_db)
+
+            stats = build_maker_postonly_proxy_research(
+                dataset_db_path=dataset_db,
+                tape_db_path=tape_db,
+                output_db_path=output_db,
+                candidate_mode="touch",
+                trigger_price_min=0.70,
+                trigger_price_max=0.75,
+                precursor_max_price=0.70,
+                direction_gap=0.10,
+                direction_lookback_sec=300,
+                touch_volume_lookback_sec=60,
+                touch_direction="ascending",
+                precursor_lookback_sec=900,
+                precursor_lookback_frac=0.25,
+                precursor_lookback_min_sec=300,
+                precursor_lookback_max_sec=900,
+                lookback_volume_sec=60,
+                lookback_volume_frac=(1.0 / 60.0),
+                lookback_volume_min_sec=30,
+                lookback_volume_max_sec=300,
+                min_lookback_volume_usdc=0.0,
+                max_time_to_close_sec=1800,
+                max_time_to_close_frac=0.25,
+                max_time_to_close_min_sec=300,
+                temporal_filter_mode="hybrid",
+                min_duration_hours=0.0,
+                max_duration_hours=0.0,
+                progress_every_tokens=1,
+                bid_price=0.80,
+                order_size_shares=10.0,
+                cancel_after_sec=600,
+                rest_delay_sec=0,
+                conservative_queue_multiplier=2.0,
+            )
+
+            self.assertEqual(stats["candidates"], 2)
+
+            conn = sqlite3.connect(output_db)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT token_id, trigger_ts, trigger_price, trend_label FROM maker_entry_candidates ORDER BY token_id"
+                ).fetchall()
+                self.assertEqual([(row["token_id"], row["trigger_ts"], row["trend_label"]) for row in rows], [("tokA", 130, "ascending"), ("tokD", 630, "ascending")])
+
+                tok_a = conn.execute(
+                    "SELECT * FROM maker_entry_proxy_fills WHERE token_id='tokA' AND proxy_mode='optimistic'"
+                ).fetchone()
+                self.assertEqual(tok_a["fill_status"], "unfilled")
+
+                tok_d = conn.execute(
+                    "SELECT * FROM maker_entry_proxy_fills WHERE token_id='tokD' AND proxy_mode='optimistic'"
+                ).fetchone()
+                self.assertEqual(tok_d["fill_status"], "unfilled")
             finally:
                 conn.close()
 

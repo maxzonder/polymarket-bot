@@ -8,12 +8,19 @@ from tempfile import TemporaryDirectory
 from scripts.analyze_price_resolution import (
     TokenMeta,
     TradePoint,
+    _resolve_time_bucket,
     build_price_resolution_research,
     build_touch_events_for_token,
 )
 
 
 class AnalyzePriceResolutionTests(unittest.TestCase):
+    def test_resolve_time_bucket_supports_standard_short_and_relative_modes(self) -> None:
+        self.assertEqual(_resolve_time_bucket(50, 5.0 / 60.0, "standard"), "lt_1m")
+        self.assertEqual(_resolve_time_bucket(50, 5.0 / 60.0, "short"), "30s_1m")
+        self.assertEqual(_resolve_time_bucket(50, 5.0 / 60.0, "relative"), "0_20pct")
+        self.assertEqual(_resolve_time_bucket(170, 5.0 / 60.0, "relative"), "40_60pct")
+
     def test_build_touch_events_detects_ascending_and_descending(self) -> None:
         meta = TokenMeta(
             token_id="tok1",
@@ -22,6 +29,7 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
             token_order=0,
             category="politics",
             neg_risk=0,
+            duration_hours=1.0,
             closed_time=1000,
         )
         trades = [
@@ -77,6 +85,8 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
                 direction_lookback_sec=300,
                 touch_volume_lookback_sec=60,
                 min_touch_volume_usdc=0.0,
+                min_duration_hours=0.0,
+                max_duration_hours=0.0,
             )
 
             self.assertEqual(stats["resolution_events"], 16)
@@ -179,6 +189,88 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_build_price_resolution_research_can_use_short_and_relative_time_buckets(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_db = root / "polymarket_dataset.db"
+            tape_db = root / "historical_tape.db"
+            short_output_db = root / "price_resolution_short.db"
+            relative_output_db = root / "price_resolution_relative.db"
+
+            self._create_dataset_db(dataset_db)
+            self._create_tape_db(tape_db)
+
+            build_price_resolution_research(
+                dataset_db_path=dataset_db,
+                tape_db_path=tape_db,
+                output_db_path=short_output_db,
+                price_step=0.1,
+                reaction_windows=(60,),
+                direction_gap=0.1,
+                direction_lookback_sec=300,
+                touch_volume_lookback_sec=60,
+                min_touch_volume_usdc=0.0,
+                min_duration_hours=0.0,
+                max_duration_hours=0.0,
+                time_bucket_mode="short",
+            )
+
+            build_price_resolution_research(
+                dataset_db_path=dataset_db,
+                tape_db_path=tape_db,
+                output_db_path=relative_output_db,
+                price_step=0.1,
+                reaction_windows=(60,),
+                direction_gap=0.1,
+                direction_lookback_sec=300,
+                touch_volume_lookback_sec=60,
+                min_touch_volume_usdc=0.0,
+                min_duration_hours=0.0,
+                max_duration_hours=0.0,
+                time_bucket_mode="relative",
+            )
+
+            short_conn = sqlite3.connect(short_output_db)
+            short_conn.row_factory = sqlite3.Row
+            relative_conn = sqlite3.connect(relative_output_db)
+            relative_conn.row_factory = sqlite3.Row
+            try:
+                short_row = short_conn.execute(
+                    """
+                    SELECT *
+                    FROM price_resolution_heatmap
+                    WHERE reaction_window_sec=60
+                      AND price_level=0.8
+                      AND touch_direction='ascending'
+                      AND time_to_close_bucket='5m_15m'
+                      AND market_type='all'
+                      AND token_side='all'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(short_row)
+
+                relative_row = relative_conn.execute(
+                    """
+                    SELECT *
+                    FROM price_resolution_heatmap
+                    WHERE reaction_window_sec=60
+                      AND price_level=0.8
+                      AND touch_direction='ascending'
+                      AND time_to_close_bucket='40_60pct'
+                      AND market_type='all'
+                      AND token_side='all'
+                    """
+                ).fetchone()
+                self.assertIsNotNone(relative_row)
+
+                meta_rows = relative_conn.execute(
+                    "SELECT key, value FROM research_meta WHERE key='time_bucket_mode'"
+                ).fetchall()
+                self.assertEqual([(row["key"], row["value"]) for row in meta_rows], [("time_bucket_mode", "relative")])
+            finally:
+                short_conn.close()
+                relative_conn.close()
+
     def _create_dataset_db(self, path: Path) -> None:
         conn = sqlite3.connect(path)
         conn.executescript(
@@ -187,6 +279,7 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
                 id TEXT PRIMARY KEY,
                 category TEXT,
                 neg_risk INTEGER,
+                duration_hours REAL,
                 closed_time INTEGER
             );
             CREATE TABLE tokens (
@@ -198,10 +291,10 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
             """
         )
         conn.executemany(
-            "INSERT INTO markets(id, category, neg_risk, closed_time) VALUES (?, ?, ?, ?)",
+            "INSERT INTO markets(id, category, neg_risk, duration_hours, closed_time) VALUES (?, ?, ?, ?, ?)",
             [
-                ("m1", "politics", 0, 400),
-                ("m2", "politics", 0, 400),
+                ("m1", "politics", 0, 1.0, 400),
+                ("m2", "politics", 0, 0.25, 400),
             ],
         )
         conn.executemany(
@@ -213,6 +306,50 @@ class AnalyzePriceResolutionTests(unittest.TestCase):
         )
         conn.commit()
         conn.close()
+
+    def test_duration_filter_can_isolate_exact_15m_markets(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_db = root / "polymarket_dataset.db"
+            tape_db = root / "historical_tape.db"
+            output_db = root / "price_resolution_research.db"
+
+            self._create_dataset_db(dataset_db)
+            self._create_tape_db(tape_db)
+
+            stats = build_price_resolution_research(
+                dataset_db_path=dataset_db,
+                tape_db_path=tape_db,
+                output_db_path=output_db,
+                price_step=0.1,
+                reaction_windows=(60,),
+                direction_gap=0.1,
+                direction_lookback_sec=300,
+                touch_volume_lookback_sec=60,
+                min_touch_volume_usdc=0.0,
+                min_duration_hours=0.25,
+                max_duration_hours=0.25,
+            )
+
+            self.assertEqual(stats["resolution_events"], 8)
+
+            conn = sqlite3.connect(output_db)
+            conn.row_factory = sqlite3.Row
+            try:
+                token_ids = conn.execute(
+                    "SELECT DISTINCT token_id FROM token_price_resolution_events ORDER BY token_id"
+                ).fetchall()
+                self.assertEqual([row["token_id"] for row in token_ids], ["tokB"])
+
+                meta_rows = conn.execute(
+                    "SELECT key, value FROM research_meta WHERE key IN ('min_duration_hours', 'max_duration_hours') ORDER BY key"
+                ).fetchall()
+                self.assertEqual(
+                    [(row["key"], row["value"]) for row in meta_rows],
+                    [("max_duration_hours", "0.250000"), ("min_duration_hours", "0.250000")],
+                )
+            finally:
+                conn.close()
 
     def _create_tape_db(self, path: Path) -> None:
         conn = sqlite3.connect(path)

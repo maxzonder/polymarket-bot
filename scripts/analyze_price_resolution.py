@@ -29,6 +29,7 @@ DEFAULT_PRICE_STEP = 0.05
 DEFAULT_DIRECTION_GAP = 0.10
 DEFAULT_DIRECTION_LOOKBACK_SEC = 300
 DEFAULT_TOUCH_VOLUME_LOOKBACK_SEC = 60
+DEFAULT_TIME_BUCKET_MODE = "standard"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class TokenMeta:
     token_order: int | None
     category: str
     neg_risk: int
+    duration_hours: float
     closed_time: int
 
 
@@ -71,6 +73,7 @@ class TouchEvent:
     min_price_after_touch: float
     close_price_after_touch: float
     closed_time: int
+    duration_hours: float
     time_to_close_sec: int
     minutes_to_resolution: float
     token_order: int | None
@@ -169,6 +172,59 @@ def _time_to_close_bucket(seconds: int) -> str:
     return "gt_7d"
 
 
+def _short_time_to_close_bucket(seconds: int) -> str:
+    if seconds < 30:
+        return "lt_30s"
+    if seconds < 60:
+        return "30s_1m"
+    if seconds < 2 * 60:
+        return "1m_2m"
+    if seconds < 3 * 60:
+        return "2m_3m"
+    if seconds < 5 * 60:
+        return "3m_5m"
+    if seconds < 15 * 60:
+        return "5m_15m"
+    if seconds < 60 * 60:
+        return "15m_60m"
+    if seconds < 6 * 60 * 60:
+        return "1h_6h"
+    if seconds < 24 * 60 * 60:
+        return "6h_24h"
+    if seconds < 3 * 24 * 60 * 60:
+        return "1d_3d"
+    if seconds < 7 * 24 * 60 * 60:
+        return "3d_7d"
+    return "gt_7d"
+
+
+def _relative_time_to_close_bucket(seconds: int, total_duration_sec: int) -> str:
+    if total_duration_sec <= 0:
+        return "unknown"
+    frac = max(0.0, min(1.0, float(seconds) / float(total_duration_sec)))
+    if frac < 0.20:
+        return "0_20pct"
+    if frac < 0.40:
+        return "20_40pct"
+    if frac < 0.60:
+        return "40_60pct"
+    if frac < 0.80:
+        return "60_80pct"
+    return "80_100pct"
+
+
+def _resolve_time_bucket(seconds: int, duration_hours: float, mode: str) -> str:
+    mode = str(mode or DEFAULT_TIME_BUCKET_MODE)
+    if mode == "standard":
+        return _time_to_close_bucket(seconds)
+    if mode == "short":
+        return _short_time_to_close_bucket(seconds)
+    if mode == "relative":
+        total_duration_sec = max(0, int(round(float(duration_hours or 0.0) * 3600.0)))
+        return _relative_time_to_close_bucket(seconds, total_duration_sec)
+    raise ValueError(f"unsupported time bucket mode: {mode}")
+
+
 def _percentile(values: Sequence[float], q: float) -> float:
     if not values:
         return 0.0
@@ -222,6 +278,7 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             lookback_max_price REAL NOT NULL,
             lookback_volume_usdc REAL NOT NULL,
             lookback_trade_count INTEGER NOT NULL,
+            duration_hours REAL NOT NULL,
             PRIMARY KEY (token_id, price_level, touch_direction)
         );
 
@@ -245,6 +302,7 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             min_price_after_touch REAL NOT NULL,
             close_price_after_touch REAL NOT NULL,
             closed_time INTEGER NOT NULL,
+            duration_hours REAL NOT NULL,
             time_to_close_sec INTEGER NOT NULL,
             minutes_to_resolution REAL NOT NULL,
             token_order INTEGER,
@@ -382,7 +440,12 @@ def reset_output_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def load_token_meta(dataset_db_path: Path) -> dict[str, TokenMeta]:
+def load_token_meta(
+    dataset_db_path: Path,
+    *,
+    min_duration_hours: float = 0.0,
+    max_duration_hours: float = 0.0,
+) -> dict[str, TokenMeta]:
     conn = sqlite3.connect(dataset_db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -395,6 +458,7 @@ def load_token_meta(dataset_db_path: Path) -> dict[str, TokenMeta]:
                 t.token_order AS token_order,
                 COALESCE(m.category, 'unknown') AS category,
                 CAST(COALESCE(m.neg_risk, 0) AS INTEGER) AS neg_risk,
+                CAST(COALESCE(m.duration_hours, 0) AS REAL) AS duration_hours,
                 CAST(COALESCE(m.closed_time, 0) AS INTEGER) AS closed_time
             FROM tokens t
             JOIN markets m ON m.id = t.market_id
@@ -416,8 +480,14 @@ def load_token_meta(dataset_db_path: Path) -> dict[str, TokenMeta]:
             token_order=int(row["token_order"]) if row["token_order"] is not None else None,
             category=str(row["category"] or "unknown"),
             neg_risk=int(row["neg_risk"] or 0),
+            duration_hours=float(row["duration_hours"] or 0.0),
             closed_time=int(row["closed_time"] or 0),
         )
+        if min_duration_hours > 0 and meta[token_id].duration_hours + 1e-9 < float(min_duration_hours):
+            meta.pop(token_id, None)
+            continue
+        if max_duration_hours > 0 and meta[token_id].duration_hours - 1e-9 > float(max_duration_hours):
+            meta.pop(token_id, None)
     return meta
 
 
@@ -556,6 +626,7 @@ def build_touch_events_for_token(
                 min_price_after_touch=float(suffix_min[trade_index]),
                 close_price_after_touch=float(trades[-1].price),
                 closed_time=int(meta.closed_time),
+                duration_hours=float(meta.duration_hours),
                 time_to_close_sec=int(time_to_close),
                 minutes_to_resolution=max(0.0, float(time_to_close) / 60.0),
                 token_order=meta.token_order,
@@ -593,6 +664,7 @@ def write_touch_events(conn: sqlite3.Connection, events: Sequence[TouchEvent]) -
             event.lookback_max_price,
             event.lookback_volume_usdc,
             event.lookback_trade_count,
+            event.duration_hours,
         )
         for event in events
     ]
@@ -614,6 +686,7 @@ def write_touch_events(conn: sqlite3.Connection, events: Sequence[TouchEvent]) -
             event.min_price_after_touch,
             event.close_price_after_touch,
             event.closed_time,
+            event.duration_hours,
             event.time_to_close_sec,
             event.minutes_to_resolution,
             event.token_order,
@@ -630,8 +703,9 @@ def write_touch_events(conn: sqlite3.Connection, events: Sequence[TouchEvent]) -
             INSERT OR REPLACE INTO token_price_first_touch(
                 market_id, token_id, price_level, touch_direction, first_touch_ts,
                 touch_price, touch_size, prev_price, lookback_min_price,
-                lookback_max_price, lookback_volume_usdc, lookback_trade_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                lookback_max_price, lookback_volume_usdc, lookback_trade_count,
+                duration_hours
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             batch,
         )
@@ -644,9 +718,9 @@ def write_touch_events(conn: sqlite3.Connection, events: Sequence[TouchEvent]) -
                 touch_price, touch_size, prev_price, lookback_min_price,
                 lookback_max_price, lookback_volume_usdc, lookback_trade_count,
                 max_price_after_touch, min_price_after_touch, close_price_after_touch,
-                closed_time, time_to_close_sec, minutes_to_resolution, token_order,
+                closed_time, duration_hours, time_to_close_sec, minutes_to_resolution, token_order,
                 is_winner, category, neg_risk
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             batch,
         )
@@ -661,8 +735,14 @@ def build_event_tables(
     direction_gap: float,
     direction_lookback_sec: int,
     touch_volume_lookback_sec: int,
+    min_duration_hours: float,
+    max_duration_hours: float,
 ) -> dict[str, int]:
-    token_meta = load_token_meta(dataset_db_path)
+    token_meta = load_token_meta(
+        dataset_db_path,
+        min_duration_hours=min_duration_hours,
+        max_duration_hours=max_duration_hours,
+    )
     logger.info("Loaded %s labeled tokens with valid closed_time", len(token_meta))
 
     output_conn = sqlite3.connect(output_db_path)
@@ -678,6 +758,8 @@ def build_event_tables(
             ("direction_gap", f"{direction_gap:.4f}"),
             ("direction_lookback_sec", str(direction_lookback_sec)),
             ("touch_volume_lookback_sec", str(touch_volume_lookback_sec)),
+            ("min_duration_hours", f"{min_duration_hours:.6f}"),
+            ("max_duration_hours", f"{max_duration_hours:.6f}"),
         ],
     )
     output_conn.commit()
@@ -755,6 +837,7 @@ def aggregate_heatmap_rows(
     events: Sequence[sqlite3.Row],
     reaction_windows: Sequence[int],
     min_touch_volume_usdc: float,
+    time_bucket_mode: str,
 ) -> list[tuple]:
     buckets: dict[tuple, dict[str, list[float] | float | int]] = {}
     for row in events:
@@ -763,7 +846,7 @@ def aggregate_heatmap_rows(
         touch_price = float(row["touch_price"] or 0.0)
         if time_to_close <= 0 or touch_volume < min_touch_volume_usdc:
             continue
-        time_bucket = _time_to_close_bucket(time_to_close)
+        time_bucket = _resolve_time_bucket(time_to_close, float(row["duration_hours"] or 0.0), time_bucket_mode)
         token_side = _token_side(row["token_order"])
         market_type = _market_type(int(row["neg_risk"] or 0))
         dimensions = [
@@ -838,6 +921,7 @@ def aggregate_transition_rows(
     reaction_windows: Sequence[int],
     min_touch_volume_usdc: float,
     price_levels: Sequence[float],
+    time_bucket_mode: str,
 ) -> list[tuple]:
     events_by_token_direction: dict[tuple[str, str], list[sqlite3.Row]] = defaultdict(list)
     for row in events:
@@ -874,7 +958,11 @@ def aggregate_transition_rows(
                     candidate_levels = [level for level in price_levels if level < from_level]
                 if not candidate_levels:
                     continue
-                time_bucket = _time_to_close_bucket(time_to_close)
+                time_bucket = _resolve_time_bucket(
+                    time_to_close,
+                    float(from_row["duration_hours"] or 0.0),
+                    time_bucket_mode,
+                )
                 for candidate_level in candidate_levels:
                     target_row = touched_levels.get(float(candidate_level))
                     reached = target_row is not None
@@ -926,6 +1014,7 @@ def aggregate_regret_rows(
     events: Sequence[sqlite3.Row],
     reaction_windows: Sequence[int],
     min_touch_volume_usdc: float,
+    time_bucket_mode: str,
 ) -> list[tuple]:
     buckets: dict[tuple, list[float]] = defaultdict(list)
     for row in events:
@@ -939,7 +1028,7 @@ def aggregate_regret_rows(
         max_price_after_touch = float(row["max_price_after_touch"])
         token_side = _token_side(row["token_order"])
         market_type = _market_type(int(row["neg_risk"] or 0))
-        time_bucket = _time_to_close_bucket(time_to_close)
+        time_bucket = _resolve_time_bucket(time_to_close, float(row["duration_hours"] or 0.0), time_bucket_mode)
         dimensions = [
             ("all", "all"),
             (market_type, "all"),
@@ -982,6 +1071,7 @@ def aggregate_touch_diagnostics_rows(
     events: Sequence[sqlite3.Row],
     reaction_windows: Sequence[int],
     min_touch_volume_usdc: float,
+    time_bucket_mode: str,
 ) -> list[tuple]:
     buckets: dict[tuple, dict[str, list[float] | int]] = {}
     for row in events:
@@ -993,7 +1083,7 @@ def aggregate_touch_diagnostics_rows(
         price_reversal_room = float(row["lookback_max_price"] or 0.0) - float(row["touch_price"] or 0.0)
         token_side = _token_side(row["token_order"])
         market_type = _market_type(int(row["neg_risk"] or 0))
-        time_bucket = _time_to_close_bucket(time_to_close)
+        time_bucket = _resolve_time_bucket(time_to_close, float(row["duration_hours"] or 0.0), time_bucket_mode)
         outcome_group = "winner" if int(row["is_winner"] or 0) == 1 else "loser"
         dimensions = [
             ("all", "all"),
@@ -1075,6 +1165,7 @@ def build_aggregate_tables(
     reaction_windows: Sequence[int],
     min_touch_volume_usdc: float,
     price_levels: Sequence[float],
+    time_bucket_mode: str,
 ) -> dict[str, int]:
     conn = sqlite3.connect(output_db_path)
     conn.row_factory = sqlite3.Row
@@ -1083,7 +1174,7 @@ def build_aggregate_tables(
             "SELECT * FROM token_price_resolution_events ORDER BY token_id, touch_direction, price_level"
         ).fetchall()
 
-        heatmap_rows = aggregate_heatmap_rows(events, reaction_windows, min_touch_volume_usdc)
+        heatmap_rows = aggregate_heatmap_rows(events, reaction_windows, min_touch_volume_usdc, time_bucket_mode)
         conn.executemany(
             """
             INSERT INTO price_resolution_heatmap(
@@ -1097,7 +1188,13 @@ def build_aggregate_tables(
             heatmap_rows,
         )
 
-        transition_rows = aggregate_transition_rows(events, reaction_windows, min_touch_volume_usdc, price_levels)
+        transition_rows = aggregate_transition_rows(
+            events,
+            reaction_windows,
+            min_touch_volume_usdc,
+            price_levels,
+            time_bucket_mode,
+        )
         conn.executemany(
             """
             INSERT INTO price_level_transition_matrix(
@@ -1110,7 +1207,7 @@ def build_aggregate_tables(
             transition_rows,
         )
 
-        regret_rows = aggregate_regret_rows(events, reaction_windows, min_touch_volume_usdc)
+        regret_rows = aggregate_regret_rows(events, reaction_windows, min_touch_volume_usdc, time_bucket_mode)
         conn.executemany(
             """
             INSERT INTO price_level_regret_stats(
@@ -1123,7 +1220,12 @@ def build_aggregate_tables(
             regret_rows,
         )
 
-        diagnostic_rows = aggregate_touch_diagnostics_rows(events, reaction_windows, min_touch_volume_usdc)
+        diagnostic_rows = aggregate_touch_diagnostics_rows(
+            events,
+            reaction_windows,
+            min_touch_volume_usdc,
+            time_bucket_mode,
+        )
         conn.executemany(
             """
             INSERT INTO price_resolution_touch_diagnostics(
@@ -1142,6 +1244,7 @@ def build_aggregate_tables(
             [
                 ("reaction_windows_sec", ",".join(str(v) for v in reaction_windows)),
                 ("min_touch_volume_usdc", f"{min_touch_volume_usdc:.4f}"),
+                ("time_bucket_mode", time_bucket_mode),
                 ("heatmap_rows", str(len(heatmap_rows))),
                 ("transition_rows", str(len(transition_rows))),
                 ("regret_rows", str(len(regret_rows))),
@@ -1171,6 +1274,9 @@ def build_price_resolution_research(
     direction_lookback_sec: int = DEFAULT_DIRECTION_LOOKBACK_SEC,
     touch_volume_lookback_sec: int = DEFAULT_TOUCH_VOLUME_LOOKBACK_SEC,
     min_touch_volume_usdc: float = 0.0,
+    min_duration_hours: float = 0.0,
+    max_duration_hours: float = 0.0,
+    time_bucket_mode: str = DEFAULT_TIME_BUCKET_MODE,
 ) -> dict[str, int]:
     ensure_runtime_dirs()
     dataset_db_path = Path(dataset_db_path)
@@ -1193,12 +1299,15 @@ def build_price_resolution_research(
         direction_gap=float(direction_gap),
         direction_lookback_sec=int(direction_lookback_sec),
         touch_volume_lookback_sec=int(touch_volume_lookback_sec),
+        min_duration_hours=float(min_duration_hours),
+        max_duration_hours=float(max_duration_hours),
     )
     aggregate_stats = build_aggregate_tables(
         output_db_path=output_db_path,
         reaction_windows=tuple(sorted({int(v) for v in reaction_windows if int(v) > 0})),
         min_touch_volume_usdc=float(min_touch_volume_usdc),
         price_levels=price_levels,
+        time_bucket_mode=str(time_bucket_mode),
     )
     return {**build_stats, **aggregate_stats}
 
@@ -1249,6 +1358,14 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Minimum trailing touch notional required for aggregate tables",
     )
+    ap.add_argument(
+        "--time-bucket-mode",
+        choices=("standard", "short", "relative"),
+        default=DEFAULT_TIME_BUCKET_MODE,
+        help="How to bucket time_to_close in aggregate tables",
+    )
+    ap.add_argument("--min-duration-hours", type=float, default=0.0, help="Minimum market duration filter")
+    ap.add_argument("--max-duration-hours", type=float, default=0.0, help="Maximum market duration filter")
     return ap.parse_args()
 
 
@@ -1265,6 +1382,9 @@ def main() -> None:
         direction_lookback_sec=int(args.direction_lookback_sec),
         touch_volume_lookback_sec=int(args.touch_volume_lookback_sec),
         min_touch_volume_usdc=float(args.min_touch_volume_usdc),
+        min_duration_hours=float(args.min_duration_hours),
+        max_duration_hours=float(args.max_duration_hours),
+        time_bucket_mode=str(args.time_bucket_mode),
     )
     logger.info("Research DB written to %s", args.output_db)
     for key in sorted(stats):

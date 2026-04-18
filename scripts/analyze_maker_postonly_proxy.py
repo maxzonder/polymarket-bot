@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 if __package__:
+    from .analyze_price_resolution import build_touch_events_for_token
     from replay.tape_feed import DEFAULT_TAPE_DB_PATH
     from utils.logger import setup_logger
     from utils.paths import DATA_DIR, DB_PATH, ensure_runtime_dirs
 else:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from analyze_price_resolution import build_touch_events_for_token  # type: ignore
     from replay.tape_feed import DEFAULT_TAPE_DB_PATH
     from utils.logger import setup_logger
     from utils.paths import DATA_DIR, DB_PATH, ensure_runtime_dirs
@@ -542,6 +544,91 @@ def find_first_candidate(
     return None
 
 
+def find_first_candidate_touch(
+    *,
+    meta: TokenMeta,
+    trades: Sequence[TradePoint],
+    direction_gap: float,
+    direction_lookback_sec: int,
+    touch_volume_lookback_sec: int,
+    touch_direction: str,
+    max_time_to_close_sec: int,
+    max_time_to_close_frac: float,
+    max_time_to_close_min_sec: int,
+    temporal_filter_mode: str,
+    min_lookback_volume_usdc: float,
+    bid_price: float,
+    order_size_shares: float,
+    cancel_after_sec: int,
+) -> MakerCandidate | None:
+    total_duration_sec = max(0, int(round(meta.duration_hours * 3600)))
+    effective_max_time_to_close_sec = _resolve_effective_window_sec(
+        total_duration_sec,
+        absolute_sec=max_time_to_close_sec,
+        relative_frac=max_time_to_close_frac,
+        min_sec=max_time_to_close_min_sec,
+        max_sec=0,
+        mode=temporal_filter_mode,
+    )
+    touch_events = build_touch_events_for_token(
+        meta=meta,
+        trades=trades,
+        price_levels=(float(bid_price),),
+        direction_gap=float(direction_gap),
+        direction_lookback_sec=int(direction_lookback_sec),
+        touch_volume_lookback_sec=int(touch_volume_lookback_sec),
+    )
+    filtered_events = [
+        event
+        for event in touch_events
+        if str(event.touch_direction) == touch_direction
+        and event.lookback_volume_usdc >= min_lookback_volume_usdc
+        and 0 < event.time_to_close_sec <= effective_max_time_to_close_sec
+    ]
+    if not filtered_events:
+        return None
+    event = min(filtered_events, key=lambda row: row.first_touch_ts)
+    remaining_frac, relative_time_bucket = _relative_time_bucket(event.time_to_close_sec, total_duration_sec)
+    if touch_direction == "ascending":
+        trend_strength = float(event.touch_price - event.lookback_min_price)
+    else:
+        trend_strength = float(event.touch_price - event.lookback_max_price)
+    return MakerCandidate(
+        market_id=meta.market_id,
+        token_id=meta.token_id,
+        trigger_ts=int(event.first_touch_ts),
+        trigger_price=float(event.touch_price),
+        bid_price=bid_price,
+        order_size_shares=order_size_shares,
+        cancel_after_sec=cancel_after_sec,
+        time_to_close_sec=int(event.time_to_close_sec),
+        time_to_close_bucket=_time_to_close_bucket(int(event.time_to_close_sec)),
+        total_duration_sec=total_duration_sec,
+        remaining_frac=remaining_frac,
+        relative_time_bucket=relative_time_bucket,
+        effective_precursor_lookback_sec=int(direction_lookback_sec),
+        effective_volume_lookback_sec=int(touch_volume_lookback_sec),
+        effective_max_time_to_close_sec=effective_max_time_to_close_sec,
+        lookback_min_price=float(event.lookback_min_price),
+        lookback_max_price=float(event.lookback_max_price),
+        lookback_volume_usdc=float(event.lookback_volume_usdc),
+        lookback_trade_count=int(event.lookback_trade_count),
+        precursor_hit=1,
+        trend_anchor_far_offset_sec=int(direction_lookback_sec),
+        trend_anchor_mid_offset_sec=max(1, int(round(direction_lookback_sec * 0.50))),
+        trend_anchor_near_offset_sec=max(1, int(round(direction_lookback_sec * 0.20))),
+        trend_anchor_far_price=float(event.lookback_min_price if touch_direction == "ascending" else event.lookback_max_price),
+        trend_anchor_mid_price=float(event.prev_price),
+        trend_anchor_near_price=float(event.touch_price),
+        trend_label=str(event.touch_direction),
+        trend_strength=trend_strength,
+        category=meta.category,
+        neg_risk=meta.neg_risk,
+        fees_enabled=meta.fees_enabled,
+        is_winner=meta.is_winner,
+    )
+
+
 def build_fill_rows(
     *,
     candidate: MakerCandidate,
@@ -554,7 +641,7 @@ def build_fill_rows(
 
     future_trades = [
         trade for trade in trades
-        if window_start <= trade.timestamp <= window_end
+        if window_start < trade.timestamp <= window_end
     ]
 
     def _can_fill_passive_buy(trade: TradePoint) -> bool:
@@ -742,9 +829,14 @@ def build_maker_postonly_proxy_research(
     dataset_db_path: Path,
     tape_db_path: Path,
     output_db_path: Path,
+    candidate_mode: str,
     trigger_price_min: float,
     trigger_price_max: float,
     precursor_max_price: float,
+    direction_gap: float,
+    direction_lookback_sec: int,
+    touch_volume_lookback_sec: int,
+    touch_direction: str,
     precursor_lookback_sec: int,
     precursor_lookback_frac: float,
     precursor_lookback_min_sec: int,
@@ -778,9 +870,14 @@ def build_maker_postonly_proxy_research(
         [
             ("dataset_db_path", str(dataset_db_path)),
             ("tape_db_path", str(tape_db_path)),
+            ("candidate_mode", candidate_mode),
             ("trigger_price_min", f"{trigger_price_min:.4f}"),
             ("trigger_price_max", f"{trigger_price_max:.4f}"),
             ("precursor_max_price", f"{precursor_max_price:.4f}"),
+            ("direction_gap", f"{direction_gap:.4f}"),
+            ("direction_lookback_sec", str(direction_lookback_sec)),
+            ("touch_volume_lookback_sec", str(touch_volume_lookback_sec)),
+            ("touch_direction", touch_direction),
             ("precursor_lookback_sec", str(precursor_lookback_sec)),
             ("precursor_lookback_frac", f"{precursor_lookback_frac:.4f}"),
             ("precursor_lookback_min_sec", str(precursor_lookback_min_sec)),
@@ -841,29 +938,47 @@ def build_maker_postonly_proxy_research(
         if meta is None:
             continue
         stats["eligible_tokens"] += 1
-        candidate = find_first_candidate(
-            meta=meta,
-            trades=trades,
-            trigger_price_min=trigger_price_min,
-            trigger_price_max=trigger_price_max,
-            precursor_max_price=precursor_max_price,
-            precursor_lookback_sec=precursor_lookback_sec,
-            precursor_lookback_frac=precursor_lookback_frac,
-            precursor_lookback_min_sec=precursor_lookback_min_sec,
-            precursor_lookback_max_sec=precursor_lookback_max_sec,
-            lookback_volume_sec=lookback_volume_sec,
-            lookback_volume_frac=lookback_volume_frac,
-            lookback_volume_min_sec=lookback_volume_min_sec,
-            lookback_volume_max_sec=lookback_volume_max_sec,
-            min_lookback_volume_usdc=min_lookback_volume_usdc,
-            max_time_to_close_sec=max_time_to_close_sec,
-            max_time_to_close_frac=max_time_to_close_frac,
-            max_time_to_close_min_sec=max_time_to_close_min_sec,
-            temporal_filter_mode=temporal_filter_mode,
-            bid_price=bid_price,
-            order_size_shares=order_size_shares,
-            cancel_after_sec=cancel_after_sec,
-        )
+        if candidate_mode == "touch":
+            candidate = find_first_candidate_touch(
+                meta=meta,
+                trades=trades,
+                direction_gap=direction_gap,
+                direction_lookback_sec=direction_lookback_sec,
+                touch_volume_lookback_sec=touch_volume_lookback_sec,
+                touch_direction=touch_direction,
+                max_time_to_close_sec=max_time_to_close_sec,
+                max_time_to_close_frac=max_time_to_close_frac,
+                max_time_to_close_min_sec=max_time_to_close_min_sec,
+                temporal_filter_mode=temporal_filter_mode,
+                min_lookback_volume_usdc=min_lookback_volume_usdc,
+                bid_price=bid_price,
+                order_size_shares=order_size_shares,
+                cancel_after_sec=cancel_after_sec,
+            )
+        else:
+            candidate = find_first_candidate(
+                meta=meta,
+                trades=trades,
+                trigger_price_min=trigger_price_min,
+                trigger_price_max=trigger_price_max,
+                precursor_max_price=precursor_max_price,
+                precursor_lookback_sec=precursor_lookback_sec,
+                precursor_lookback_frac=precursor_lookback_frac,
+                precursor_lookback_min_sec=precursor_lookback_min_sec,
+                precursor_lookback_max_sec=precursor_lookback_max_sec,
+                lookback_volume_sec=lookback_volume_sec,
+                lookback_volume_frac=lookback_volume_frac,
+                lookback_volume_min_sec=lookback_volume_min_sec,
+                lookback_volume_max_sec=lookback_volume_max_sec,
+                min_lookback_volume_usdc=min_lookback_volume_usdc,
+                max_time_to_close_sec=max_time_to_close_sec,
+                max_time_to_close_frac=max_time_to_close_frac,
+                max_time_to_close_min_sec=max_time_to_close_min_sec,
+                temporal_filter_mode=temporal_filter_mode,
+                bid_price=bid_price,
+                order_size_shares=order_size_shares,
+                cancel_after_sec=cancel_after_sec,
+            )
         if candidate is None:
             if progress_every_tokens > 0 and stats["tokens_seen"] % progress_every_tokens == 0:
                 logger.info(
@@ -955,9 +1070,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", dest="dataset_db", type=Path, default=DB_PATH)
     parser.add_argument("--tape-db", dest="tape_db", type=Path, default=DEFAULT_TAPE_DB_PATH)
     parser.add_argument("--output-db", dest="output_db", type=Path, default=DEFAULT_OUTPUT_DB_PATH)
+    parser.add_argument("--candidate-mode", choices=("touch", "legacy"), default="touch")
     parser.add_argument("--trigger-price-min", type=float, default=0.70)
     parser.add_argument("--trigger-price-max", type=float, default=0.75)
     parser.add_argument("--precursor-max-price", type=float, default=0.70)
+    parser.add_argument("--direction-gap", type=float, default=0.10)
+    parser.add_argument("--direction-lookback-sec", type=int, default=5 * 60)
+    parser.add_argument("--touch-volume-lookback-sec", type=int, default=60)
+    parser.add_argument("--touch-direction", choices=("ascending", "descending"), default="ascending")
     parser.add_argument("--temporal-filter-mode", choices=("absolute", "relative", "hybrid"), default="hybrid")
     parser.add_argument("--precursor-lookback-sec", type=int, default=15 * 60)
     parser.add_argument("--precursor-lookback-frac", type=float, default=0.25)
@@ -991,9 +1111,14 @@ def main() -> None:
         dataset_db_path=args.dataset_db,
         tape_db_path=args.tape_db,
         output_db_path=args.output_db,
+        candidate_mode=args.candidate_mode,
         trigger_price_min=args.trigger_price_min,
         trigger_price_max=args.trigger_price_max,
         precursor_max_price=args.precursor_max_price,
+        direction_gap=args.direction_gap,
+        direction_lookback_sec=args.direction_lookback_sec,
+        touch_volume_lookback_sec=args.touch_volume_lookback_sec,
+        touch_direction=args.touch_direction,
         precursor_lookback_sec=args.precursor_lookback_sec,
         precursor_lookback_frac=args.precursor_lookback_frac,
         precursor_lookback_min_sec=args.precursor_lookback_min_sec,
