@@ -26,6 +26,7 @@ import csv
 import json
 import logging
 import signal
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,6 +34,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.gamma_client import GAMMA_BASE
 
