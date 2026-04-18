@@ -211,6 +211,7 @@ class LiveDepthCollector:
         self.csv = CsvSink(Path(args.output_csv))
         self.stop_event = asyncio.Event()
         self.last_discovery_stats: dict[str, Any] = {}
+        self.market_ws: Any = None
 
     async def run(self) -> None:
         self._install_signal_handlers()
@@ -319,6 +320,7 @@ class LiveDepthCollector:
                 if remaining_seconds <= 0:
                     stats["skipped_nonpositive_remaining"] += 1
                     continue
+                seconds_until_start = int(start_ts - now_ts) if start_ts is not None else None
                 duration_seconds = int(end_ts - start_ts) if start_ts is not None else None
 
                 is_target_recurrence = str(recurrence or "").lower() == "15m"
@@ -349,6 +351,12 @@ class LiveDepthCollector:
                     stats["skipped_bad_time"] += 1
                     continue
                 if target_metric < self.args.min_duration_seconds or target_metric > self.args.max_duration_seconds:
+                    stats["skipped_duration_window"] += 1
+                    continue
+                if seconds_until_start is not None and seconds_until_start > self.args.max_seconds_until_start:
+                    stats["skipped_duration_window"] += 1
+                    continue
+                if remaining_seconds > self.args.max_seconds_to_end:
                     stats["skipped_duration_window"] += 1
                     continue
 
@@ -416,15 +424,19 @@ class LiveDepthCollector:
                 latest_by_id = {token.token_id: token for token in latest}
                 new_token_ids = [tid for tid in latest_by_id if tid not in self.tokens_by_id]
                 removed_token_ids = [tid for tid in self.tokens_by_id if tid not in latest_by_id]
+                token_set_changed = bool(new_token_ids or removed_token_ids)
                 self.tokens_by_id = latest_by_id
                 self.books = {tid: book for tid, book in self.books.items() if tid in latest_by_id}
-                if new_token_ids or removed_token_ids:
+                if token_set_changed:
                     self.logger.info(
                         "Eligible token refresh: +%s / -%s (now %s)",
                         len(new_token_ids),
                         len(removed_token_ids),
                         len(self.tokens_by_id),
                     )
+                    if self.market_ws is not None:
+                        self.logger.info("Universe changed, restarting websocket subscription")
+                        await self.market_ws.close()
             except Exception:
                 self.logger.exception("Active market refresh failed")
 
@@ -449,6 +461,7 @@ class LiveDepthCollector:
                 continue
             try:
                 async with websockets.connect(WS_MARKET_ENDPOINT, ping_interval=None, max_size=8_000_000) as ws:
+                    self.market_ws = ws
                     await ws.send(json.dumps({
                         "assets_ids": asset_ids,
                         "type": "market",
@@ -462,6 +475,7 @@ class LiveDepthCollector:
                                 continue
                             await self.handle_ws_message(message)
                     finally:
+                        self.market_ws = None
                         heartbeat.cancel()
                         await asyncio.gather(heartbeat, return_exceptions=True)
             except asyncio.CancelledError:
@@ -766,10 +780,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-interval-sec", type=int, default=60)
     parser.add_argument("--min-duration-seconds", type=int, default=DEFAULT_DURATION_MIN)
     parser.add_argument("--max-duration-seconds", type=int, default=DEFAULT_DURATION_MAX)
+    parser.add_argument("--max-seconds-until-start", type=int, default=1800)
+    parser.add_argument("--max-seconds-to-end", type=int, default=1800)
     parser.add_argument("--duration-metric", choices=("lifecycle", "time_remaining", "implied_series"), default="implied_series")
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")
-    parser.add_argument("--max-discovery-rows", type=int, default=500)
+    parser.add_argument("--max-discovery-rows", type=int, default=8000)
     parser.add_argument("--require-recurrence", action="store_true", default=True)
     parser.add_argument("--no-require-recurrence", dest="require_recurrence", action="store_false")
     parser.add_argument("--max-events", type=int, default=0)
