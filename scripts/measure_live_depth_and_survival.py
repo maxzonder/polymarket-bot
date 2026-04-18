@@ -71,6 +71,9 @@ class MarketToken:
     end_time_iso: str
     start_time_iso: Optional[str]
     duration_seconds: Optional[int]
+    seconds_to_end: Optional[int]
+    recurrence: Optional[str]
+    series_slug: Optional[str]
     fees_enabled: bool
     fee_rate_bps: Optional[float]
     tick_size: Optional[float]
@@ -207,25 +210,28 @@ class LiveDepthCollector:
         self.completed_probes = 0
         self.csv = CsvSink(Path(args.output_csv))
         self.stop_event = asyncio.Event()
+        self.last_discovery_stats: dict[str, Any] = {}
 
     async def run(self) -> None:
         self._install_signal_handlers()
         bootstrap = self.fetch_active_market_tokens()
-        if not bootstrap:
-            raise SystemExit("No eligible active tokens found for configured duration window.")
         self.tokens_by_id = {token.token_id: token for token in bootstrap}
-        self.logger.info("Bootstrapped %s eligible tokens", len(self.tokens_by_id))
+        if not bootstrap:
+            self.logger.warning("No eligible active tokens on bootstrap attempt; collector will stay alive and retry.")
+        else:
+            self.logger.info("Bootstrapped %s eligible tokens", len(self.tokens_by_id))
 
         consumer = asyncio.create_task(self.market_ws_loop())
         refresh = asyncio.create_task(self.refresh_loop())
         survival = asyncio.create_task(self.survival_loop())
+        heartbeat = asyncio.create_task(self.heartbeat_loop())
 
         try:
             await self.stop_event.wait()
         finally:
-            for task in (consumer, refresh, survival):
+            for task in (consumer, refresh, survival, heartbeat):
                 task.cancel()
-            await asyncio.gather(consumer, refresh, survival, return_exceptions=True)
+            await asyncio.gather(consumer, refresh, survival, heartbeat, return_exceptions=True)
             self.csv.close()
 
     def fetch_active_market_tokens(self) -> list[MarketToken]:
@@ -234,6 +240,18 @@ class LiveDepthCollector:
         seen_market_ids: set[str] = set()
         now_ts = time.time()
         session = requests.Session()
+        stats = {
+            "rows_seen": 0,
+            "skipped_duplicate": 0,
+            "skipped_outcomes": 0,
+            "skipped_missing_end": 0,
+            "skipped_bad_time": 0,
+            "skipped_nonpositive_remaining": 0,
+            "skipped_duration_window": 0,
+            "skipped_recurrence": 0,
+            "eligible_markets": 0,
+            "eligible_tokens": 0,
+        }
 
         while True:
             resp = session.get(
@@ -244,6 +262,8 @@ class LiveDepthCollector:
                     "active": "true",
                     "closed": "false",
                     "archived": "false",
+                    "order": self.args.discovery_order,
+                    "ascending": str(self.args.discovery_ascending).lower(),
                 },
                 timeout=30,
             )
@@ -253,32 +273,67 @@ class LiveDepthCollector:
                 break
 
             for raw in payload:
+                stats["rows_seen"] += 1
                 market_id = str(raw.get("id") or "")
                 if not market_id or market_id in seen_market_ids:
+                    stats["skipped_duplicate"] += 1
                     continue
                 token_ids = _load_json_list(raw.get("clobTokenIds", "[]"))
                 outcomes = _load_json_list(raw.get("outcomes", "[]"))
                 if len(token_ids) != 2 or len(outcomes) != 2:
+                    stats["skipped_outcomes"] += 1
                     continue
-                start_iso = raw.get("startDate") or raw.get("startDateIso") or raw.get("gameStartTime")
-                end_iso = raw.get("endDate") or raw.get("endDateIso")
+
+                event0 = None
+                events = raw.get("events") or []
+                if events and isinstance(events[0], dict):
+                    event0 = events[0]
+
+                start_iso = None
+                end_iso = None
+                recurrence = None
+                series_slug = None
+                if event0:
+                    start_iso = event0.get("startTime") or event0.get("startDate") or event0.get("eventStartTime")
+                    end_iso = event0.get("endDate") or raw.get("endDate") or raw.get("endDateIso")
+                    series = event0.get("series") or []
+                    if series and isinstance(series[0], dict):
+                        recurrence = series[0].get("recurrence")
+                        series_slug = series[0].get("slug")
+                if not start_iso:
+                    start_iso = raw.get("startDate") or raw.get("startDateIso") or raw.get("gameStartTime")
                 if not end_iso:
+                    end_iso = raw.get("endDate") or raw.get("endDateIso")
+                if not end_iso:
+                    stats["skipped_missing_end"] += 1
                     continue
+
                 start_ts = parse_iso_to_ts(start_iso) if start_iso else None
                 end_ts = parse_iso_to_ts(end_iso)
                 if end_ts is None:
+                    stats["skipped_bad_time"] += 1
+                    continue
+                remaining_seconds = int(end_ts - now_ts)
+                if remaining_seconds <= 0:
+                    stats["skipped_nonpositive_remaining"] += 1
                     continue
                 duration_seconds = int(end_ts - start_ts) if start_ts is not None else None
-                if duration_seconds is None:
-                    hours_to_close = raw.get("hours_to_close")
-                    if hours_to_close is not None:
-                        duration_seconds = int(float(hours_to_close) * 3600)
-                if duration_seconds is None:
+
+                is_target_recurrence = str(recurrence or "").lower() == "15m"
+                question = str(raw.get("question") or "")
+                is_updown_question = "up or down" in question.lower()
+                if self.args.require_recurrence and not (is_target_recurrence or is_updown_question):
+                    stats["skipped_recurrence"] += 1
                     continue
-                if duration_seconds < self.args.min_duration_seconds or duration_seconds > self.args.max_duration_seconds:
+
+                target_metric = remaining_seconds if self.args.duration_metric == "time_remaining" else duration_seconds
+                if target_metric is None:
+                    stats["skipped_bad_time"] += 1
                     continue
-                if end_ts <= now_ts:
+                if target_metric < self.args.min_duration_seconds or target_metric > self.args.max_duration_seconds:
+                    stats["skipped_duration_window"] += 1
                     continue
+
                 condition_id = str(raw.get("conditionId") or market_id)
                 fees_enabled = bool(raw.get("feesEnabled"))
                 tick_size = _parse_float(raw.get("orderPriceMinTickSize"))
@@ -290,7 +345,6 @@ class LiveDepthCollector:
                         fee_rate_bps = rate * 10000.0
                 elif raw.get("takerBaseFee") is not None:
                     fee_rate_bps = _parse_float(raw.get("takerBaseFee"))
-                question = str(raw.get("question") or "")
                 for token_id, outcome in zip(token_ids, outcomes):
                     markets.append(
                         MarketToken(
@@ -302,18 +356,38 @@ class LiveDepthCollector:
                             end_time_iso=str(end_iso),
                             start_time_iso=str(start_iso) if start_iso else None,
                             duration_seconds=duration_seconds,
+                            seconds_to_end=remaining_seconds,
+                            recurrence=str(recurrence) if recurrence is not None else None,
+                            series_slug=str(series_slug) if series_slug is not None else None,
                             fees_enabled=fees_enabled,
                             fee_rate_bps=fee_rate_bps,
                             tick_size=tick_size,
                         )
                     )
+                    stats["eligible_tokens"] += 1
+                stats["eligible_markets"] += 1
                 seen_market_ids.add(market_id)
 
             offset += len(payload)
-            if len(payload) < 100:
+            if len(payload) < 100 or offset >= self.args.max_discovery_rows:
                 break
             time.sleep(0.05)
 
+        self.last_discovery_stats = stats
+        sample_questions = [token.question for token in markets[: min(3, len(markets))]]
+        self.logger.info(
+            "Discovery stats: rows=%s eligible_markets=%s eligible_tokens=%s skipped_duration=%s skipped_recurrence=%s skipped_remaining=%s order=%s asc=%s metric=%s sample=%s",
+            stats["rows_seen"],
+            stats["eligible_markets"],
+            stats["eligible_tokens"],
+            stats["skipped_duration_window"],
+            stats["skipped_recurrence"],
+            stats["skipped_nonpositive_remaining"],
+            self.args.discovery_order,
+            self.args.discovery_ascending,
+            self.args.duration_metric,
+            sample_questions,
+        )
         return markets
 
     async def refresh_loop(self) -> None:
@@ -325,6 +399,7 @@ class LiveDepthCollector:
                 new_token_ids = [tid for tid in latest_by_id if tid not in self.tokens_by_id]
                 removed_token_ids = [tid for tid in self.tokens_by_id if tid not in latest_by_id]
                 self.tokens_by_id = latest_by_id
+                self.books = {tid: book for tid, book in self.books.items() if tid in latest_by_id}
                 if new_token_ids or removed_token_ids:
                     self.logger.info(
                         "Eligible token refresh: +%s / -%s (now %s)",
@@ -334,6 +409,18 @@ class LiveDepthCollector:
                     )
             except Exception:
                 self.logger.exception("Active market refresh failed")
+
+    async def heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.args.heartbeat_interval_sec)
+            self.logger.info(
+                "Heartbeat: subscribed_tokens=%s books=%s active_probes=%s completed_probes=%s discovery=%s",
+                len(self.tokens_by_id),
+                len(self.books),
+                len(self.active_probes),
+                self.completed_probes,
+                self.last_discovery_stats,
+            )
 
     async def market_ws_loop(self) -> None:
         while True:
@@ -658,8 +745,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--survival-window-ms", type=int, default=DEFAULT_SURVIVAL_WINDOW_MS)
     parser.add_argument("--sampling-interval-ms", type=int, default=DEFAULT_SAMPLING_INTERVAL_MS)
     parser.add_argument("--refresh-interval-sec", type=int, default=DEFAULT_REFRESH_INTERVAL_SEC)
+    parser.add_argument("--heartbeat-interval-sec", type=int, default=60)
     parser.add_argument("--min-duration-seconds", type=int, default=DEFAULT_DURATION_MIN)
     parser.add_argument("--max-duration-seconds", type=int, default=DEFAULT_DURATION_MAX)
+    parser.add_argument("--duration-metric", choices=("lifecycle", "time_remaining"), default="time_remaining")
+    parser.add_argument("--discovery-order", default="createdAt")
+    parser.add_argument("--discovery-ascending", action="store_true")
+    parser.add_argument("--max-discovery-rows", type=int, default=500)
+    parser.add_argument("--require-recurrence", action="store_true", default=True)
+    parser.add_argument("--no-require-recurrence", dest="require_recurrence", action="store_false")
     parser.add_argument("--max-events", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
     return parser
