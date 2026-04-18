@@ -14,11 +14,12 @@ if __package__:
         DEFAULT_DIRECTION_GAP,
         DEFAULT_DIRECTION_LOOKBACK_SEC,
         DEFAULT_PRICE_STEP,
+        DEFAULT_TIME_BUCKET_MODE,
         DEFAULT_TOUCH_VOLUME_LOOKBACK_SEC,
         TradePoint,
         _generate_price_levels,
         _market_type,
-        _time_to_close_bucket,
+        _resolve_time_bucket,
         _token_side,
         build_touch_events_for_token,
     )
@@ -31,11 +32,12 @@ else:
         DEFAULT_DIRECTION_GAP,
         DEFAULT_DIRECTION_LOOKBACK_SEC,
         DEFAULT_PRICE_STEP,
+        DEFAULT_TIME_BUCKET_MODE,
         DEFAULT_TOUCH_VOLUME_LOOKBACK_SEC,
         TradePoint,
         _generate_price_levels,
         _market_type,
-        _time_to_close_bucket,
+        _resolve_time_bucket,
         _token_side,
         build_touch_events_for_token,
     )
@@ -101,6 +103,7 @@ class TakerEvent:
     category: str
     neg_risk: int
     fees_enabled: int
+    time_bucket_mode: str
 
 
 def _normalize_category(category: str) -> str:
@@ -160,16 +163,18 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
             category TEXT NOT NULL,
             neg_risk INTEGER NOT NULL,
             fees_enabled INTEGER NOT NULL,
+            time_bucket_mode TEXT NOT NULL,
             PRIMARY KEY (token_id, price_level, touch_direction)
         );
 
         CREATE INDEX IF NOT EXISTS idx_taker_resolution_level_dir
-        ON taker_resolution_events (price_level, touch_direction, time_to_close_bucket);
+        ON taker_resolution_events (price_level, touch_direction, time_to_close_bucket, time_bucket_mode);
 
         CREATE TABLE IF NOT EXISTS taker_resolution_summary (
             price_level REAL NOT NULL,
             touch_direction TEXT NOT NULL,
             time_to_close_bucket TEXT NOT NULL,
+            time_bucket_mode TEXT NOT NULL,
             market_type TEXT NOT NULL,
             token_side TEXT NOT NULL,
             category TEXT NOT NULL,
@@ -190,6 +195,7 @@ def ensure_output_schema(conn: sqlite3.Connection) -> None:
                 price_level,
                 touch_direction,
                 time_to_close_bucket,
+                time_bucket_mode,
                 market_type,
                 token_side,
                 category,
@@ -301,6 +307,7 @@ def write_events(conn: sqlite3.Connection, events: Sequence[TakerEvent]) -> None
             event.category,
             event.neg_risk,
             event.fees_enabled,
+            event.time_bucket_mode,
         )
         for event in events
     ]
@@ -313,8 +320,8 @@ def write_events(conn: sqlite3.Connection, events: Sequence[TakerEvent]) -> None
                 gross_pnl_per_share, net_pnl_per_share, gross_pnl_per_order,
                 net_pnl_per_order, time_to_close_sec, time_to_close_bucket,
                 duration_hours, minutes_to_resolution, token_order, is_winner,
-                category, neg_risk, fees_enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                category, neg_risk, fees_enabled, time_bucket_mode
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             batch,
         )
@@ -330,6 +337,7 @@ def build_taker_events_for_token(
     touch_volume_lookback_sec: int,
     order_size_shares: float,
     default_fee_rate: float,
+    time_bucket_mode: str,
 ) -> list[TakerEvent]:
     touch_events = build_touch_events_for_token(
         meta=meta,
@@ -362,7 +370,11 @@ def build_taker_events_for_token(
                 gross_pnl_per_order=float(gross_pnl_per_share * order_size_shares),
                 net_pnl_per_order=float(net_pnl_per_share * order_size_shares),
                 time_to_close_sec=int(event.time_to_close_sec),
-                time_to_close_bucket=_time_to_close_bucket(int(event.time_to_close_sec)),
+                time_to_close_bucket=_resolve_time_bucket(
+                    int(event.time_to_close_sec),
+                    float(meta.duration_hours),
+                    time_bucket_mode,
+                ),
                 duration_hours=float(meta.duration_hours),
                 minutes_to_resolution=float(event.minutes_to_resolution),
                 token_order=meta.token_order,
@@ -370,6 +382,7 @@ def build_taker_events_for_token(
                 category=str(meta.category),
                 neg_risk=int(meta.neg_risk),
                 fees_enabled=int(meta.fees_enabled),
+                time_bucket_mode=str(time_bucket_mode),
             )
         )
     return rows
@@ -388,6 +401,7 @@ def build_event_tables(
     min_duration_hours: float,
     max_duration_hours: float,
     default_fee_rate: float,
+    time_bucket_mode: str,
 ) -> dict[str, int]:
     token_meta = load_token_meta(
         dataset_db_path,
@@ -412,6 +426,7 @@ def build_event_tables(
             ("min_duration_hours", f"{min_duration_hours:.6f}"),
             ("max_duration_hours", f"{max_duration_hours:.6f}"),
             ("default_fee_rate", f"{default_fee_rate:.6f}"),
+            ("time_bucket_mode", str(time_bucket_mode)),
             ("fee_model", "Fee Structure V2 category map + fees_enabled"),
             ("exit_fee_model", "hold_to_resolution_no_exit_fee"),
         ],
@@ -446,6 +461,7 @@ def build_event_tables(
             touch_volume_lookback_sec=touch_volume_lookback_sec,
             order_size_shares=order_size_shares,
             default_fee_rate=default_fee_rate,
+            time_bucket_mode=time_bucket_mode,
         )
         if not events:
             return
@@ -504,6 +520,7 @@ def build_summary(output_db_path: Path, *, min_touch_volume_usdc: float) -> dict
                 float(row["price_level"]),
                 str(row["touch_direction"]),
                 str(row["time_to_close_bucket"]),
+                str(row["time_bucket_mode"]),
                 _market_type(int(row["neg_risk"] or 0)),
                 _token_side(row["token_order"]),
                 str(row["category"]),
@@ -563,12 +580,12 @@ def build_summary(output_db_path: Path, *, min_touch_volume_usdc: float) -> dict
         conn.executemany(
             """
             INSERT INTO taker_resolution_summary(
-                price_level, touch_direction, time_to_close_bucket, market_type,
+                price_level, touch_direction, time_to_close_bucket, time_bucket_mode, market_type,
                 token_side, category, fees_enabled, n_tokens, winner_count, win_rate,
                 avg_entry_price, avg_entry_fee_per_share, avg_gross_edge, avg_net_edge,
                 avg_gross_pnl_per_share, avg_net_pnl_per_share,
                 avg_gross_pnl_per_order, avg_net_pnl_per_order, avg_minutes_to_resolution
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -599,6 +616,7 @@ def build_taker_resolution_research(
     max_duration_hours: float = 0.0,
     default_fee_rate: float = 0.05,
     min_touch_volume_usdc: float = 0.0,
+    time_bucket_mode: str = DEFAULT_TIME_BUCKET_MODE,
 ) -> dict[str, int]:
     ensure_runtime_dirs()
     dataset_db_path = Path(dataset_db_path)
@@ -625,6 +643,7 @@ def build_taker_resolution_research(
         min_duration_hours=float(min_duration_hours),
         max_duration_hours=float(max_duration_hours),
         default_fee_rate=float(default_fee_rate),
+        time_bucket_mode=str(time_bucket_mode),
     )
     summary_stats = build_summary(output_db_path, min_touch_volume_usdc=float(min_touch_volume_usdc))
     return {**event_stats, **summary_stats}
@@ -654,6 +673,12 @@ def parse_args() -> argparse.Namespace:
         help="Fallback Fee Structure V2 rate for fee-enabled categories not in the explicit map",
     )
     ap.add_argument("--min-touch-volume-usdc", type=float, default=0.0)
+    ap.add_argument(
+        "--time-bucket-mode",
+        choices=("standard", "short", "relative"),
+        default=DEFAULT_TIME_BUCKET_MODE,
+        help="Bucket mode for time_to_close aggregation",
+    )
     return ap.parse_args()
 
 
@@ -672,6 +697,7 @@ def main() -> None:
         max_duration_hours=float(args.max_duration_hours),
         default_fee_rate=float(args.default_fee_rate),
         min_touch_volume_usdc=float(args.min_touch_volume_usdc),
+        time_bucket_mode=str(args.time_bucket_mode),
     )
     logger.info("Research DB written to %s", args.output_db)
     for key in sorted(stats):

@@ -114,6 +114,51 @@ class AnalyzeTakerResolutionTests(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_relative_time_bucket_mode_materializes_relative_buckets(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset_db = root / "polymarket_dataset.db"
+            tape_db = root / "historical_tape.db"
+            output_db = root / "taker_resolution_research.db"
+
+            self._create_dataset_db(dataset_db)
+            self._create_tape_db(tape_db)
+
+            stats = build_taker_resolution_research(
+                dataset_db_path=dataset_db,
+                tape_db_path=tape_db,
+                output_db_path=output_db,
+                price_step=0.1,
+                direction_gap=0.1,
+                direction_lookback_sec=300,
+                touch_volume_lookback_sec=60,
+                order_size_shares=100.0,
+                min_duration_hours=0.25,
+                max_duration_hours=0.25,
+                default_fee_rate=0.05,
+                min_touch_volume_usdc=0.0,
+                time_bucket_mode="relative",
+            )
+
+            self.assertEqual(stats["resolution_events"], 8)
+
+            conn = sqlite3.connect(output_db)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT time_to_close_bucket, time_bucket_mode
+                    FROM taker_resolution_summary
+                    ORDER BY time_to_close_bucket
+                    """
+                ).fetchall()
+                self.assertEqual(
+                    [(row["time_to_close_bucket"], row["time_bucket_mode"]) for row in rows],
+                    [("40_60pct", "relative")],
+                )
+            finally:
+                conn.close()
+
     def _create_dataset_db(self, path: Path) -> None:
         conn = sqlite3.connect(path)
         conn.executescript(
