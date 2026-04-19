@@ -31,4 +31,7 @@ It is **separate** from:
 Phase 0 design and decision artifacts live in:
 - `docs/phase0/`
 
+Notable Phase 0 clarification already captured there:
+- `trigger_definition_alignment.md` documents the exact gap between historical research (`trade-price` first-touch) and live MVP semantics (`best_ask` first-touch), plus why the current historical dataset cannot honestly remove that gap.
+
 These docs are intended to be concrete enough that a developer can implement Phase 1 without reopening core design debates.

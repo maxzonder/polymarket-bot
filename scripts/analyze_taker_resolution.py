@@ -418,6 +418,9 @@ def build_event_tables(
         [
             ("dataset_db_path", str(dataset_db_path)),
             ("tape_db_path", str(tape_db_path)),
+            ("trigger_source", "trade_price_first_touch"),
+            ("historical_data_contract", "historical_tape.db trade tape only; no historical orderbook/L2/best_ask history"),
+            ("live_mvp_trigger_source", "best_ask_first_touch"),
             ("price_levels", ",".join(f"{level:.4f}" for level in price_levels)),
             ("direction_gap", f"{direction_gap:.4f}"),
             ("direction_lookback_sec", str(direction_lookback_sec)),
@@ -653,7 +656,8 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description=(
             "Build taker hold-to-resolution research tables from historical tape. "
-            "Entry happens at first touch price, with Fee Structure V2 entry fee applied on fee-enabled markets."
+            "Research trigger semantics here are trade-price first-touch from historical_tape.db, not live best_ask-touch. "
+            "Entry happens at first touch trade price, with Fee Structure V2 entry fee applied on fee-enabled markets."
         )
     )
     ap.add_argument("--db", default=str(DB_PATH), help="Path to polymarket_dataset.db")
