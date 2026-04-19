@@ -4,7 +4,7 @@ from .config import ShortHorizonConfig
 from .events import BookUpdate, MarketStateUpdate
 from .lifecycle import compute_lifecycle_fraction, is_in_bucket
 from .models import MarketState, OrderIntent, SkipDecision
-from .storage import IntentStore
+from .storage import RuntimeStore
 from .touch import FirstTouchTracker
 
 
@@ -19,13 +19,15 @@ class ShortHorizonEngine:
     - persist order intents for the execution layer to consume later
     """
 
-    def __init__(self, *, config: ShortHorizonConfig, intent_store: IntentStore):
+    def __init__(self, *, config: ShortHorizonConfig, intent_store: RuntimeStore):
         self.config = config
-        self.intent_store = intent_store
+        self.store = intent_store
         self.touch_tracker = FirstTouchTracker(config.triggers.price_levels)
         self.market_state_by_token: dict[str, MarketState] = {}
 
     def on_market_state(self, event: MarketStateUpdate) -> None:
+        self.store.append_event(event)
+        self.store.upsert_market_state(event)
         self.market_state_by_token[event.token_id] = MarketState(
             market_id=event.market_id,
             token_id=event.token_id,
@@ -41,6 +43,7 @@ class ShortHorizonEngine:
         )
 
     def on_book_update(self, event: BookUpdate) -> list[OrderIntent | SkipDecision]:
+        self.store.append_event(event)
         touches = self.touch_tracker.observe_best_ask(
             market_id=event.market_id,
             token_id=event.token_id,
@@ -53,6 +56,12 @@ class ShortHorizonEngine:
         state = self.market_state_by_token.get(event.token_id)
         outputs: list[OrderIntent | SkipDecision] = []
         for touch in touches:
+            self.store.record_first_touch(
+                market_id=touch.market_id,
+                token_id=touch.token_id,
+                level=touch.level,
+                event_time_ms=touch.event_time_ms,
+            )
             skip = self._gate_touch(event=event, state=state, level=touch.level)
             if skip is not None:
                 outputs.append(skip)
@@ -78,7 +87,7 @@ class ShortHorizonEngine:
                 lifecycle_fraction=float(lifecycle_fraction),
                 event_time_ms=event.event_time_ms,
             )
-            self.intent_store.persist_intent(intent)
+            self.store.persist_intent(intent)
             outputs.append(intent)
         return outputs
 

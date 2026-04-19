@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
+import sys
+import tempfile
 import unittest
 from pathlib import Path
-import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
@@ -13,7 +15,7 @@ from short_horizon.config import ShortHorizonConfig
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.events import BookUpdate, MarketStateUpdate
 from short_horizon.models import OrderIntent, SkipDecision
-from short_horizon.storage import InMemoryIntentStore
+from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 
 
 class ShortHorizonEngineTest(unittest.TestCase):
@@ -59,6 +61,8 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(len(self.store.intents), 1)
         self.assertEqual(self.store.intents[0].entry_price, 0.55)
         self.assertEqual(self.store.intents[0].level, 0.55)
+        self.assertEqual(len(self.store.events), 3)
+        self.assertIn(("m1", "tok_yes", "first_touch_fired:0.55"), self.store.strategy_state)
 
     def test_non_btc_eth_touch_is_skipped(self) -> None:
         self.engine.on_market_state(self._market_state(asset_slug="dogecoin"))
@@ -83,6 +87,84 @@ class ShortHorizonEngineTest(unittest.TestCase):
         later_outputs = self.engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
         self.assertEqual(later_outputs, [])
         self.assertEqual(len(self.store.intents), 0)
+
+
+class SQLiteRuntimeStoreTest(unittest.TestCase):
+    def _market_state(self) -> MarketStateUpdate:
+        return MarketStateUpdate(
+            event_time_ms=200_000,
+            ingest_time_ms=200_050,
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            start_time_ms=0,
+            end_time_ms=900_000,
+            is_active=True,
+            metadata_is_fresh=True,
+            fee_rate_bps=10.0,
+            fee_metadata_age_ms=1_000,
+        )
+
+    def _book(self, *, event_time_ms: int, best_ask: float) -> BookUpdate:
+        return BookUpdate(
+            event_time_ms=event_time_ms,
+            ingest_time_ms=event_time_ms + 20,
+            market_id="m1",
+            token_id="tok_yes",
+            best_bid=best_ask - 0.01,
+            best_ask=best_ask,
+        )
+
+    def test_sqlite_store_persists_run_market_events_and_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_test_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=store)
+                engine.on_market_state(self._market_state())
+                engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54))
+                outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+                self.assertEqual(len(outputs), 1)
+                self.assertIsInstance(outputs[0], OrderIntent)
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    run_count = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
+                    market_row = conn.execute(
+                        "SELECT market_status, condition_id, question FROM markets WHERE market_id = 'm1'"
+                    ).fetchone()
+                    order_row = conn.execute(
+                        "SELECT state, price, size FROM orders WHERE order_id LIKE 'm1:tok_yes:0.55:%'"
+                    ).fetchone()
+                    event_count = conn.execute("SELECT COUNT(*) FROM events_log WHERE run_id = 'run_test_001'").fetchone()[0]
+                    state_row = conn.execute(
+                        "SELECT state_key, state_value_json FROM strategy_state WHERE run_id = 'run_test_001'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(run_count, 1)
+                self.assertEqual(market_row[0], "active")
+                self.assertEqual(market_row[1], "c1")
+                self.assertEqual(market_row[2], "Bitcoin Up or Down?")
+                self.assertEqual(order_row[0], "intent")
+                self.assertAlmostEqual(order_row[1], 0.55)
+                self.assertAlmostEqual(order_row[2], 10.0 / 0.55)
+                self.assertEqual(event_count, 3)
+                self.assertEqual(state_row[0], "first_touch_fired:0.55")
+                self.assertIn('"level": 0.55', state_row[1])
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":
