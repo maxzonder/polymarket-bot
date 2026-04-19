@@ -206,6 +206,7 @@ class LiveDepthCollector:
         self.books: dict[str, BookState] = {}
         self.tokens_by_id: dict[str, MarketToken] = {}
         self.last_best_ask: dict[tuple[str, float], Optional[float]] = {}
+        self.fired_touches: set[tuple[str, str, float]] = set()
         self.active_probes: dict[str, SurvivalProbe] = {}
         self.completed_probes = 0
         self.csv = CsvSink(Path(args.output_csv))
@@ -444,9 +445,10 @@ class LiveDepthCollector:
         while True:
             await asyncio.sleep(self.args.heartbeat_interval_sec)
             self.logger.info(
-                "Heartbeat: subscribed_tokens=%s books=%s active_probes=%s completed_probes=%s discovery=%s",
+                "Heartbeat: subscribed_tokens=%s books=%s fired_touches=%s active_probes=%s completed_probes=%s discovery=%s",
                 len(self.tokens_by_id),
                 len(self.books),
+                len(self.fired_touches),
                 len(self.active_probes),
                 self.completed_probes,
                 self.last_discovery_stats,
@@ -583,11 +585,15 @@ class LiveDepthCollector:
         best_ask = float(book.best_ask)
         for level in self.args.levels:
             key = (token_id, level)
+            fired_key = (token.market_id, token_id, level)
             prev = self.last_best_ask.get(key)
             self.last_best_ask[key] = best_ask
             if prev is None:
                 continue
+            if fired_key in self.fired_touches:
+                continue
             if prev < level <= best_ask:
+                self.fired_touches.add(fired_key)
                 probe_id = f"{token_id}:{level:.2f}:{book.last_event_ts_ms or int(time.time()*1000)}"
                 if probe_id in self.active_probes:
                     continue
@@ -606,7 +612,7 @@ class LiveDepthCollector:
                 )
                 self.active_probes[probe_id] = probe
                 self.logger.info(
-                    "Touch detected token=%s outcome=%s level=%.2f best_ask=%.4f fit10=%s fit50=%s fit100=%s",
+                    "Touch detected token=%s outcome=%s level=%.2f best_ask=%.4f fit10=%s fit50=%s fit100=%s first_touch_only=yes",
                     token.token_id,
                     token.outcome,
                     level,

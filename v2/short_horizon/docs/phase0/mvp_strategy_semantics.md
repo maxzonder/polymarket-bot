@@ -10,9 +10,14 @@ The MVP strategy is intentionally narrowed to the validated #115 slice:
 - `ascending`
 - relative bucket `20_40pct`
 - price levels `{0.55, 0.65, 0.70}`
+- asset tier filter `BTC + ETH` only for the first trading MVP
 - fee-aware taker on first touch
 - resolution exit
 - all-side aggregate first
+
+Phase 0 language-gate outcome:
+- implement the first live MVP in **Python**
+- keep the Rust path deferred unless later live evidence materially changes the latency case
 
 This is an **execution-validation MVP**, not a generalized multi-strategy engine yet.
 The architecture should remain extensible, but the first implementation target is exactly this slice.
@@ -28,6 +33,7 @@ Enumerate live markets eligible for the MVP strategy.
 In live mode, the bot maintains a working set of active markets satisfying all of:
 - market is active/open for trading
 - market duration is exactly 15 minutes within a narrow tolerance
+- market belongs to the MVP asset tier filter (`BTC` / `ETH` only)
 - market metadata is sufficiently fresh to compute lifecycle fraction
 - fee metadata is present and fresh enough for order decisions
 
@@ -45,6 +51,16 @@ Initial expected source path:
 - metadata bootstrap via Gamma API or equivalent Polymarket metadata endpoint
 - live orderbook / trades / user execution updates via CLOB websocket-first event flow
 - REST only as bootstrap, fallback, or reconciliation support path, not as the main live event path
+
+### MVP asset scope refinement
+For the first live trading MVP, the strategy universe is intentionally restricted to the deepest short-horizon asset tier:
+- Bitcoin
+- Ethereum
+
+Reason:
+- live depth measurements showed BTC/ETH are materially thicker than the rest of the short-horizon universe
+- at `$10`, the validated `20–40%` lifecycle slice remains tradable with acceptable throughput
+- broader asset coverage can come later after the execution path is stable
 
 ### Refresh policy
 - metadata bootstrap / universe refresh at a fixed interval, default every `30s`

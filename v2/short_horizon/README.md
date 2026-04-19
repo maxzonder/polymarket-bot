@@ -11,9 +11,15 @@ The MVP is intentionally narrowed to the single validated slice from `#115`:
 - `ascending`
 - relative bucket `20_40pct`
 - price levels `{0.55, 0.65, 0.70}`
+- BTC + ETH asset tier only
 - fee-aware taker on first touch
 - resolution exit
 - all-side aggregate first
+
+Current implementation direction after Phase 0:
+- Python-first
+- `$10` per signal
+- no intra-lifecycle re-arm after first touch
 
 This folder is for the new execution-grade bot path.
 It is **separate** from:

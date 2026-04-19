@@ -3,6 +3,13 @@
 strategy_id: short_horizon_15m_touch_v1
 mode_default: replay
 
+runtime:
+  implementation_language: python
+
+universe:
+  allowed_assets: [bitcoin, ethereum]
+  allowed_series_keywords: [bitcoin, ethereum, btc, eth]
+
 market_discovery:
   refresh_interval_seconds: 30
   target_duration_seconds: 900
