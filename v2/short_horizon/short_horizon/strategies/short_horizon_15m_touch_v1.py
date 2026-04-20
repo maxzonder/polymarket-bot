@@ -8,7 +8,7 @@ from ..core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCan
 from ..core.lifecycle import compute_lifecycle_fraction
 from ..core.models import MarketState, OrderIntent, SkipDecision, TouchSignal
 from ..risk import gate_touch
-from ..strategy_api import Noop, PlaceOrder, StrategyIntent
+from ..strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 
 
 class FirstTouchTracker:
@@ -60,11 +60,11 @@ class ShortHorizon15mTouchStrategy:
         self.touch_tracker = FirstTouchTracker(config.triggers.price_levels)
         self.market_state_by_token: dict[str, MarketState] = {}
         self.active_order_ids_by_market_token: dict[tuple[str, str], str] = {}
+        self.active_order_states_by_market_token: dict[tuple[str, str], OrderState] = {}
 
     def on_market_event(self, event: BookUpdate | MarketStateUpdate | TradeTick) -> list[StrategyIntent]:
         if isinstance(event, MarketStateUpdate):
-            self.on_market_state(event)
-            return []
+            return self.on_market_state(event)
         if isinstance(event, TradeTick):
             return []
 
@@ -98,14 +98,18 @@ class ShortHorizon15mTouchStrategy:
         key = (event.market_id, event.token_id)
         if isinstance(event, OrderAccepted):
             self.active_order_ids_by_market_token[key] = event.order_id
+            self.active_order_states_by_market_token[key] = OrderState.ACCEPTED
             return []
         if isinstance(event, OrderFilled):
             if event.remaining_size > 1e-12:
                 self.active_order_ids_by_market_token[key] = event.order_id
+                self.active_order_states_by_market_token[key] = OrderState.PARTIALLY_FILLED
             else:
                 self.active_order_ids_by_market_token.pop(key, None)
+                self.active_order_states_by_market_token.pop(key, None)
             return []
         self.active_order_ids_by_market_token.pop(key, None)
+        self.active_order_states_by_market_token.pop(key, None)
         return []
 
     def on_timer(self, timer: TimerEvent) -> list[StrategyIntent]:
@@ -113,13 +117,16 @@ class ShortHorizon15mTouchStrategy:
 
     def hydrate_open_orders(self, rows: Iterable[dict]) -> None:
         self.active_order_ids_by_market_token.clear()
+        self.active_order_states_by_market_token.clear()
         for row in rows:
             state = OrderState(str(row["state"]))
             if state in {OrderState.REJECTED, OrderState.FILLED, OrderState.CANCEL_CONFIRMED, OrderState.EXPIRED, OrderState.REPLACED}:
                 continue
-            self.active_order_ids_by_market_token[(str(row["market_id"]), str(row["token_id"]))] = str(row["order_id"])
+            key = (str(row["market_id"]), str(row["token_id"]))
+            self.active_order_ids_by_market_token[key] = str(row["order_id"])
+            self.active_order_states_by_market_token[key] = state
 
-    def on_market_state(self, event: MarketStateUpdate) -> None:
+    def on_market_state(self, event: MarketStateUpdate) -> list[StrategyIntent]:
         self.market_state_by_token[event.token_id] = MarketState(
             market_id=event.market_id,
             token_id=event.token_id,
@@ -134,6 +141,23 @@ class ShortHorizon15mTouchStrategy:
             fee_fetched_at_ms=event.fee_fetched_at_ms,
             fee_metadata_age_ms=event.fee_metadata_age_ms,
         )
+        if self.config.execution.hold_to_resolution:
+            return []
+        key = (event.market_id, event.token_id)
+        order_id = self.active_order_ids_by_market_token.get(key)
+        order_state = self.active_order_states_by_market_token.get(key)
+        if not order_id or order_state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
+            return []
+        if event.is_active and event.event_time_ms < event.end_time_ms:
+            return []
+        self.active_order_states_by_market_token[key] = OrderState.CANCEL_REQUESTED
+        return [
+            CancelOrder(
+                market_id=event.market_id,
+                token_id=event.token_id,
+                reason="market_inactive_or_window_closed",
+            )
+        ]
 
     def detect_touches(self, event: BookUpdate) -> list[TouchSignal]:
         return self.touch_tracker.observe_best_ask(

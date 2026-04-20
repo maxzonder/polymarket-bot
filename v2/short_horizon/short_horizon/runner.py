@@ -120,8 +120,13 @@ async def drive_runtime_event_stream(
 
 def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution: ExecutionEngine) -> tuple[int, int]:
     if isinstance(event, MarketStateUpdate):
-        runtime.on_market_state(event)
-        return 0, 0
+        outputs = runtime.on_market_state(event)
+        return 0, apply_strategy_intents(
+            outputs,
+            runtime=runtime,
+            execution=execution,
+            fallback_event_time_ms=event.event_time_ms,
+        )
 
     if isinstance(event, BookUpdate):
         outputs = runtime.on_book_update(event)
@@ -130,13 +135,22 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
         for output in outputs:
             if isinstance(output, OrderIntent):
                 order_intents += 1
-                synthetic_order_events += len(execution.submit(output, event_time_ms=event.event_time_ms))
+                emitted_events = execution.submit(output, event_time_ms=event.event_time_ms)
+                synthetic_order_events += len(emitted_events)
+                for emitted_event in emitted_events:
+                    synthetic_order_events += apply_strategy_intents(
+                        runtime.strategy.on_order_event(emitted_event),
+                        runtime=runtime,
+                        execution=execution,
+                        fallback_event_time_ms=emitted_event.event_time_ms,
+                    )
         return order_intents, synthetic_order_events
 
     if isinstance(event, TradeTick):
         runtime.store.append_event(event)
         return 0, apply_strategy_intents(
             runtime.strategy.on_market_event(event),
+            runtime=runtime,
             execution=execution,
             fallback_event_time_ms=event.event_time_ms,
         )
@@ -145,6 +159,7 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
         runtime.store.append_event(event)
         return 0, apply_strategy_intents(
             runtime.strategy.on_timer(event),
+            runtime=runtime,
             execution=execution,
             fallback_event_time_ms=event.event_time_ms,
         )
@@ -156,6 +171,7 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
         runtime.store.append_event_log(canonical_event, order_id=getattr(canonical_event, "order_id", None))
         return 0, apply_strategy_intents(
             runtime.strategy.on_order_event(canonical_event),
+            runtime=runtime,
             execution=execution,
             fallback_event_time_ms=canonical_event.event_time_ms,
         )
@@ -163,17 +179,26 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
     raise TypeError(f"Unsupported runner event: {type(event)!r}")
 
 
-def apply_strategy_intents(intents: list[StrategyIntent], *, execution: ExecutionEngine, fallback_event_time_ms: int) -> int:
+def apply_strategy_intents(intents: list[StrategyIntent], *, runtime: StrategyRuntime, execution: ExecutionEngine, fallback_event_time_ms: int) -> int:
     synthetic_events = 0
     for intent in intents:
+        emitted_events = []
         if isinstance(intent, PlaceOrder):
-            synthetic_events += len(execution.handle_intent(intent, event_time_ms=fallback_event_time_ms))
+            emitted_events = execution.handle_intent(intent, event_time_ms=fallback_event_time_ms)
         elif isinstance(intent, CancelOrder):
-            synthetic_events += len(execution.handle_intent(intent, event_time_ms=fallback_event_time_ms))
+            emitted_events = execution.handle_intent(intent, event_time_ms=fallback_event_time_ms)
         elif isinstance(intent, Noop):
             continue
         else:
             raise TypeError(f"Unsupported strategy intent: {type(intent)!r}")
+        synthetic_events += len(emitted_events)
+        for emitted_event in emitted_events:
+            synthetic_events += apply_strategy_intents(
+                runtime.strategy.on_order_event(emitted_event),
+                runtime=runtime,
+                execution=execution,
+                fallback_event_time_ms=emitted_event.event_time_ms,
+            )
     return synthetic_events
 
 

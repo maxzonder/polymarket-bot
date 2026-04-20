@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..core.events import BookUpdate, MarketStateUpdate
 from ..core.models import OrderIntent, SkipDecision
 from ..storage.runtime import RuntimeStore
-from ..strategy_api import TouchStrategy
+from ..strategy_api import StrategyIntent, TouchStrategy
 from ..telemetry import event_log_fields, get_logger
 
 
@@ -21,11 +21,11 @@ class StrategyRuntime:
         self.store = intent_store
         self.logger = get_logger("short_horizon.runtime", run_id=intent_store.current_run_id)
 
-    def on_market_state(self, event: MarketStateUpdate) -> None:
+    def on_market_state(self, event: MarketStateUpdate) -> list[StrategyIntent]:
         log = self.logger.bind(**event_log_fields(event))
         self.store.append_event(event)
         self.store.upsert_market_state(event)
-        self.strategy.on_market_state(event)
+        outputs = self.strategy.on_market_state(event)
         log.info(
             "market_state_ingested",
             condition_id=event.condition_id,
@@ -33,6 +33,7 @@ class StrategyRuntime:
             status=event.status,
             asset_slug=event.asset_slug,
         )
+        return outputs
 
     def on_book_update(self, event: BookUpdate) -> list[OrderIntent | SkipDecision]:
         log = self.logger.bind(**event_log_fields(event))

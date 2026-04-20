@@ -53,7 +53,7 @@ class Strategy(Protocol):
 
 
 class TouchStrategy(Protocol):
-    def on_market_state(self, event: MarketStateUpdate) -> None:
+    def on_market_state(self, event: MarketStateUpdate) -> list[StrategyIntent]:
         ...
 
     def detect_touches(self, event: BookUpdate):

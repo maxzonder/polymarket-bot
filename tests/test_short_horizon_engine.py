@@ -16,7 +16,7 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
-from short_horizon.config import ShortHorizonConfig
+from short_horizon.config import ExecutionConfig, ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
@@ -27,7 +27,7 @@ from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
-from short_horizon.strategy_api import Noop, PlaceOrder
+from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
 from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, VenueApiCredentials, VenueOrderState, VenuePlaceResult
 
@@ -237,6 +237,88 @@ class StrategyApiContractTest(unittest.TestCase):
             )
         )
         self.assertEqual(strategy.active_order_ids_by_market_token, {})
+
+    def test_touch_strategy_emits_cancel_when_market_closes_and_hold_to_resolution_disabled(self) -> None:
+        strategy = ShortHorizon15mTouchStrategy(
+            config=ShortHorizonConfig(
+                execution=ExecutionConfig(
+                    target_trade_size_usdc=10.0,
+                    stale_market_data_threshold_ms=2000,
+                    hold_to_resolution=False,
+                )
+            )
+        )
+        strategy.hydrate_open_orders(
+            [
+                {
+                    "order_id": "ord_live_1",
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "state": OrderState.ACCEPTED,
+                }
+            ]
+        )
+
+        outputs = strategy.on_market_event(
+            MarketStateUpdate(
+                event_time_ms=900_000,
+                ingest_time_ms=900_050,
+                market_id="m1",
+                token_id="tok_yes",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                asset_slug="bitcoin",
+                start_time_ms=0,
+                end_time_ms=900_000,
+                is_active=False,
+                metadata_is_fresh=True,
+                fee_rate_bps=10.0,
+                fee_metadata_age_ms=1_000,
+            )
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], CancelOrder)
+        self.assertEqual(outputs[0].reason, "market_inactive_or_window_closed")
+
+    def test_touch_strategy_does_not_repeat_cancel_once_requested(self) -> None:
+        strategy = ShortHorizon15mTouchStrategy(
+            config=ShortHorizonConfig(
+                execution=ExecutionConfig(
+                    target_trade_size_usdc=10.0,
+                    stale_market_data_threshold_ms=2000,
+                    hold_to_resolution=False,
+                )
+            )
+        )
+        strategy.hydrate_open_orders(
+            [
+                {
+                    "order_id": "ord_live_1",
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "state": OrderState.ACCEPTED,
+                }
+            ]
+        )
+        event = MarketStateUpdate(
+            event_time_ms=900_000,
+            ingest_time_ms=900_050,
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            start_time_ms=0,
+            end_time_ms=900_000,
+            is_active=False,
+            metadata_is_fresh=True,
+            fee_rate_bps=10.0,
+            fee_metadata_age_ms=1_000,
+        )
+
+        self.assertEqual(len(strategy.on_market_event(event)), 1)
+        self.assertEqual(strategy.on_market_event(event), [])
 
 
 class ShortHorizonEngineTest(unittest.TestCase):
@@ -1745,6 +1827,97 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(order_row[1], "venue-live-1")
             self.assertEqual(order_row[2], "canceled")
             self.assertAlmostEqual(order_row[3], 0.0)
+            self.assertEqual(canceled_events, 1)
+
+    async def test_live_runner_emits_strategy_cancel_when_market_closes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_exec_strategy_cancel.sqlite3"
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                    MarketStateUpdate(
+                        event_time_ms=900_000,
+                        ingest_time_ms=900_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=False,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=900_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                ]
+            )
+            client = _FakeLiveRunnerClient()
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_exec_strategy_cancel_test_001",
+                config=ShortHorizonConfig(
+                    execution=ExecutionConfig(
+                        target_trade_size_usdc=10.0,
+                        stale_market_data_threshold_ms=2000,
+                        hold_to_resolution=False,
+                    )
+                ),
+                config_hash="test-config",
+                source=source,
+                max_events=4,
+                execution_mode=ExecutionMode.LIVE,
+                execution_client=client,
+            )
+
+            self.assertEqual(summary.run_id, "live_exec_strategy_cancel_test_001")
+            self.assertEqual(client.cancel_calls, ["venue-live-1"])
+            conn = sqlite3.connect(db_path)
+            try:
+                order_row = conn.execute(
+                    "SELECT state, venue_order_status FROM orders WHERE run_id = 'live_exec_strategy_cancel_test_001' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()
+                canceled_events = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'live_exec_strategy_cancel_test_001' AND event_type = 'OrderCanceled' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(order_row[0], "cancel_confirmed")
+            self.assertEqual(order_row[1], "canceled")
             self.assertEqual(canceled_events, 1)
 
     def test_build_live_runtime_hydrates_strategy_open_orders_from_store(self) -> None:
