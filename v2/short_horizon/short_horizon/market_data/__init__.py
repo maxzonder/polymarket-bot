@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ..core.events import NormalizedEvent
 from ..replay import ReplayEventSource
+from .live_source import LiveEventSource, expand_market_state_update, extract_market_token_ids
 
 
 class MarketDataSource:
@@ -23,4 +24,4 @@ class MarketDataSource:
         return None
 
 
-__all__ = ["MarketDataSource"]
+__all__ = ["LiveEventSource", "MarketDataSource", "expand_market_state_update", "extract_market_token_ids"]

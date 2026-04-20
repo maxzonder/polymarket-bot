@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import time
+from collections.abc import AsyncIterator
+from typing import Any
+
+from ..core.events import MarketStateUpdate, NormalizedEvent
+from ..telemetry import get_logger
+from ..venue_polymarket import BookNormalizer, FeeMetadataRefreshLoop, MarketRefreshLoop, PolymarketWebsocket, TradeNormalizer
+
+
+class LiveEventSource:
+    """Composite Polymarket live source for normalized short-horizon events."""
+
+    def __init__(
+        self,
+        *,
+        market_refresh: MarketRefreshLoop | AsyncIterator[MarketStateUpdate] | None = None,
+        fee_refresh: FeeMetadataRefreshLoop | AsyncIterator[MarketStateUpdate] | None = None,
+        websocket: PolymarketWebsocket | Any | None = None,
+        book_normalizer: BookNormalizer | None = None,
+        trade_normalizer: TradeNormalizer | None = None,
+        clock_ms: callable | None = None,
+    ):
+        self.market_refresh = market_refresh or MarketRefreshLoop()
+        self.fee_refresh = fee_refresh or FeeMetadataRefreshLoop()
+        self.websocket = websocket or PolymarketWebsocket()
+        self.book_normalizer = book_normalizer or BookNormalizer()
+        self.trade_normalizer = trade_normalizer or TradeNormalizer()
+        self.clock_ms = clock_ms or _default_clock_ms
+        self.logger = get_logger("short_horizon.market_data.live_source")
+        self._queue: asyncio.Queue[NormalizedEvent | object] = asyncio.Queue()
+        self._sentinel = object()
+        self._forward_tasks: list[asyncio.Task[None]] = []
+        self._market_tokens: dict[str, set[str]] = {}
+        self._started = False
+
+    @property
+    def events(self) -> AsyncIterator[NormalizedEvent]:
+        return self
+
+    def __aiter__(self) -> AsyncIterator[NormalizedEvent]:
+        return self
+
+    async def __anext__(self) -> NormalizedEvent:
+        item = await self._queue.get()
+        if item is self._sentinel:
+            raise StopAsyncIteration
+        return item  # type: ignore[return-value]
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        await _maybe_call(self.websocket, "connect")
+        self._forward_tasks = [
+            asyncio.create_task(self._consume_market_refresh(), name="live_source_market_refresh"),
+            asyncio.create_task(self._consume_fee_refresh(), name="live_source_fee_refresh"),
+            asyncio.create_task(self._consume_websocket(), name="live_source_websocket"),
+        ]
+        await _maybe_call(self.market_refresh, "start")
+        await _maybe_call(self.fee_refresh, "start")
+
+    async def stop(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        for task in self._forward_tasks:
+            task.cancel()
+        for task in self._forward_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._forward_tasks.clear()
+        await _maybe_call(self.market_refresh, "stop")
+        await _maybe_call(self.fee_refresh, "stop")
+        await _maybe_call(self.websocket, "close")
+        await self._queue.put(self._sentinel)
+
+    async def _consume_market_refresh(self) -> None:
+        async for event in self.market_refresh:
+            await self._reconcile_market_subscriptions(event)
+            for token_event in expand_market_state_update(event):
+                await self._queue.put(token_event)
+
+    async def _consume_fee_refresh(self) -> None:
+        async for event in self.fee_refresh:
+            for token_event in expand_market_state_update(event):
+                await self._queue.put(token_event)
+
+    async def _consume_websocket(self) -> None:
+        while True:
+            raw_message = await self.websocket.recv()
+            ingest_time_ms = self.clock_ms()
+            payload = _decode_json_payload(raw_message)
+            book_events = self.book_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
+            trade_events = self.trade_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
+            for event in [*book_events, *trade_events]:
+                await self._queue.put(event)
+
+    async def _reconcile_market_subscriptions(self, event: MarketStateUpdate) -> None:
+        market_id = str(event.market_id)
+        previous_tokens = self._market_tokens.get(market_id, set())
+        current_tokens = extract_market_token_ids(event) if bool(event.is_active) else set()
+        added = current_tokens - previous_tokens
+        removed = previous_tokens - current_tokens
+        if added:
+            await self.websocket.subscribe(sorted(added))
+        if removed:
+            await self.websocket.unsubscribe(sorted(removed))
+        if current_tokens:
+            self._market_tokens[market_id] = current_tokens
+        else:
+            self._market_tokens.pop(market_id, None)
+        if added or removed:
+            self.logger.info(
+                "live_source_market_subscription_reconciled",
+                market_id=market_id,
+                added=len(added),
+                removed=len(removed),
+                subscribed_markets=len(self._market_tokens),
+            )
+
+
+async def _maybe_call(target: Any, method_name: str) -> Any:
+    method = getattr(target, method_name, None)
+    if not callable(method):
+        return None
+    result = method()
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
+
+
+def expand_market_state_update(event: MarketStateUpdate) -> list[MarketStateUpdate]:
+    token_ids = list(dict.fromkeys(token_id for token_id in extract_market_token_ids(event) if token_id))
+    if not token_ids:
+        if event.token_id is not None:
+            return [event]
+        return []
+    expanded: list[MarketStateUpdate] = []
+    for token_id in token_ids:
+        expanded.append(
+            MarketStateUpdate(
+                event_time_ms=event.event_time_ms,
+                ingest_time_ms=event.ingest_time_ms,
+                market_id=event.market_id,
+                condition_id=event.condition_id,
+                question=event.question,
+                status=event.status,
+                start_time_ms=event.start_time_ms,
+                end_time_ms=event.end_time_ms,
+                duration_seconds=event.duration_seconds,
+                token_yes_id=event.token_yes_id,
+                token_no_id=event.token_no_id,
+                fee_rate_bps=event.fee_rate_bps,
+                fee_fetched_at_ms=event.fee_fetched_at_ms,
+                fees_enabled=event.fees_enabled,
+                is_ascending_market=event.is_ascending_market,
+                market_source_revision=event.market_source_revision,
+                source=event.source,
+                run_id=event.run_id,
+                token_id=token_id,
+                asset_slug=event.asset_slug,
+                is_active=event.is_active,
+                metadata_is_fresh=event.metadata_is_fresh,
+                fee_metadata_age_ms=event.fee_metadata_age_ms,
+            )
+        )
+    return expanded
+
+
+def extract_market_token_ids(event: MarketStateUpdate) -> set[str]:
+    token_ids: set[str] = set()
+    if event.token_yes_id:
+        token_ids.add(str(event.token_yes_id))
+    if event.token_no_id:
+        token_ids.add(str(event.token_no_id))
+    if event.token_id:
+        token_ids.add(str(event.token_id))
+    return token_ids
+
+
+def _decode_json_payload(raw_message: Any) -> Any:
+    if isinstance(raw_message, (dict, list)):
+        return raw_message
+    if isinstance(raw_message, bytes):
+        raw_message = raw_message.decode("utf-8")
+    if isinstance(raw_message, str):
+        return json.loads(raw_message)
+    raise TypeError(f"Unsupported websocket message type: {type(raw_message)!r}")
+
+
+def _default_clock_ms() -> int:
+    return int(time.time() * 1000)
+
+
+__all__ = ["LiveEventSource", "expand_market_state_update", "extract_market_token_ids"]
