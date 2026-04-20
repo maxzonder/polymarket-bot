@@ -9,6 +9,7 @@ from .markets import (
     discover_short_horizon_markets_sync,
     parse_market_discovery_rows,
 )
+from .market_refresh import MarketRefreshLoop
 
 
 class PolymarketVenueAdapter:
@@ -22,6 +23,7 @@ __all__ = [
     "DiscoveryStats",
     "DurationWindow",
     "MarketMetadata",
+    "MarketRefreshLoop",
     "PolymarketVenueAdapter",
     "UniverseFilter",
     "discover_short_horizon_markets",

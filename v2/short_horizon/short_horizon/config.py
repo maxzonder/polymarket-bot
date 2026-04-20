@@ -35,6 +35,11 @@ class FeesConfig:
 
 
 @dataclass(frozen=True)
+class MarketDiscoveryConfig:
+    refresh_interval_seconds: int = 30
+
+
+@dataclass(frozen=True)
 class ShortHorizonConfig:
     strategy_id: str = "short_horizon_15m_touch_v1"
     implementation_language: str = "python"
@@ -43,3 +48,4 @@ class ShortHorizonConfig:
     triggers: TriggerConfig = field(default_factory=TriggerConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     fees: FeesConfig = field(default_factory=FeesConfig)
+    market_discovery: MarketDiscoveryConfig = field(default_factory=MarketDiscoveryConfig)
