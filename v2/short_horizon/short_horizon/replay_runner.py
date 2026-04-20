@@ -2,28 +2,15 @@ from __future__ import annotations
 
 import argparse
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ShortHorizonConfig
-from .core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
-from .core.models import OrderIntent, SkipDecision
 from .core.runtime import StrategyRuntime
-from .execution import ExecutionEngine
 from .replay import ReplayEventSource
+from .runner import RunnerSummary, drive_runtime_events
 from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
-from .strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 from .telemetry import configure_logging, get_logger
-
-
-@dataclass(frozen=True)
-class ReplaySummary:
-    run_id: str
-    event_count: int
-    order_intents: int
-    synthetic_order_events: int
-    db_path: Path
 
 
 def build_replay_runtime(*, db_path: str | Path, run_id: str | None = None, config: ShortHorizonConfig | None = None, config_hash: str = "dev") -> StrategyRuntime:
@@ -39,82 +26,21 @@ def build_replay_runtime(*, db_path: str | Path, run_id: str | None = None, conf
     return StrategyRuntime(strategy=strategy, intent_store=store)
 
 
-def replay_file(*, event_log_path: str | Path, db_path: str | Path, run_id: str | None = None, config: ShortHorizonConfig | None = None, config_hash: str = "dev") -> ReplaySummary:
+def replay_file(*, event_log_path: str | Path, db_path: str | Path, run_id: str | None = None, config: ShortHorizonConfig | None = None, config_hash: str = "dev") -> RunnerSummary:
     runtime = build_replay_runtime(db_path=db_path, run_id=run_id, config=config, config_hash=config_hash)
     try:
         events = ReplayEventSource(event_log_path).load()
-        return replay_events(events=events, runtime=runtime)
+        return drive_runtime_events(
+            events=events,
+            runtime=runtime,
+            logger_name="short_horizon.replay_runner",
+            completed_event_name="replay_run_completed",
+        )
     finally:
         store = runtime.store
         close = getattr(store, "close", None)
         if callable(close):
             close()
-
-
-def replay_events(*, events: list, runtime: StrategyRuntime) -> ReplaySummary:
-    logger = get_logger("short_horizon.replay_runner", run_id=runtime.store.current_run_id)
-    execution = ExecutionEngine(store=runtime.store)
-    event_count = 0
-    order_intents = 0
-    synthetic_order_events = 0
-
-    for event in events:
-        event_count += 1
-        if isinstance(event, MarketStateUpdate):
-            runtime.on_market_state(event)
-            continue
-
-        if isinstance(event, BookUpdate):
-            outputs = runtime.on_book_update(event)
-            for output in outputs:
-                if isinstance(output, OrderIntent):
-                    order_intents += 1
-                    synthetic_order_events += len(execution.submit(output, event_time_ms=event.event_time_ms))
-            continue
-
-        runtime.store.append_event(event)
-
-        if isinstance(event, TradeTick):
-            synthetic_order_events += _apply_strategy_intents(
-                runtime.strategy.on_market_event(event),
-                execution=execution,
-                fallback_event_time_ms=event.event_time_ms,
-            )
-            continue
-
-        if isinstance(event, TimerEvent):
-            synthetic_order_events += _apply_strategy_intents(
-                runtime.strategy.on_timer(event),
-                execution=execution,
-                fallback_event_time_ms=event.event_time_ms,
-            )
-            continue
-
-        if isinstance(event, (OrderAccepted, OrderRejected, OrderFilled, OrderCanceled)):
-            synthetic_order_events += _apply_strategy_intents(
-                runtime.strategy.on_order_event(event),
-                execution=execution,
-                fallback_event_time_ms=event.event_time_ms,
-            )
-            continue
-
-        raise TypeError(f"Unsupported replay event: {type(event)!r}")
-
-    logger.info(
-        "replay_run_completed",
-        run_id=runtime.store.current_run_id,
-        input_events=event_count,
-        order_intents=order_intents,
-        synthetic_order_events=synthetic_order_events,
-    )
-    store_path = Path(getattr(runtime.store, "path", Path("<memory>")))
-    return ReplaySummary(
-        run_id=runtime.store.current_run_id,
-        event_count=event_count,
-        order_intents=order_intents,
-        synthetic_order_events=synthetic_order_events,
-        db_path=store_path,
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -128,20 +54,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def generate_run_id() -> str:
     return f"replay_{uuid.uuid4().hex[:12]}"
-
-
-def _apply_strategy_intents(intents: list[StrategyIntent], *, execution: ExecutionEngine, fallback_event_time_ms: int) -> int:
-    synthetic_events = 0
-    for intent in intents:
-        if isinstance(intent, PlaceOrder):
-            synthetic_events += len(execution.handle_intent(intent, event_time_ms=fallback_event_time_ms))
-        elif isinstance(intent, CancelOrder):
-            synthetic_events += len(execution.handle_intent(intent, event_time_ms=fallback_event_time_ms))
-        elif isinstance(intent, Noop):
-            continue
-        else:
-            raise TypeError(f"Unsupported strategy intent: {type(intent)!r}")
-    return synthetic_events
 
 
 def main(argv: list[str] | None = None) -> None:

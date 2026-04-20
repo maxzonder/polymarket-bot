@@ -18,6 +18,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, SyntheticFillRequest
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
+from short_horizon.live_runner import run_stub_live
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
@@ -376,6 +377,63 @@ class SQLiteRuntimeStoreTest(unittest.TestCase):
 
 
 class ReplayRunnerTest(unittest.TestCase):
+    def _sample_replay_rows(self) -> list[dict[str, object]]:
+        sample_events: list[dict[str, object]] = [
+            {
+                "event_type": "MarketStateUpdate",
+                "event_time": 200000,
+                "ingest_time": 200050,
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "condition_id": "c1",
+                "question": "Bitcoin Up or Down?",
+                "asset_slug": "bitcoin",
+                "status": "active",
+                "start_time": 0,
+                "end_time": 900000,
+                "is_active": True,
+                "metadata_is_fresh": True,
+                "fee_rate_bps": 10.0,
+                "fee_metadata_age_ms": 1000,
+                "source": "sample.market_state",
+            },
+            {
+                "event_type": "BookUpdate",
+                "event_time": 220000,
+                "ingest_time": 220020,
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "best_bid": 0.53,
+                "best_ask": 0.54,
+                "source": "sample.book",
+            },
+            {
+                "event_type": "BookUpdate",
+                "event_time": 225000,
+                "ingest_time": 225020,
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "best_bid": 0.54,
+                "best_ask": 0.55,
+                "source": "sample.book",
+            },
+        ]
+        for offset in range(3, 10):
+            event_time = 225000 + offset * 1000
+            sample_events.append(
+                {
+                    "event_type": "BookUpdate",
+                    "event_time": event_time,
+                    "ingest_time": event_time + 20,
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "best_bid": 0.55,
+                    "best_ask": 0.56,
+                    "source": "sample.book",
+                }
+            )
+        return sample_events
+
     def _market_state(self) -> MarketStateUpdate:
         return MarketStateUpdate(
             event_time_ms=200_000,
@@ -408,62 +466,7 @@ class ReplayRunnerTest(unittest.TestCase):
             tmp_path = Path(tmpdir)
             event_log_path = tmp_path / "sample_events.jsonl"
             db_path = tmp_path / "replay.sqlite3"
-            sample_events = [
-                {
-                    "event_type": "MarketStateUpdate",
-                    "event_time": 200000,
-                    "ingest_time": 200050,
-                    "market_id": "m1",
-                    "token_id": "tok_yes",
-                    "condition_id": "c1",
-                    "question": "Bitcoin Up or Down?",
-                    "asset_slug": "bitcoin",
-                    "status": "active",
-                    "start_time": 0,
-                    "end_time": 900000,
-                    "is_active": True,
-                    "metadata_is_fresh": True,
-                    "fee_rate_bps": 10.0,
-                    "fee_metadata_age_ms": 1000,
-                    "source": "sample.market_state",
-                },
-                {
-                    "event_type": "BookUpdate",
-                    "event_time": 220000,
-                    "ingest_time": 220020,
-                    "market_id": "m1",
-                    "token_id": "tok_yes",
-                    "best_bid": 0.53,
-                    "best_ask": 0.54,
-                    "source": "sample.book",
-                },
-                {
-                    "event_type": "BookUpdate",
-                    "event_time": 225000,
-                    "ingest_time": 225020,
-                    "market_id": "m1",
-                    "token_id": "tok_yes",
-                    "best_bid": 0.54,
-                    "best_ask": 0.55,
-                    "source": "sample.book",
-                },
-            ]
-            for offset in range(3, 10):
-                event_time = 225000 + offset * 1000
-                sample_events.append(
-                    {
-                        "event_type": "BookUpdate",
-                        "event_time": event_time,
-                        "ingest_time": event_time + 20,
-                        "market_id": "m1",
-                        "token_id": "tok_yes",
-                        "best_bid": 0.55,
-                        "best_ask": 0.56,
-                        "source": "sample.book",
-                    }
-                )
-
-            event_log_path.write_text("\n".join(json.dumps(row) for row in sample_events) + "\n", encoding="utf-8")
+            event_log_path.write_text("\n".join(json.dumps(row) for row in self._sample_replay_rows()) + "\n", encoding="utf-8")
 
             summary = replay_file(
                 event_log_path=event_log_path,
@@ -497,6 +500,40 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(event_count, 11)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
+
+    def test_live_runner_shell_uses_same_stub_event_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            event_log_path = tmp_path / "stub_live_events.jsonl"
+            db_path = tmp_path / "live.sqlite3"
+            event_log_path.write_text("\n".join(json.dumps(row) for row in self._sample_replay_rows()) + "\n", encoding="utf-8")
+
+            summary = run_stub_live(
+                stub_event_log_path=event_log_path,
+                db_path=db_path,
+                run_id="live_test_001",
+                config_hash="test-config",
+            )
+
+            self.assertEqual(summary.run_id, "live_test_001")
+            self.assertEqual(summary.event_count, 10)
+            self.assertEqual(summary.order_intents, 1)
+            self.assertEqual(summary.synthetic_order_events, 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                run_row = conn.execute(
+                    "SELECT run_id, mode FROM runs WHERE run_id = 'live_test_001'"
+                ).fetchone()
+                event_count = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'live_test_001'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(run_row[0], "live_test_001")
+            self.assertEqual(run_row[1], "live")
+            self.assertEqual(event_count, 11)
 
     def test_sqlite_repository_api_handles_transition_fill_and_reconciliation_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
