@@ -11,6 +11,7 @@ from .markets import (
     parse_market_discovery_rows,
 )
 from .market_refresh import MarketRefreshLoop
+from .trade_channel import TradeNormalizer
 from .websocket import PolymarketWebsocket
 
 
@@ -29,6 +30,7 @@ __all__ = [
     "MarketRefreshLoop",
     "PolymarketVenueAdapter",
     "PolymarketWebsocket",
+    "TradeNormalizer",
     "UniverseFilter",
     "discover_short_horizon_markets",
     "discover_short_horizon_markets_sync",
