@@ -10,6 +10,7 @@ from .markets import (
     parse_market_discovery_rows,
 )
 from .market_refresh import MarketRefreshLoop
+from .websocket import PolymarketWebsocket
 
 
 class PolymarketVenueAdapter:
@@ -25,6 +26,7 @@ __all__ = [
     "MarketMetadata",
     "MarketRefreshLoop",
     "PolymarketVenueAdapter",
+    "PolymarketWebsocket",
     "UniverseFilter",
     "discover_short_horizon_markets",
     "discover_short_horizon_markets_sync",
