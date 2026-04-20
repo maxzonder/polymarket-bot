@@ -7,60 +7,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, TextIO
 
+import structlog
+
 MANDATORY_FIELDS = ("run_id", "market_id", "order_id", "event_time", "ingest_time")
 _HANDLER_MARKER = "_short_horizon_structured"
-
-
-class StructuredJsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        structured = dict(getattr(record, "_structured", {}))
-        payload: dict[str, Any] = {
-            "logger": record.name,
-            "level": record.levelname.lower(),
-            "message": record.getMessage(),
-            "event": structured.pop("event", record.getMessage()),
-        }
-        for field in MANDATORY_FIELDS:
-            payload[field] = structured.pop(field, None)
-        payload.update(structured)
-        if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload, sort_keys=True, default=_json_default)
-
-
-class StructuredLogger:
-    def __init__(self, logger: logging.Logger, *, context: dict[str, Any] | None = None):
-        self._logger = logger
-        self._context = dict(context or {})
-
-    def bind(self, **context: Any) -> "StructuredLogger":
-        merged = dict(self._context)
-        for key, value in context.items():
-            if value is not None:
-                merged[key] = value
-        return StructuredLogger(self._logger, context=merged)
-
-    def debug(self, event: str, **fields: Any) -> None:
-        self._log(logging.DEBUG, event, **fields)
-
-    def info(self, event: str, **fields: Any) -> None:
-        self._log(logging.INFO, event, **fields)
-
-    def warning(self, event: str, **fields: Any) -> None:
-        self._log(logging.WARNING, event, **fields)
-
-    def error(self, event: str, **fields: Any) -> None:
-        self._log(logging.ERROR, event, **fields)
-
-    def exception(self, event: str, **fields: Any) -> None:
-        self._log(logging.ERROR, event, exc_info=True, **fields)
-
-    def _log(self, level: int, event: str, *, exc_info: bool = False, **fields: Any) -> None:
-        payload = {field: None for field in MANDATORY_FIELDS}
-        payload.update(self._context)
-        payload.update({key: value for key, value in fields.items() if value is not None})
-        payload["event"] = event
-        self._logger.log(level, event, extra={"_structured": payload}, exc_info=exc_info)
 
 
 def configure_logging(
@@ -78,13 +28,26 @@ def configure_logging(
             handler.close()
     handler = logging.StreamHandler(stream)
     setattr(handler, _HANDLER_MARKER, True)
-    handler.setFormatter(StructuredJsonFormatter())
+    handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(handler)
+
+    structlog.configure(
+        processors=[
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            _inject_mandatory_fields,
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(serializer=_json_dumps),
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
     return logger
 
 
-def get_logger(name: str, **context: Any) -> StructuredLogger:
-    return StructuredLogger(logging.getLogger(name), context=context)
+def get_logger(name: str, **context: Any) -> structlog.stdlib.BoundLogger:
+    return structlog.get_logger(name).bind(**_drop_none(context))
 
 
 def event_log_fields(event: Any, *, order_id: str | None = None) -> dict[str, Any]:
@@ -105,6 +68,20 @@ def iso_from_ms(ts_ms: int | None) -> str | None:
     return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _inject_mandatory_fields(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+    for field in MANDATORY_FIELDS:
+        event_dict.setdefault(field, None)
+    return _drop_none(event_dict)
+
+
+def _drop_none(values: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _json_dumps(payload: Any, **_: Any) -> str:
+    return json.dumps(payload, sort_keys=True, default=_json_default)
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -115,8 +92,6 @@ def _json_default(value: Any) -> Any:
 
 __all__ = [
     "MANDATORY_FIELDS",
-    "StructuredJsonFormatter",
-    "StructuredLogger",
     "configure_logging",
     "event_log_fields",
     "get_logger",
