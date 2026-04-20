@@ -15,6 +15,7 @@ from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_eve
 from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
 from .telemetry import configure_logging, get_logger
+from .venue_polymarket import PolymarketUserStream
 from .venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolymarketExecutionClient
 
 
@@ -74,11 +75,11 @@ async def run_live(
 ) -> RunnerSummary:
     resolved_mode = ExecutionMode(str(execution_mode))
     runtime = build_live_runtime(db_path=db_path, run_id=run_id, config=config, config_hash=config_hash)
-    source = source or LiveEventSource()
     client = execution_client
     if resolved_mode is ExecutionMode.LIVE:
         client = client or PolymarketExecutionClient()
         client.startup()
+    source = source or build_live_source(execution_mode=resolved_mode, execution_client=client)
     try:
         await source.start()
         return await drive_runtime_event_stream(
@@ -97,6 +98,22 @@ async def run_live(
         close = getattr(store, "close", None)
         if callable(close):
             close()
+
+
+def build_live_source(
+    *,
+    execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
+    execution_client: PolymarketExecutionClient | None = None,
+) -> LiveEventSource:
+    resolved_mode = ExecutionMode(str(execution_mode))
+    if resolved_mode is not ExecutionMode.LIVE:
+        return LiveEventSource()
+    if execution_client is None:
+        raise ValueError("execution_client is required for live execution mode")
+    credentials = getattr(execution_client, "api_credentials", None)
+    if not callable(credentials):
+        raise TypeError("live execution mode requires execution_client.api_credentials() for authenticated user stream")
+    return LiveEventSource(user_stream=PolymarketUserStream(auth=credentials()))
 
 
 def build_parser() -> argparse.ArgumentParser:

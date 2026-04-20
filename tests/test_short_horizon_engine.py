@@ -21,7 +21,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
-from short_horizon.live_runner import build_parser, run_live, run_stub_live, validate_cli_args
+from short_horizon.live_runner import build_live_source, build_parser, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -29,7 +29,7 @@ from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntime
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
-from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, VenuePlaceResult
+from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, VenueApiCredentials, VenuePlaceResult
 
 
 class _AsyncNormalizedSource:
@@ -68,9 +68,14 @@ class _FakeLiveRunnerClient:
     def __init__(self) -> None:
         self.started = False
         self.place_calls = []
+        self.api_credentials_calls = 0
 
     def startup(self) -> None:
         self.started = True
+
+    def api_credentials(self) -> VenueApiCredentials:
+        self.api_credentials_calls += 1
+        return VenueApiCredentials(api_key="api-key", secret="api-secret", passphrase="api-pass")
 
     def place_order(self, order_request):
         self.place_calls.append(order_request)
@@ -1344,6 +1349,84 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(order_row[1])
             self.assertEqual(order_row[2], "venue-live-1")
             self.assertEqual(order_row[3], "live")
+
+    def test_build_live_source_live_mode_requires_client_api_credentials(self) -> None:
+        with self.assertRaises(ValueError):
+            build_live_source(execution_mode=ExecutionMode.LIVE, execution_client=None)
+
+        with self.assertRaises(TypeError):
+            build_live_source(execution_mode=ExecutionMode.LIVE, execution_client=object())
+
+    async def test_live_runner_live_execution_mode_builds_authenticated_user_stream_when_source_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_exec_default_source.sqlite3"
+            client = _FakeLiveRunnerClient()
+            captured = {}
+            events = [
+                MarketStateUpdate(
+                    event_time_ms=200_000,
+                    ingest_time_ms=200_050,
+                    market_id="m1",
+                    token_id="tok_yes",
+                    condition_id="c1",
+                    question="Bitcoin Up or Down?",
+                    asset_slug="bitcoin",
+                    start_time_ms=0,
+                    end_time_ms=900_000,
+                    is_active=True,
+                    metadata_is_fresh=True,
+                    fee_rate_bps=10.0,
+                    fee_fetched_at_ms=200_050,
+                    fee_metadata_age_ms=0,
+                ),
+                BookUpdate(
+                    event_time_ms=220_000,
+                    ingest_time_ms=220_020,
+                    market_id="m1",
+                    token_id="tok_yes",
+                    best_bid=0.53,
+                    best_ask=0.54,
+                ),
+                BookUpdate(
+                    event_time_ms=225_000,
+                    ingest_time_ms=225_020,
+                    market_id="m1",
+                    token_id="tok_yes",
+                    best_bid=0.54,
+                    best_ask=0.55,
+                ),
+            ]
+
+            class _PatchedUserStream:
+                def __init__(self, *, auth):
+                    captured["auth"] = auth
+
+            class _PatchedLiveEventSource(_AsyncNormalizedSource):
+                def __init__(self, *, user_stream=None):
+                    captured["user_stream"] = user_stream
+                    super().__init__(events)
+
+            with patch("short_horizon.live_runner.PolymarketUserStream", _PatchedUserStream), patch(
+                "short_horizon.live_runner.LiveEventSource", _PatchedLiveEventSource
+            ):
+                summary = await run_live(
+                    db_path=db_path,
+                    run_id="live_exec_default_source_test_001",
+                    config_hash="test-config",
+                    source=None,
+                    max_events=3,
+                    execution_mode=ExecutionMode.LIVE,
+                    execution_client=client,
+                )
+
+            self.assertEqual(summary.run_id, "live_exec_default_source_test_001")
+            self.assertTrue(client.started)
+            self.assertEqual(client.api_credentials_calls, 1)
+            self.assertIsInstance(captured["user_stream"], _PatchedUserStream)
+            self.assertEqual(
+                captured["auth"],
+                VenueApiCredentials(api_key="api-key", secret="api-secret", passphrase="api-pass"),
+            )
 
     async def test_live_runner_probe_summary_and_collector_cross_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
