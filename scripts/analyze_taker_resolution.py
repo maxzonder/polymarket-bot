@@ -128,6 +128,11 @@ def _taker_entry_fee_per_share(price: float, fee_rate: float, *, fees_enabled: i
     return float(fee_rate) * p * (1.0 - p)
 
 
+def _apply_entry_slippage(price: float, *, ticks: int, tick_size: float) -> float:
+    stressed = float(price) + float(ticks) * float(tick_size)
+    return max(0.0, min(1.0, stressed))
+
+
 def ensure_output_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -338,6 +343,8 @@ def build_taker_events_for_token(
     order_size_shares: float,
     default_fee_rate: float,
     time_bucket_mode: str,
+    entry_slippage_ticks: int,
+    tick_size: float,
 ) -> list[TakerEvent]:
     touch_events = build_touch_events_for_token(
         meta=meta,
@@ -350,7 +357,11 @@ def build_taker_events_for_token(
     fee_rate = _fee_rate_for_category(meta.category, fees_enabled=meta.fees_enabled, default_fee_rate=default_fee_rate)
     rows: list[TakerEvent] = []
     for event in touch_events:
-        entry_price = float(event.touch_price)
+        entry_price = _apply_entry_slippage(
+            float(event.touch_price),
+            ticks=int(entry_slippage_ticks),
+            tick_size=float(tick_size),
+        )
         entry_fee_per_share = _taker_entry_fee_per_share(entry_price, fee_rate, fees_enabled=meta.fees_enabled)
         gross_pnl_per_share = (1.0 - entry_price) if meta.is_winner else (-entry_price)
         net_pnl_per_share = gross_pnl_per_share - entry_fee_per_share
@@ -402,6 +413,8 @@ def build_event_tables(
     max_duration_hours: float,
     default_fee_rate: float,
     time_bucket_mode: str,
+    entry_slippage_ticks: int,
+    tick_size: float,
 ) -> dict[str, int]:
     token_meta = load_token_meta(
         dataset_db_path,
@@ -429,6 +442,8 @@ def build_event_tables(
             ("min_duration_hours", f"{min_duration_hours:.6f}"),
             ("max_duration_hours", f"{max_duration_hours:.6f}"),
             ("default_fee_rate", f"{default_fee_rate:.6f}"),
+            ("entry_slippage_ticks", str(entry_slippage_ticks)),
+            ("tick_size", f"{tick_size:.6f}"),
             ("time_bucket_mode", str(time_bucket_mode)),
             ("fee_model", "Fee Structure V2 category map + fees_enabled"),
             ("exit_fee_model", "hold_to_resolution_no_exit_fee"),
@@ -465,6 +480,8 @@ def build_event_tables(
             order_size_shares=order_size_shares,
             default_fee_rate=default_fee_rate,
             time_bucket_mode=time_bucket_mode,
+            entry_slippage_ticks=entry_slippage_ticks,
+            tick_size=tick_size,
         )
         if not events:
             return
@@ -620,6 +637,8 @@ def build_taker_resolution_research(
     default_fee_rate: float = 0.05,
     min_touch_volume_usdc: float = 0.0,
     time_bucket_mode: str = DEFAULT_TIME_BUCKET_MODE,
+    entry_slippage_ticks: int = 0,
+    tick_size: float = 0.01,
 ) -> dict[str, int]:
     ensure_runtime_dirs()
     dataset_db_path = Path(dataset_db_path)
@@ -647,6 +666,8 @@ def build_taker_resolution_research(
         max_duration_hours=float(max_duration_hours),
         default_fee_rate=float(default_fee_rate),
         time_bucket_mode=str(time_bucket_mode),
+        entry_slippage_ticks=int(entry_slippage_ticks),
+        tick_size=float(tick_size),
     )
     summary_stats = build_summary(output_db_path, min_touch_volume_usdc=float(min_touch_volume_usdc))
     return {**event_stats, **summary_stats}
@@ -678,6 +699,18 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument("--min-touch-volume-usdc", type=float, default=0.0)
     ap.add_argument(
+        "--entry-slippage-ticks",
+        type=int,
+        default=0,
+        help="Apply a pessimistic entry stress by shifting touch entry price upward by N ticks",
+    )
+    ap.add_argument(
+        "--tick-size",
+        type=float,
+        default=0.01,
+        help="Tick size used for entry slippage stress",
+    )
+    ap.add_argument(
         "--time-bucket-mode",
         choices=("standard", "short", "relative"),
         default=DEFAULT_TIME_BUCKET_MODE,
@@ -702,6 +735,8 @@ def main() -> None:
         default_fee_rate=float(args.default_fee_rate),
         min_touch_volume_usdc=float(args.min_touch_volume_usdc),
         time_bucket_mode=str(args.time_bucket_mode),
+        entry_slippage_ticks=int(args.entry_slippage_ticks),
+        tick_size=float(args.tick_size),
     )
     logger.info("Research DB written to %s", args.output_db)
     for key in sorted(stats):
