@@ -296,7 +296,17 @@ class LiveDepthCollector:
                 recurrence = None
                 series_slug = None
                 if event0:
-                    start_iso = event0.get("startTime") or event0.get("startDate") or event0.get("eventStartTime")
+                    # For recurring short-horizon markets, `startTime` can point at the series-labelled wall-clock
+                    # on the next UTC day, while `startDate` / raw `startDate` reflect the current tradable window.
+                    # Prefer the actual current-window timestamps for discovery gating.
+                    start_iso = (
+                        event0.get("startDate")
+                        or raw.get("startDate")
+                        or raw.get("startDateIso")
+                        or raw.get("gameStartTime")
+                        or event0.get("startTime")
+                        or event0.get("eventStartTime")
+                    )
                     end_iso = event0.get("endDate") or raw.get("endDate") or raw.get("endDateIso")
                     series = event0.get("series") or []
                     if series and isinstance(series[0], dict):
