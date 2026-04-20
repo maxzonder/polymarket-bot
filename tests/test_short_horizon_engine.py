@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
@@ -19,7 +21,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
-from short_horizon.live_runner import build_parser, run_live, run_stub_live
+from short_horizon.live_runner import build_parser, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -27,6 +29,7 @@ from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntime
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
+from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, VenuePlaceResult
 
 
 class _AsyncNormalizedSource:
@@ -59,6 +62,23 @@ class _AsyncNormalizedSource:
     async def stop(self) -> None:
         self.stopped = True
         await self._queue.put(self._sentinel)
+
+
+class _FakeLiveRunnerClient:
+    def __init__(self) -> None:
+        self.started = False
+        self.place_calls = []
+
+    def startup(self) -> None:
+        self.started = True
+
+    def place_order(self, order_request):
+        self.place_calls.append(order_request)
+        return VenuePlaceResult(
+            order_id="venue-live-1",
+            status="live",
+            client_order_id=order_request.client_order_id,
+        )
 
 
 class CoreTypesTest(unittest.TestCase):
@@ -1002,16 +1022,38 @@ class ReplayRunnerTest(unittest.TestCase):
     def test_live_runner_parser_supports_stub_and_live_modes(self) -> None:
         parser = build_parser()
 
-        stub_args = parser.parse_args(["live.sqlite3", "--mode", "stub", "--stub-event-log-path", "sample.jsonl"])
+        stub_args = parser.parse_args(["live.sqlite3", "--mode", "stub", "--execution-mode", "dry_run", "--stub-event-log-path", "sample.jsonl"])
         self.assertEqual(stub_args.db_path, "live.sqlite3")
         self.assertEqual(stub_args.mode, "stub")
+        self.assertEqual(stub_args.execution_mode, "dry_run")
         self.assertEqual(stub_args.stub_event_log_path, "sample.jsonl")
 
-        live_args = parser.parse_args(["live.sqlite3", "--mode", "live", "--max-events", "5", "--max-runtime-seconds", "15", "--collector-csv", "collector.csv"])
+        live_args = parser.parse_args(["live.sqlite3", "--mode", "live", "--execution-mode", "live", "--max-events", "5", "--max-runtime-seconds", "15", "--collector-csv", "collector.csv"])
         self.assertEqual(live_args.mode, "live")
+        self.assertEqual(live_args.execution_mode, "live")
         self.assertEqual(live_args.max_events, 5)
         self.assertEqual(live_args.max_runtime_seconds, 15.0)
         self.assertEqual(live_args.collector_csv, "collector.csv")
+
+    def test_live_runner_cli_validation_requires_live_input_for_live_execution(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["live.sqlite3", "--mode", "stub", "--execution-mode", "live", "--stub-event-log-path", "sample.jsonl"])
+
+        with self.assertRaises(SystemExit):
+            validate_cli_args(parser, args)
+
+    def test_live_runner_cli_validation_requires_private_key_for_live_execution(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(["live.sqlite3", "--mode", "live", "--execution-mode", "live"])
+
+        env_backup = os.environ.get(PRIVATE_KEY_ENV_VAR)
+        try:
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises(SystemExit):
+                    validate_cli_args(parser, args)
+        finally:
+            if env_backup is not None:
+                os.environ[PRIVATE_KEY_ENV_VAR] = env_backup
 
     def test_replay_runner_is_deterministic_for_same_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1159,6 +1201,149 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(event_count, 4)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
+
+    async def test_live_runner_dry_run_mode_logs_translated_order_without_hitting_venue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_dry_run.sqlite3"
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                ]
+            )
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_dry_run_test_001",
+                config_hash="test-config",
+                source=source,
+                max_events=3,
+                execution_mode=ExecutionMode.DRY_RUN,
+            )
+
+            self.assertEqual(summary.run_id, "live_dry_run_test_001")
+            self.assertEqual(summary.event_count, 3)
+            self.assertEqual(summary.order_intents, 1)
+            self.assertEqual(summary.synthetic_order_events, 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                event_rows = conn.execute(
+                    "SELECT event_type, payload_json FROM events_log WHERE run_id = 'live_dry_run_test_001' ORDER BY seq ASC"
+                ).fetchall()
+                order_row = conn.execute(
+                    "SELECT state, client_order_id, venue_order_id, venue_order_status FROM orders WHERE run_id = 'live_dry_run_test_001' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            event_types = [row[0] for row in event_rows]
+            self.assertEqual(event_types.count("TimerEvent"), 1)
+            self.assertEqual(event_types.count("OrderAccepted"), 1)
+            self.assertEqual(order_row[0], "accepted")
+            self.assertIsNotNone(order_row[1])
+            self.assertIsNone(order_row[2])
+            self.assertEqual(order_row[3], "accepted")
+            timer_payloads = [json.loads(row[1]) for row in event_rows if row[0] == "TimerEvent"]
+            self.assertTrue(any(payload.get("timer_kind") == "dry_run_order_logged" for payload in timer_payloads))
+
+    async def test_live_runner_live_execution_mode_starts_client_and_persists_venue_order_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_exec.sqlite3"
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                ]
+            )
+            client = _FakeLiveRunnerClient()
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_exec_test_001",
+                config_hash="test-config",
+                source=source,
+                max_events=3,
+                execution_mode=ExecutionMode.LIVE,
+                execution_client=client,
+            )
+
+            self.assertEqual(summary.run_id, "live_exec_test_001")
+            self.assertTrue(client.started)
+            self.assertEqual(len(client.place_calls), 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                order_row = conn.execute(
+                    "SELECT state, client_order_id, venue_order_id, venue_order_status FROM orders WHERE run_id = 'live_exec_test_001' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertEqual(order_row[0], "accepted")
+            self.assertIsNotNone(order_row[1])
+            self.assertEqual(order_row[2], "venue-live-1")
+            self.assertEqual(order_row[3], "live")
 
     async def test_live_runner_probe_summary_and_collector_cross_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

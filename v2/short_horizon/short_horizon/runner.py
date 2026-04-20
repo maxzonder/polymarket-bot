@@ -8,7 +8,7 @@ from pathlib import Path
 from .core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
 from .core.models import OrderIntent
 from .core.runtime import StrategyRuntime
-from .execution import ExecutionEngine
+from .execution import ExecutionEngine, ExecutionMode, ExecutionVenueClient
 from .strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 from .telemetry import get_logger
 
@@ -22,9 +22,18 @@ class RunnerSummary:
     db_path: Path
 
 
-def drive_runtime_events(*, events: list, runtime: StrategyRuntime, logger_name: str, completed_event_name: str) -> RunnerSummary:
+def drive_runtime_events(
+    *,
+    events: list,
+    runtime: StrategyRuntime,
+    logger_name: str,
+    completed_event_name: str,
+    execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
+    execution_client: ExecutionVenueClient | None = None,
+) -> RunnerSummary:
     logger = get_logger(logger_name, run_id=runtime.store.current_run_id)
-    execution = ExecutionEngine(store=runtime.store)
+    resolved_mode = ExecutionMode(str(execution_mode))
+    execution = ExecutionEngine(store=runtime.store, mode=resolved_mode, client=execution_client)
     event_count = 0
     order_intents = 0
     synthetic_order_events = 0
@@ -41,6 +50,7 @@ def drive_runtime_events(*, events: list, runtime: StrategyRuntime, logger_name:
         input_events=event_count,
         order_intents=order_intents,
         synthetic_order_events=synthetic_order_events,
+        execution_mode=resolved_mode.value,
     )
     return RunnerSummary(
         run_id=runtime.store.current_run_id,
@@ -59,9 +69,12 @@ async def drive_runtime_event_stream(
     completed_event_name: str,
     max_events: int | None = None,
     max_runtime_seconds: float | None = None,
+    execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
+    execution_client: ExecutionVenueClient | None = None,
 ) -> RunnerSummary:
     logger = get_logger(logger_name, run_id=runtime.store.current_run_id)
-    execution = ExecutionEngine(store=runtime.store)
+    resolved_mode = ExecutionMode(str(execution_mode))
+    execution = ExecutionEngine(store=runtime.store, mode=resolved_mode, client=execution_client)
     event_count = 0
     order_intents = 0
     synthetic_order_events = 0
@@ -94,6 +107,7 @@ async def drive_runtime_event_stream(
         input_events=event_count,
         order_intents=order_intents,
         synthetic_order_events=synthetic_order_events,
+        execution_mode=resolved_mode.value,
     )
     return RunnerSummary(
         run_id=runtime.store.current_run_id,
