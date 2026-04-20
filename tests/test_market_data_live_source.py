@@ -174,17 +174,18 @@ class LiveEventSourceTest(unittest.IsolatedAsyncioTestCase):
                 json.dumps(
                     {
                         "event_type": "best_bid_ask",
-                        "market": "m1",
+                        "market": "c1",
                         "asset_id": "tok_yes",
                         "best_bid": "0.54",
                         "best_ask": "0.55",
                         "timestamp": "1200",
                     }
                 ),
+                "PONG",
                 json.dumps(
                     {
                         "event_type": "last_trade_price",
-                        "market": "m1",
+                        "market": "c1",
                         "asset_id": "tok_yes",
                         "price": "0.55",
                         "side": "BUY",
@@ -218,11 +219,13 @@ class LiveEventSourceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(book_events), 1)
         self.assertEqual(book_events[0].token_id, "tok_yes")
+        self.assertEqual(book_events[0].market_id, "m1")
         self.assertEqual(book_events[0].best_ask, 0.55)
         self.assertEqual(book_events[0].ingest_time_ms, 5000)
 
         self.assertEqual(len(trade_events), 1)
         self.assertEqual(trade_events[0].token_id, "tok_yes")
+        self.assertEqual(trade_events[0].market_id, "m1")
         self.assertEqual(trade_events[0].price, 0.55)
         self.assertEqual(trade_events[0].ingest_time_ms, 5000)
 

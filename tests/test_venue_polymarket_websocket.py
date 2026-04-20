@@ -118,6 +118,24 @@ class VenuePolymarketWebsocketTest(unittest.IsolatedAsyncioTestCase):
 
         await manager.close()
 
+    async def test_control_messages_are_filtered_before_consumer_queue(self) -> None:
+        ws = _FakeWebsocket(["PONG", '{"event_type":"book"}'])
+        factory = _FakeConnectFactory([ws])
+        manager = PolymarketWebsocket(
+            connect_factory=factory,
+            backoff_initial_seconds=0.01,
+            backoff_max_seconds=0.02,
+            ping_interval_seconds=None,
+        )
+
+        await manager.connect()
+        await asyncio.wait_for(ws.entered.wait(), timeout=0.2)
+        message = await asyncio.wait_for(manager.recv(), timeout=0.2)
+
+        self.assertEqual(json.loads(message)["event_type"], "book")
+
+        await manager.close()
+
 
 if __name__ == "__main__":
     unittest.main()

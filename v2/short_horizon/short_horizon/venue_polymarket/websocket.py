@@ -100,6 +100,8 @@ class PolymarketWebsocket:
                         async for message in ws:
                             if isinstance(message, bytes):
                                 continue
+                            if _is_control_message(message):
+                                continue
                             await self.messages.put(message)
                     finally:
                         if ping_task is not None:
@@ -138,6 +140,10 @@ class PolymarketWebsocket:
         while True:
             await asyncio.sleep(self.ping_interval_seconds)
             await ws.send("PING")
+
+
+def _is_control_message(message: Any) -> bool:
+    return isinstance(message, str) and message.strip().upper() in {"PONG", "PING"}
 
 
 def _subscription_payload(token_ids: set[str]) -> dict[str, Any]:

@@ -10,6 +10,7 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
+from short_horizon.core import MarketStateUpdate
 from short_horizon.venue_polymarket import BookNormalizer
 
 
@@ -72,6 +73,36 @@ class VenuePolymarketBookChannelTest(unittest.TestCase):
         self.assertEqual([update.best_ask for update in updates], [0.54, 0.54])
         self.assertEqual([update.is_snapshot for update in updates], [True, False])
         self.assertTrue(all(update.ingest_time_ms == 2000 for update in updates))
+
+    def test_book_normalizer_maps_condition_id_market_field_back_to_numeric_market_id(self) -> None:
+        normalizer = BookNormalizer()
+        normalizer.register_market(
+            MarketStateUpdate(
+                event_time_ms=1000,
+                ingest_time_ms=1000,
+                market_id="2023024",
+                condition_id="0x0c108ff3",
+                token_yes_id="tok_yes",
+                token_no_id="tok_no",
+                token_id="tok_yes",
+            )
+        )
+
+        updates = normalizer.normalize_event(
+            {
+                "event_type": "best_bid_ask",
+                "market": "0x0c108ff3",
+                "asset_id": "tok_yes",
+                "best_bid": "0.54",
+                "best_ask": "0.55",
+                "timestamp": 1020,
+            },
+            ingest_time_ms=1100,
+        )
+
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].market_id, "2023024")
+        self.assertEqual(updates[0].token_id, "tok_yes")
 
     @staticmethod
     def _serialize_updates(updates: list) -> str:

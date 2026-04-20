@@ -20,7 +20,7 @@ from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
 from short_horizon.live_runner import build_parser, run_live, run_stub_live
-from short_horizon.probe import cross_validate_probe_against_collector, summarize_probe_db
+from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
@@ -925,6 +925,11 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(probe_summary.distinct_tokens, 1)
             self.assertIsNotNone(probe_summary.first_event_time)
             self.assertIsNotNone(probe_summary.last_event_time)
+            self.assertIsNotNone(probe_summary.window_minutes)
+            self.assertIsNotNone(probe_summary.book_updates_per_minute)
+            assert_min_book_updates_per_minute(probe_summary, min_rate=0.1)
+            with self.assertRaises(AssertionError):
+                assert_min_book_updates_per_minute(probe_summary, min_rate=100.0)
 
             validation = cross_validate_probe_against_collector(
                 db_path,

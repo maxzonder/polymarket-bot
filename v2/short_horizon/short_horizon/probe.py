@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -18,6 +19,8 @@ class LiveProbeSummary:
     distinct_tokens: int
     first_event_time: str | None
     last_event_time: str | None
+    window_minutes: float | None
+    book_updates_per_minute: float | None
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,13 @@ def summarize_probe_db(db_path: str | Path, *, run_id: str) -> LiveProbeSummary:
         ).fetchone()
     finally:
         conn.close()
+    window_minutes = _window_minutes(first_event_time, last_event_time)
+    book_updates_per_minute = None
+    if window_minutes is not None:
+        if window_minutes <= 0:
+            book_updates_per_minute = float(book_updates) if int(book_updates) > 0 else 0.0
+        else:
+            book_updates_per_minute = float(book_updates) / window_minutes
     return LiveProbeSummary(
         run_id=run_id,
         total_events=int(total_events),
@@ -63,6 +73,8 @@ def summarize_probe_db(db_path: str | Path, *, run_id: str) -> LiveProbeSummary:
         distinct_tokens=int(distinct_tokens),
         first_event_time=first_event_time,
         last_event_time=last_event_time,
+        window_minutes=window_minutes,
+        book_updates_per_minute=book_updates_per_minute,
     )
 
 
@@ -93,6 +105,18 @@ def cross_validate_probe_against_collector(db_path: str | Path, *, run_id: str, 
     )
 
 
+def assert_min_book_updates_per_minute(summary: LiveProbeSummary, *, min_rate: float) -> None:
+    observed_rate = float(summary.book_updates_per_minute or 0.0)
+    if observed_rate + 1e-9 >= float(min_rate):
+        return
+    raise AssertionError(
+        "Insufficient BookUpdate coverage for probe window: "
+        f"observed={observed_rate:.3f}/min required={float(min_rate):.3f}/min "
+        f"book_updates={summary.book_updates} window_minutes={summary.window_minutes} "
+        f"first_event_time={summary.first_event_time} last_event_time={summary.last_event_time}"
+    )
+
+
 def _probe_sets(*, db_path: str | Path, run_id: str) -> tuple[set[str], set[str]]:
     conn = sqlite3.connect(Path(db_path))
     try:
@@ -112,9 +136,32 @@ def _probe_sets(*, db_path: str | Path, run_id: str) -> tuple[set[str], set[str]
     )
 
 
+def _window_minutes(first_event_time: str | None, last_event_time: str | None) -> float | None:
+    if not first_event_time or not last_event_time:
+        return None
+    first_ts = _parse_iso(first_event_time)
+    last_ts = _parse_iso(last_event_time)
+    if first_ts is None or last_ts is None:
+        return None
+    return max(0.0, (last_ts - first_ts) / 60.0)
+
+
+def _parse_iso(value: str) -> float | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
+
+
 def _scalar(conn: sqlite3.Connection, query: str, params: tuple[object, ...]) -> int:
     row = conn.execute(query, params).fetchone()
     return int(row[0] or 0) if row is not None else 0
 
 
-__all__ = ["CollectorCrossValidation", "LiveProbeSummary", "cross_validate_probe_against_collector", "summarize_probe_db"]
+__all__ = [
+    "CollectorCrossValidation",
+    "LiveProbeSummary",
+    "assert_min_book_updates_per_minute",
+    "cross_validate_probe_against_collector",
+    "summarize_probe_db",
+]

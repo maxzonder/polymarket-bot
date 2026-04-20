@@ -81,24 +81,46 @@ class LiveEventSource:
 
     async def _consume_market_refresh(self) -> None:
         async for event in self.market_refresh:
+            self._register_market_event(event)
             await self._reconcile_market_subscriptions(event)
             for token_event in expand_market_state_update(event):
                 await self._queue.put(token_event)
 
     async def _consume_fee_refresh(self) -> None:
         async for event in self.fee_refresh:
+            self._register_market_event(event)
             for token_event in expand_market_state_update(event):
                 await self._queue.put(token_event)
 
     async def _consume_websocket(self) -> None:
         while True:
             raw_message = await self.websocket.recv()
+            if _is_control_message(raw_message):
+                continue
             ingest_time_ms = self.clock_ms()
-            payload = _decode_json_payload(raw_message)
+            try:
+                payload = _decode_json_payload(raw_message)
+            except json.JSONDecodeError:
+                self.logger.warning(
+                    "live_source_ws_message_dropped",
+                    reason="invalid_json",
+                    raw_message_preview=str(raw_message)[:120],
+                )
+                continue
+            if payload is None:
+                continue
             book_events = self.book_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
             trade_events = self.trade_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
             for event in [*book_events, *trade_events]:
                 await self._queue.put(event)
+
+    def _register_market_event(self, event: MarketStateUpdate) -> None:
+        register_book = getattr(self.book_normalizer, "register_market", None)
+        if callable(register_book):
+            register_book(event)
+        register_trade = getattr(self.trade_normalizer, "register_market", None)
+        if callable(register_trade):
+            register_trade(event)
 
     async def _reconcile_market_subscriptions(self, event: MarketStateUpdate) -> None:
         market_id = str(event.market_id)
@@ -189,8 +211,17 @@ def _decode_json_payload(raw_message: Any) -> Any:
     if isinstance(raw_message, bytes):
         raw_message = raw_message.decode("utf-8")
     if isinstance(raw_message, str):
-        return json.loads(raw_message)
+        text = raw_message.strip()
+        if not text or text.upper() == "PONG":
+            return None
+        return json.loads(text)
     raise TypeError(f"Unsupported websocket message type: {type(raw_message)!r}")
+
+
+def _is_control_message(raw_message: Any) -> bool:
+    if isinstance(raw_message, bytes):
+        raw_message = raw_message.decode("utf-8", errors="ignore")
+    return isinstance(raw_message, str) and raw_message.strip().upper() in {"PONG", "PING"}
 
 
 def _default_clock_ms() -> int:

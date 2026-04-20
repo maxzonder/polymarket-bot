@@ -8,7 +8,7 @@ from pathlib import Path
 from .config import ShortHorizonConfig
 from .core.runtime import StrategyRuntime
 from .market_data import LiveEventSource, MarketDataSource
-from .probe import cross_validate_probe_against_collector, summarize_probe_db
+from .probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_events
 from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
@@ -85,6 +85,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-events", type=int, default=None, help="Optional cap on processed live events, useful for smoke tests")
     parser.add_argument("--max-runtime-seconds", type=float, default=None, help="Optional wall-clock cap for live probes")
     parser.add_argument("--collector-csv", default=None, help="Optional collector CSV path for post-run cross-validation")
+    parser.add_argument(
+        "--min-book-updates-per-minute",
+        type=float,
+        default=1.0,
+        help="Fail the live probe if observed BookUpdate throughput falls below this rate over the probe window; set 0 to disable",
+    )
     return parser
 
 
@@ -137,7 +143,14 @@ def main(argv: list[str] | None = None) -> None:
         distinct_tokens=probe_summary.distinct_tokens,
         first_event_time=probe_summary.first_event_time,
         last_event_time=probe_summary.last_event_time,
+        window_minutes=probe_summary.window_minutes,
+        book_updates_per_minute=probe_summary.book_updates_per_minute,
     )
+    if args.min_book_updates_per_minute and args.min_book_updates_per_minute > 0:
+        assert_min_book_updates_per_minute(
+            probe_summary,
+            min_rate=args.min_book_updates_per_minute,
+        )
     if args.collector_csv:
         validation = cross_validate_probe_against_collector(
             args.db_path,

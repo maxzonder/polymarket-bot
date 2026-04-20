@@ -4,7 +4,7 @@ import json
 import time
 from typing import Any
 
-from ..core.events import AggressorSide, TradeTick
+from ..core.events import AggressorSide, MarketStateUpdate, TradeTick
 
 
 class TradeNormalizer:
@@ -12,6 +12,20 @@ class TradeNormalizer:
 
     def __init__(self, *, source: str = "polymarket_clob_ws"):
         self.source = source
+        self.condition_to_market_id: dict[str, str] = {}
+        self.token_to_market_id: dict[str, str] = {}
+
+    def register_market(self, event: MarketStateUpdate) -> None:
+        market_id = str(event.market_id or "").strip()
+        if not market_id:
+            return
+        condition_id = str(event.condition_id or "").strip()
+        if condition_id:
+            self.condition_to_market_id[condition_id] = market_id
+        for token_id in (event.token_yes_id, event.token_no_id, event.token_id):
+            token_text = str(token_id or "").strip()
+            if token_text:
+                self.token_to_market_id[token_text] = market_id
 
     def normalize_frame(self, frame: str | dict[str, Any] | list[Any], *, ingest_time_ms: int | None = None) -> list[TradeTick]:
         payload: Any = frame
@@ -31,7 +45,8 @@ class TradeNormalizer:
         if str(event.get("event_type") or "") != "last_trade_price":
             return []
         token_id = str(event.get("asset_id") or "")
-        market_id = str(event.get("market") or "")
+        raw_market_id = str(event.get("market") or "").strip()
+        market_id = self._resolve_market_id(raw_market_id, token_id=token_id) or ""
         price = _parse_float(event.get("price"))
         size = _parse_float(event.get("size"))
         event_time_ms = _parse_int(event.get("timestamp"))
@@ -55,6 +70,19 @@ class TradeNormalizer:
                 venue_seq=venue_seq,
             )
         ]
+
+    def _resolve_market_id(self, raw_market_id: str | None, *, token_id: str | None = None) -> str | None:
+        if raw_market_id:
+            resolved = self.condition_to_market_id.get(raw_market_id)
+            if resolved:
+                return resolved
+            if raw_market_id in self.token_to_market_id.values():
+                return raw_market_id
+        if token_id:
+            resolved = self.token_to_market_id.get(token_id)
+            if resolved:
+                return resolved
+        return raw_market_id
 
 
 def _parse_float(value: Any) -> float | None:

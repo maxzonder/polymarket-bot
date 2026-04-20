@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..core.events import BookLevel, BookUpdate
+from ..core.events import BookLevel, BookUpdate, MarketStateUpdate
 
 
 @dataclass
@@ -31,6 +31,20 @@ class BookNormalizer:
     def __init__(self, *, source: str = "polymarket_clob_ws"):
         self.source = source
         self.books: dict[str, BookState] = {}
+        self.condition_to_market_id: dict[str, str] = {}
+        self.token_to_market_id: dict[str, str] = {}
+
+    def register_market(self, event: MarketStateUpdate) -> None:
+        market_id = str(event.market_id or "").strip()
+        if not market_id:
+            return
+        condition_id = str(event.condition_id or "").strip()
+        if condition_id:
+            self.condition_to_market_id[condition_id] = market_id
+        for token_id in (event.token_yes_id, event.token_no_id, event.token_id):
+            token_text = str(token_id or "").strip()
+            if token_text:
+                self.token_to_market_id[token_text] = market_id
 
     def normalize_frame(self, frame: str | dict[str, Any] | list[Any], *, ingest_time_ms: int | None = None) -> list[BookUpdate]:
         payload: Any = frame
@@ -73,7 +87,8 @@ class BookNormalizer:
         if not token_id:
             return None
         event_time_ms = _parse_int(event.get("timestamp"))
-        book = self._ensure_book(token_id, str(event.get("market") or "") or None)
+        raw_market_id = str(event.get("market") or "").strip() or None
+        book = self._ensure_book(token_id, self._resolve_market_id(raw_market_id, token_id=token_id))
         if _is_out_of_order(book, event_time_ms):
             return None
         book.bid_levels = parse_levels(event.get("bids"), reverse=True)
@@ -87,7 +102,7 @@ class BookNormalizer:
     def _apply_price_change(self, event: dict[str, Any], *, ingest_time_ms: int) -> list[BookUpdate]:
         changes = event.get("price_changes") or []
         event_time_ms = _parse_int(event.get("timestamp"))
-        market_id = str(event.get("market") or "") or None
+        raw_market_id = str(event.get("market") or "").strip() or None
         touched: list[BookState] = []
         touched_ids: set[str] = set()
         for change in changes:
@@ -96,7 +111,7 @@ class BookNormalizer:
             token_id = str(change.get("asset_id") or "")
             if not token_id:
                 continue
-            book = self._ensure_book(token_id, market_id)
+            book = self._ensure_book(token_id, self._resolve_market_id(raw_market_id, token_id=token_id))
             if _is_out_of_order(book, event_time_ms):
                 continue
             side = str(change.get("side") or "").upper()
@@ -135,13 +150,27 @@ class BookNormalizer:
         if not token_id:
             return None
         event_time_ms = _parse_int(event.get("timestamp"))
-        book = self._ensure_book(token_id, str(event.get("market") or "") or None)
+        raw_market_id = str(event.get("market") or "").strip() or None
+        book = self._ensure_book(token_id, self._resolve_market_id(raw_market_id, token_id=token_id))
         if _is_out_of_order(book, event_time_ms):
             return None
         book.best_bid = _parse_float(event.get("best_bid"))
         book.best_ask = _parse_float(event.get("best_ask"))
         book.last_event_ts_ms = event_time_ms
         return self._to_update(book, event_time_ms=event_time_ms, ingest_time_ms=ingest_time_ms, is_snapshot=False)
+
+    def _resolve_market_id(self, raw_market_id: str | None, *, token_id: str | None = None) -> str | None:
+        if raw_market_id:
+            resolved = self.condition_to_market_id.get(raw_market_id)
+            if resolved:
+                return resolved
+            if raw_market_id in self.token_to_market_id.values():
+                return raw_market_id
+        if token_id:
+            resolved = self.token_to_market_id.get(token_id)
+            if resolved:
+                return resolved
+        return raw_market_id
 
     def _to_update(self, book: BookState, *, event_time_ms: int | None, ingest_time_ms: int, is_snapshot: bool) -> BookUpdate:
         spread = None
@@ -152,7 +181,7 @@ class BookNormalizer:
         return BookUpdate(
             event_time_ms=int(event_time_ms if event_time_ms is not None else ingest_time_ms),
             ingest_time_ms=int(ingest_time_ms),
-            market_id=str(book.market_id or ""),
+            market_id=str(self._resolve_market_id(book.market_id, token_id=book.token_id) or ""),
             token_id=book.token_id,
             best_bid=book.best_bid,
             best_ask=book.best_ask,
