@@ -12,6 +12,17 @@ from ..core.models import OrderIntent
 from ..core.order_state import OrderState
 
 
+NON_TERMINAL_ORDER_STATES = (
+    OrderState.INTENT.value,
+    OrderState.PENDING_SEND.value,
+    OrderState.ACCEPTED.value,
+    OrderState.PARTIALLY_FILLED.value,
+    OrderState.CANCEL_REQUESTED.value,
+    OrderState.REPLACE_REQUESTED.value,
+    OrderState.UNKNOWN.value,
+)
+
+
 @dataclass(frozen=True)
 class RunContext:
     run_id: str
@@ -79,6 +90,9 @@ class SQLiteRuntimeStore:
         self.conn.close()
 
     def append_event(self, event: NormalizedEvent) -> None:
+        self.append_event_log(event)
+
+    def append_event_log(self, event: NormalizedEvent, *, order_id: str | None = None) -> None:
         market_id, token_id = _event_market_token(event)
         if market_id is not None:
             self._ensure_market_stub(market_id)
@@ -88,7 +102,7 @@ class SQLiteRuntimeStore:
             INSERT INTO events_log (
                 run_id, seq, event_type, event_time, ingest_time, source,
                 market_id, token_id, order_id, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 self.run.run_id,
@@ -99,6 +113,7 @@ class SQLiteRuntimeStore:
                 payload["source"],
                 market_id,
                 token_id,
+                order_id,
                 json.dumps(payload, sort_keys=True),
             ),
         )
@@ -173,8 +188,41 @@ class SQLiteRuntimeStore:
         self.conn.commit()
 
     def persist_intent(self, intent: OrderIntent) -> None:
-        self._ensure_market_stub(intent.market_id)
         size = intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None
+        self.insert_order(
+            order_id=intent.intent_id,
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            side="BUY",
+            price=intent.entry_price,
+            size=size,
+            state=OrderState.INTENT,
+            client_order_id=intent.intent_id,
+            intent_created_at_ms=intent.event_time_ms,
+            last_state_change_at_ms=intent.event_time_ms,
+            remaining_size=size,
+        )
+
+    def insert_order(
+        self,
+        *,
+        order_id: str,
+        market_id: str,
+        token_id: str,
+        side: str,
+        price: float | None,
+        size: float | None,
+        state: OrderState | str,
+        client_order_id: str | None,
+        intent_created_at_ms: int,
+        last_state_change_at_ms: int,
+        remaining_size: float | None = None,
+        parent_order_id: str | None = None,
+        venue_order_status: str | None = None,
+        reconciliation_required: bool = False,
+    ) -> None:
+        self._ensure_market_stub(market_id)
+        state_value = state.value if isinstance(state, OrderState) else str(state)
         self.conn.execute(
             """
             INSERT INTO orders (
@@ -194,28 +242,131 @@ class SQLiteRuntimeStore:
                 cumulative_filled_size,
                 remaining_size,
                 reconciliation_required
-            ) VALUES (?, ?, ?, ?, 'BUY', ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, 0)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(order_id) DO UPDATE SET
+                side = excluded.side,
                 price = excluded.price,
                 size = excluded.size,
+                state = excluded.state,
+                client_order_id = excluded.client_order_id,
+                parent_order_id = excluded.parent_order_id,
                 last_state_change_at = excluded.last_state_change_at,
-                remaining_size = excluded.remaining_size
+                venue_order_status = excluded.venue_order_status,
+                remaining_size = excluded.remaining_size,
+                reconciliation_required = excluded.reconciliation_required
             """,
             (
-                intent.intent_id,
+                order_id,
                 self.run.run_id,
-                intent.market_id,
-                intent.token_id,
-                intent.entry_price,
+                market_id,
+                token_id,
+                side,
+                price,
                 size,
-                OrderState.INTENT.value,
-                intent.intent_id,
-                iso_from_ms(intent.event_time_ms),
-                iso_from_ms(intent.event_time_ms),
-                size,
+                state_value,
+                client_order_id,
+                parent_order_id,
+                iso_from_ms(intent_created_at_ms),
+                iso_from_ms(last_state_change_at_ms),
+                venue_order_status,
+                remaining_size,
+                int(reconciliation_required),
             ),
         )
         self.conn.commit()
+
+    def update_order_state(
+        self,
+        *,
+        order_id: str,
+        state: OrderState | str,
+        event_time_ms: int,
+        venue_order_status: str | None = None,
+        cumulative_filled_size: float | None = None,
+        remaining_size: float | None = None,
+        reconciliation_required: bool | None = None,
+        reject_code: str | None = None,
+        reject_reason: str | None = None,
+    ) -> None:
+        state_value = state.value if isinstance(state, OrderState) else str(state)
+        self.conn.execute(
+            """
+            UPDATE orders
+            SET state = ?,
+                last_state_change_at = ?,
+                venue_order_status = COALESCE(?, venue_order_status),
+                cumulative_filled_size = COALESCE(?, cumulative_filled_size),
+                remaining_size = COALESCE(?, remaining_size),
+                reconciliation_required = COALESCE(?, reconciliation_required),
+                last_reject_code = COALESCE(?, last_reject_code),
+                last_reject_reason = COALESCE(?, last_reject_reason)
+            WHERE order_id = ? AND run_id = ?
+            """,
+            (
+                state_value,
+                iso_from_ms(event_time_ms),
+                venue_order_status,
+                cumulative_filled_size,
+                remaining_size,
+                None if reconciliation_required is None else int(reconciliation_required),
+                reject_code,
+                reject_reason,
+                order_id,
+                self.run.run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def insert_fill(
+        self,
+        *,
+        fill_id: str,
+        order_id: str,
+        market_id: str,
+        token_id: str,
+        price: float,
+        size: float,
+        filled_at_ms: int,
+        source: str,
+        fee_paid_usdc: float | None = None,
+        liquidity_role: str | None = None,
+        venue_fill_id: str | None = None,
+    ) -> None:
+        self._ensure_market_stub(market_id)
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO fills (
+                fill_id, order_id, run_id, market_id, token_id, price, size,
+                fee_paid_usdc, liquidity_role, filled_at, source, venue_fill_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fill_id,
+                order_id,
+                self.run.run_id,
+                market_id,
+                token_id,
+                price,
+                size,
+                fee_paid_usdc,
+                liquidity_role,
+                iso_from_ms(filled_at_ms),
+                source,
+                venue_fill_id,
+            ),
+        )
+        self.conn.commit()
+
+    def load_non_terminal_orders(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM orders
+            WHERE run_id = ? AND state IN ({','.join('?' for _ in NON_TERMINAL_ORDER_STATES)})
+            ORDER BY intent_created_at ASC, order_id ASC
+            """,
+            (self.run.run_id, *NON_TERMINAL_ORDER_STATES),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def _initialize_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[2] / "docs" / "phase0" / "storage_schema.sql"

@@ -238,6 +238,86 @@ class SQLiteRuntimeStoreTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_sqlite_repository_api_handles_transition_fill_and_reconciliation_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_test_002",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="ord_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=18.1818,
+                    state=OrderState.INTENT,
+                    client_order_id="cli_001",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_000,
+                    remaining_size=18.1818,
+                )
+                store.update_order_state(
+                    order_id="ord_001",
+                    state=OrderState.ACCEPTED,
+                    event_time_ms=225_100,
+                    venue_order_status="live",
+                )
+                store.insert_fill(
+                    fill_id="fill_001",
+                    order_id="ord_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    price=0.55,
+                    size=10.0,
+                    filled_at_ms=225_200,
+                    source="replay",
+                    fee_paid_usdc=0.05,
+                    liquidity_role="taker",
+                )
+                store.update_order_state(
+                    order_id="ord_001",
+                    state=OrderState.PARTIALLY_FILLED,
+                    event_time_ms=225_200,
+                    cumulative_filled_size=10.0,
+                    remaining_size=8.1818,
+                )
+                open_orders = store.load_non_terminal_orders()
+
+                self.assertEqual(len(open_orders), 1)
+                self.assertEqual(open_orders[0]["order_id"], "ord_001")
+                self.assertEqual(open_orders[0]["state"], "partially_filled")
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, venue_order_status, cumulative_filled_size, remaining_size FROM orders WHERE order_id = 'ord_001'"
+                    ).fetchone()
+                    fill_row = conn.execute(
+                        "SELECT price, size, fee_paid_usdc, liquidity_role, source FROM fills WHERE fill_id = 'fill_001'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "partially_filled")
+                self.assertEqual(order_row[1], "live")
+                self.assertAlmostEqual(order_row[2], 10.0)
+                self.assertAlmostEqual(order_row[3], 8.1818)
+                self.assertAlmostEqual(fill_row[0], 0.55)
+                self.assertAlmostEqual(fill_row[1], 10.0)
+                self.assertAlmostEqual(fill_row[2], 0.05)
+                self.assertEqual(fill_row[3], "taker")
+                self.assertEqual(fill_row[4], "replay")
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
