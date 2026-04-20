@@ -1,0 +1,5 @@
+{"event_type":"book","asset_id":"tok_yes","market":"m1","timestamp":1000,"hash":"h1","bids":[{"price":"0.53","size":"20"},{"price":"0.52","size":"10"}],"asks":[{"price":"0.54","size":"12"},{"price":"0.56","size":"8"}]}
+{"event_type":"price_change","market":"m1","timestamp":1010,"price_changes":[{"asset_id":"tok_yes","side":"SELL","price":"0.55","size":"15","best_bid":"0.53","best_ask":"0.55"}]}
+{"event_type":"best_bid_ask","asset_id":"tok_yes","market":"m1","timestamp":1020,"best_bid":"0.54","best_ask":"0.55"}
+{"event_type":"price_change","market":"m1","timestamp":1030,"price_changes":[{"asset_id":"tok_yes","side":"SELL","price":"0.55","size":"0","best_bid":"0.54","best_ask":"0.56"}]}
+{"event_type":"best_bid_ask","asset_id":"tok_yes","market":"m1","timestamp":1015,"best_bid":"0.50","best_ask":"0.51"}

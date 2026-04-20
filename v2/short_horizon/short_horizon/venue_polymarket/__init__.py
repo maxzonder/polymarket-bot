@@ -1,5 +1,6 @@
 """Polymarket venue adapter boundary."""
 
+from .book_channel import BookNormalizer
 from .markets import (
     DiscoveryStats,
     DurationWindow,
@@ -21,6 +22,7 @@ class PolymarketVenueAdapter:
 
 
 __all__ = [
+    "BookNormalizer",
     "DiscoveryStats",
     "DurationWindow",
     "MarketMetadata",
