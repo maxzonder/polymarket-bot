@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_CEILING
 from datetime import datetime
 from typing import Protocol
 
@@ -71,6 +72,10 @@ ALLOWED_TRANSITIONS: dict[OrderState, set[OrderState]] = {
 
 
 class ExecutionTransitionError(RuntimeError):
+    pass
+
+
+class ExecutionValidationError(RuntimeError):
     pass
 
 
@@ -161,8 +166,10 @@ class ExecutionEngine:
     - emit synthetic order events until real venue wiring lands in Phase 3
     """
 
-    def __init__(self, *, store: ExecutionStore):
+    def __init__(self, *, store: ExecutionStore, tick_size: float = 0.01, min_order_size: float = 1.0):
         self.store = store
+        self.tick_size = float(tick_size)
+        self.min_order_size = float(min_order_size)
         self.logger = get_logger("short_horizon.execution", run_id=store.current_run_id)
 
     def handle_intent(self, intent: StrategyIntent, *, event_time_ms: int | None = None):
@@ -179,6 +186,7 @@ class ExecutionEngine:
         send_time_ms = int(event_time_ms if event_time_ms is not None else intent.event_time_ms)
         accepted_time_ms = send_time_ms + 1
         order_row = self._ensure_order_row(intent)
+        self._validate_order_row(order_row)
         self._transition(order_row, OrderState.PENDING_SEND, event_time_ms=send_time_ms, venue_order_status="sending")
         order_row = self._require_order(intent.intent_id)
 
@@ -373,6 +381,20 @@ class ExecutionEngine:
         )
         order_row.update(self._require_order(order_row["order_id"]))
 
+    def _validate_order_row(self, order_row: dict) -> None:
+        price = float(order_row["price"] or 0.0)
+        size = float(order_row["size"] or 0.0)
+        if price <= 0:
+            raise ExecutionValidationError(f"Order {order_row['order_id']} has non-positive price {price}")
+        if size < self.min_order_size - 1e-12:
+            raise ExecutionValidationError(
+                f"Order {order_row['order_id']} size {size} is below minimum {self.min_order_size}"
+            )
+        if not is_valid_tick_size(price, self.tick_size):
+            raise ExecutionValidationError(
+                f"Order {order_row['order_id']} price {price} is not aligned to tick size {self.tick_size}"
+            )
+
     @staticmethod
     def _state_from_row(order_row: dict) -> OrderState:
         return OrderState(str(order_row["state"]))
@@ -385,10 +407,29 @@ class ExecutionEngine:
         return int(round(datetime.fromisoformat(text).timestamp() * 1000))
 
 
+def estimate_fee_usdc(*, price: float, size: float, fee_rate_bps: float, rounding_decimals: int = 6) -> float:
+    if price < 0 or size < 0 or fee_rate_bps < 0:
+        raise ValueError("price, size, and fee_rate_bps must be non-negative")
+    gross_notional = Decimal(str(price)) * Decimal(str(size))
+    fee = gross_notional * Decimal(str(fee_rate_bps)) / Decimal("10000")
+    quantum = Decimal("1").scaleb(-int(rounding_decimals))
+    return float(fee.quantize(quantum, rounding=ROUND_CEILING))
+
+
+def is_valid_tick_size(price: float, tick_size: float, *, tolerance: float = 1e-9) -> bool:
+    if tick_size <= 0:
+        raise ValueError("tick_size must be positive")
+    units = price / tick_size
+    return abs(units - round(units)) <= tolerance
+
+
 __all__ = [
     "ALLOWED_TRANSITIONS",
     "ExecutionEngine",
     "ExecutionStore",
     "ExecutionTransitionError",
+    "ExecutionValidationError",
     "SyntheticFillRequest",
+    "estimate_fee_usdc",
+    "is_valid_tick_size",
 ]

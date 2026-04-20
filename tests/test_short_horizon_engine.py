@@ -16,7 +16,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 from short_horizon.config import ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
-from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, SyntheticFillRequest
+from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
 from short_horizon.live_runner import run_stub_live
 from short_horizon.models import OrderIntent, SkipDecision
@@ -318,6 +318,92 @@ class ExecutionEngineTest(unittest.TestCase):
                 self.assertIsNotNone(cancel_event)
                 with self.assertRaises(ExecutionTransitionError):
                     execution.apply_fill(SyntheticFillRequest(order_id="ord_exec_001", event_time_ms=225_100))
+            finally:
+                store.close()
+
+    def test_fee_math_rounds_up_conservatively(self) -> None:
+        self.assertAlmostEqual(
+            estimate_fee_usdc(price=0.333333, size=3.0, fee_rate_bps=25.0),
+            0.0025,
+        )
+        self.assertAlmostEqual(
+            estimate_fee_usdc(price=0.55, size=18.1818181818, fee_rate_bps=10.0),
+            0.01,
+        )
+
+    def test_tick_size_validation_accepts_only_tick_aligned_prices(self) -> None:
+        self.assertTrue(is_valid_tick_size(0.55, 0.01))
+        self.assertFalse(is_valid_tick_size(0.555, 0.01))
+
+    def test_execution_boundary_rejects_sub_tick_price(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_004",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="ord_exec_bad_tick",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.555,
+                    size=10.0,
+                    state=OrderState.INTENT,
+                    client_order_id="ord_exec_bad_tick",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_000,
+                    remaining_size=10.0,
+                )
+                execution = ExecutionEngine(store=store)
+                bad_intent = self._intent().__class__(
+                    **{**self._intent().__dict__, "intent_id": "ord_exec_bad_tick", "entry_price": 0.555}
+                )
+
+                with self.assertRaises(ExecutionValidationError):
+                    execution.submit(bad_intent)
+            finally:
+                store.close()
+
+    def test_execution_boundary_rejects_sub_min_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_005",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="ord_exec_too_small",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=0.5,
+                    state=OrderState.INTENT,
+                    client_order_id="ord_exec_too_small",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_000,
+                    remaining_size=0.5,
+                )
+                execution = ExecutionEngine(store=store, min_order_size=1.0)
+                bad_intent = self._intent().__class__(
+                    **{**self._intent().__dict__, "intent_id": "ord_exec_too_small"}
+                )
+
+                with self.assertRaises(ExecutionValidationError):
+                    execution.submit(bad_intent)
             finally:
                 store.close()
 
