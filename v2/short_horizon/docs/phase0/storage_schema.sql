@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS orders (
         )
     ),
     client_order_id TEXT,
+    venue_order_id TEXT,
     parent_order_id TEXT,
     intent_created_at TEXT NOT NULL,
     last_state_change_at TEXT NOT NULL,
@@ -88,6 +89,10 @@ ON orders(run_id);
 
 CREATE INDEX IF NOT EXISTS idx_orders_client_order_id
 ON orders(client_order_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_venue_order_id
+ON orders(venue_order_id)
+WHERE venue_order_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_orders_parent_order_id
 ON orders(parent_order_id);

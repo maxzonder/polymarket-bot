@@ -75,6 +75,7 @@ class RuntimeStore(Protocol):
         size: float | None,
         state: OrderState | str,
         client_order_id: str | None,
+        venue_order_id: str | None = None,
         intent_created_at_ms: int,
         last_state_change_at_ms: int,
         remaining_size: float | None = None,
@@ -90,6 +91,7 @@ class RuntimeStore(Protocol):
         order_id: str,
         state: OrderState | str,
         event_time_ms: int,
+        venue_order_id: str | None = None,
         venue_order_status: str | None = None,
         cumulative_filled_size: float | None = None,
         remaining_size: float | None = None,
@@ -180,6 +182,7 @@ class InMemoryIntentStore:
         size: float | None,
         state: OrderState | str,
         client_order_id: str | None,
+        venue_order_id: str | None = None,
         intent_created_at_ms: int,
         last_state_change_at_ms: int,
         remaining_size: float | None = None,
@@ -198,6 +201,7 @@ class InMemoryIntentStore:
             "size": size,
             "state": state_value,
             "client_order_id": client_order_id,
+            "venue_order_id": venue_order_id,
             "parent_order_id": parent_order_id,
             "intent_created_at": iso_from_ms(intent_created_at_ms),
             "last_state_change_at": iso_from_ms(last_state_change_at_ms),
@@ -215,6 +219,7 @@ class InMemoryIntentStore:
         order_id: str,
         state: OrderState | str,
         event_time_ms: int,
+        venue_order_id: str | None = None,
         venue_order_status: str | None = None,
         cumulative_filled_size: float | None = None,
         remaining_size: float | None = None,
@@ -225,6 +230,8 @@ class InMemoryIntentStore:
         row = self.orders[order_id]
         row["state"] = state.value if isinstance(state, OrderState) else str(state)
         row["last_state_change_at"] = iso_from_ms(event_time_ms)
+        if venue_order_id is not None:
+            row["venue_order_id"] = venue_order_id
         if venue_order_status is not None:
             row["venue_order_status"] = venue_order_status
         if cumulative_filled_size is not None:
@@ -432,6 +439,7 @@ class SQLiteRuntimeStore:
         size: float | None,
         state: OrderState | str,
         client_order_id: str | None,
+        venue_order_id: str | None = None,
         intent_created_at_ms: int,
         last_state_change_at_ms: int,
         remaining_size: float | None = None,
@@ -453,6 +461,7 @@ class SQLiteRuntimeStore:
                 size,
                 state,
                 client_order_id,
+                venue_order_id,
                 parent_order_id,
                 intent_created_at,
                 last_state_change_at,
@@ -460,16 +469,17 @@ class SQLiteRuntimeStore:
                 cumulative_filled_size,
                 remaining_size,
                 reconciliation_required
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(order_id) DO UPDATE SET
                 side = excluded.side,
                 price = excluded.price,
                 size = excluded.size,
                 state = excluded.state,
-                client_order_id = excluded.client_order_id,
+                client_order_id = COALESCE(excluded.client_order_id, orders.client_order_id),
+                venue_order_id = COALESCE(excluded.venue_order_id, orders.venue_order_id),
                 parent_order_id = excluded.parent_order_id,
                 last_state_change_at = excluded.last_state_change_at,
-                venue_order_status = excluded.venue_order_status,
+                venue_order_status = COALESCE(excluded.venue_order_status, orders.venue_order_status),
                 remaining_size = excluded.remaining_size,
                 reconciliation_required = excluded.reconciliation_required
             """,
@@ -483,6 +493,7 @@ class SQLiteRuntimeStore:
                 size,
                 state_value,
                 client_order_id,
+                venue_order_id,
                 parent_order_id,
                 iso_from_ms(intent_created_at_ms),
                 iso_from_ms(last_state_change_at_ms),
@@ -499,6 +510,7 @@ class SQLiteRuntimeStore:
         order_id: str,
         state: OrderState | str,
         event_time_ms: int,
+        venue_order_id: str | None = None,
         venue_order_status: str | None = None,
         cumulative_filled_size: float | None = None,
         remaining_size: float | None = None,
@@ -512,6 +524,7 @@ class SQLiteRuntimeStore:
             UPDATE orders
             SET state = ?,
                 last_state_change_at = ?,
+                venue_order_id = COALESCE(?, venue_order_id),
                 venue_order_status = COALESCE(?, venue_order_status),
                 cumulative_filled_size = COALESCE(?, cumulative_filled_size),
                 remaining_size = COALESCE(?, remaining_size),
@@ -523,6 +536,7 @@ class SQLiteRuntimeStore:
             (
                 state_value,
                 iso_from_ms(event_time_ms),
+                venue_order_id,
                 venue_order_status,
                 cumulative_filled_size,
                 remaining_size,
@@ -595,8 +609,32 @@ class SQLiteRuntimeStore:
 
     def _initialize_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[2] / "docs" / "phase0" / "storage_schema.sql"
+        self._migrate_orders_schema(precreate=True)
         self.conn.executescript(schema_path.read_text())
+        self._migrate_orders_schema(precreate=False)
         self.conn.commit()
+
+    def _migrate_orders_schema(self, *, precreate: bool) -> None:
+        table_exists = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'orders'"
+        ).fetchone() is not None
+        if not table_exists:
+            return
+        columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(orders)").fetchall()
+        }
+        if "venue_order_id" not in columns:
+            self.conn.execute("ALTER TABLE orders ADD COLUMN venue_order_id TEXT")
+        if precreate:
+            return
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_venue_order_id
+            ON orders(venue_order_id)
+            WHERE venue_order_id IS NOT NULL
+            """
+        )
 
     def _ensure_run(self) -> None:
         self.conn.execute(

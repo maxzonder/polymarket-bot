@@ -546,6 +546,160 @@ class SQLiteRuntimeStoreTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_sqlite_store_persists_venue_order_id_without_mutating_primary_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_test_venue_id",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                store.insert_order(
+                    order_id="local_ord_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=18.18,
+                    state=OrderState.PENDING_SEND,
+                    client_order_id="cli_ord_001",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_000,
+                    remaining_size=18.18,
+                )
+                store.update_order_state(
+                    order_id="local_ord_001",
+                    state=OrderState.ACCEPTED,
+                    event_time_ms=225_001,
+                    venue_order_id="venue_ord_123",
+                    venue_order_status="accepted",
+                )
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    row = conn.execute(
+                        "SELECT order_id, client_order_id, venue_order_id, state FROM orders WHERE order_id = 'local_ord_001'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(row[0], "local_ord_001")
+                self.assertEqual(row[1], "cli_ord_001")
+                self.assertEqual(row[2], "venue_ord_123")
+                self.assertEqual(row[3], "accepted")
+            finally:
+                store.close()
+
+    def test_sqlite_store_migrates_legacy_orders_schema_to_add_venue_order_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "legacy.sqlite3"
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.executescript(
+                    """
+                    CREATE TABLE runs (
+                        run_id TEXT PRIMARY KEY,
+                        started_at TEXT NOT NULL,
+                        finished_at TEXT,
+                        mode TEXT NOT NULL,
+                        strategy_id TEXT NOT NULL,
+                        git_sha TEXT,
+                        config_hash TEXT NOT NULL,
+                        notes TEXT
+                    );
+                    CREATE TABLE markets (
+                        market_id TEXT PRIMARY KEY,
+                        market_status TEXT,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE orders (
+                        order_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        side TEXT NOT NULL,
+                        price REAL,
+                        size REAL,
+                        state TEXT NOT NULL,
+                        client_order_id TEXT,
+                        parent_order_id TEXT,
+                        intent_created_at TEXT NOT NULL,
+                        last_state_change_at TEXT NOT NULL,
+                        venue_order_status TEXT,
+                        cumulative_filled_size REAL NOT NULL DEFAULT 0,
+                        remaining_size REAL,
+                        last_reject_code TEXT,
+                        last_reject_reason TEXT,
+                        reconciliation_required INTEGER NOT NULL DEFAULT 0
+                    );
+                    CREATE TABLE fills (
+                        fill_id TEXT PRIMARY KEY,
+                        order_id TEXT NOT NULL,
+                        run_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        price REAL NOT NULL,
+                        size REAL NOT NULL,
+                        fee_paid_usdc REAL,
+                        liquidity_role TEXT,
+                        filled_at TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        venue_fill_id TEXT
+                    );
+                    CREATE TABLE events_log (
+                        run_id TEXT NOT NULL,
+                        seq INTEGER NOT NULL,
+                        event_type TEXT NOT NULL,
+                        event_time TEXT NOT NULL,
+                        ingest_time TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        market_id TEXT,
+                        token_id TEXT,
+                        order_id TEXT,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (run_id, seq)
+                    );
+                    CREATE TABLE strategy_state (
+                        run_id TEXT NOT NULL,
+                        strategy_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        token_id TEXT,
+                        state_key TEXT NOT NULL,
+                        state_value_json TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (run_id, strategy_id, market_id, token_id, state_key)
+                    );
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_test_migrate",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                conn = sqlite3.connect(db_path)
+                try:
+                    columns = [row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()]
+                    indexes = [row[1] for row in conn.execute("PRAGMA index_list(orders)").fetchall()]
+                finally:
+                    conn.close()
+
+                self.assertIn("venue_order_id", columns)
+                self.assertIn("idx_orders_venue_order_id", indexes)
+            finally:
+                store.close()
+
 
 class ReplayRunnerTest(unittest.TestCase):
     def _sample_replay_rows(self) -> list[dict[str, object]]:
