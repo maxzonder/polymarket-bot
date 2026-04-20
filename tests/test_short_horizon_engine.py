@@ -14,9 +14,11 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 from short_horizon.config import ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
-from short_horizon.events import BookUpdate, MarketStateUpdate
+from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
+from short_horizon.strategies import ShortHorizon15mTouchStrategy
+from short_horizon.strategy_api import Noop, PlaceOrder
 
 
 class CoreTypesTest(unittest.TestCase):
@@ -53,6 +55,39 @@ class CoreTypesTest(unittest.TestCase):
         )
         self.assertEqual(market.event_type, EventType.MARKET_STATE_UPDATE)
         self.assertEqual(book.event_type, EventType.BOOK_UPDATE)
+
+
+class StrategyApiContractTest(unittest.TestCase):
+    def test_touch_strategy_implements_market_event_contract(self) -> None:
+        strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig())
+        strategy.on_market_event(
+            MarketStateUpdate(
+                event_time_ms=200_000,
+                ingest_time_ms=200_050,
+                market_id="m1",
+                token_id="tok_yes",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                asset_slug="bitcoin",
+                start_time_ms=0,
+                end_time_ms=900_000,
+                is_active=True,
+                metadata_is_fresh=True,
+                fee_rate_bps=10.0,
+                fee_metadata_age_ms=1_000,
+            )
+        )
+        self.assertEqual(strategy.on_market_event(BookUpdate(event_time_ms=220_000, ingest_time_ms=220_020, market_id="m1", token_id="tok_yes", best_bid=0.53, best_ask=0.54)), [])
+        outputs = strategy.on_market_event(BookUpdate(event_time_ms=225_000, ingest_time_ms=225_020, market_id="m1", token_id="tok_yes", best_bid=0.54, best_ask=0.55))
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], PlaceOrder)
+        self.assertIsInstance(outputs[0].intent, OrderIntent)
+
+    def test_touch_strategy_timer_is_unit_testable_without_io(self) -> None:
+        strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig())
+        outputs = strategy.on_timer(TimerEvent(event_time_ms=1, ingest_time_ms=1, timer_kind="decision_tick"))
+        self.assertEqual(outputs, [])
+        self.assertEqual([Noop(reason="x")][0].reason, "x")
 
 
 class ShortHorizonEngineTest(unittest.TestCase):

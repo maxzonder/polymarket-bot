@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from ..config import ShortHorizonConfig
-from ..core.events import BookUpdate, MarketStateUpdate
+from ..core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
 from ..core.lifecycle import compute_lifecycle_fraction
 from ..core.models import MarketState, OrderIntent, SkipDecision, TouchSignal
 from ..risk import gate_touch
+from ..strategy_api import Noop, PlaceOrder, StrategyIntent
 
 
 class FirstTouchTracker:
@@ -55,6 +56,35 @@ class ShortHorizon15mTouchStrategy:
         self.config = config
         self.touch_tracker = FirstTouchTracker(config.triggers.price_levels)
         self.market_state_by_token: dict[str, MarketState] = {}
+
+    def on_market_event(self, event: BookUpdate | MarketStateUpdate | TradeTick) -> list[StrategyIntent]:
+        if isinstance(event, MarketStateUpdate):
+            self.on_market_state(event)
+            return []
+        if isinstance(event, TradeTick):
+            return []
+
+        outputs: list[StrategyIntent] = []
+        for touch in self.detect_touches(event):
+            decision = self.decide_on_touch(event=event, touch=touch)
+            if isinstance(decision, OrderIntent):
+                outputs.append(PlaceOrder(decision))
+            else:
+                outputs.append(
+                    Noop(
+                        reason=decision.reason,
+                        market_id=decision.market_id,
+                        token_id=decision.token_id,
+                        details=decision.details,
+                    )
+                )
+        return outputs
+
+    def on_order_event(self, event: OrderAccepted | OrderRejected | OrderFilled | OrderCanceled) -> list[StrategyIntent]:
+        return []
+
+    def on_timer(self, timer: TimerEvent) -> list[StrategyIntent]:
+        return []
 
     def on_market_state(self, event: MarketStateUpdate) -> None:
         self.market_state_by_token[event.token_id] = MarketState(
