@@ -98,6 +98,7 @@ class ShortHorizon15mTouchStrategy:
             is_active=event.is_active,
             metadata_is_fresh=event.metadata_is_fresh,
             fee_rate_bps=event.fee_rate_bps,
+            fee_fetched_at_ms=event.fee_fetched_at_ms,
             fee_metadata_age_ms=event.fee_metadata_age_ms,
         )
 

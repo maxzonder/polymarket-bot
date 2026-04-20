@@ -166,6 +166,33 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(later_outputs, [])
         self.assertEqual(len(self.store.intents), 0)
 
+    def test_touch_uses_fee_fetched_timestamp_when_age_not_materialized(self) -> None:
+        self.engine.on_market_state(
+            MarketStateUpdate(
+                event_time_ms=200_000,
+                ingest_time_ms=200_050,
+                market_id="m1",
+                token_id="tok_yes",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                asset_slug="bitcoin",
+                start_time_ms=0,
+                end_time_ms=900_000,
+                is_active=True,
+                metadata_is_fresh=True,
+                fee_rate_bps=10.0,
+                fee_fetched_at_ms=100_000,
+                fee_metadata_age_ms=None,
+            )
+        )
+
+        self.engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54))
+        outputs = self.engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "stale_fee_metadata")
+
 
 class TelemetryTest(unittest.TestCase):
     def test_structured_logger_emits_mandatory_fields(self) -> None:

@@ -17,6 +17,7 @@ class MarketState:
     is_active: bool
     metadata_is_fresh: bool
     fee_rate_bps: float | None
+    fee_fetched_at_ms: int | None
     fee_metadata_age_ms: int | None
 
 

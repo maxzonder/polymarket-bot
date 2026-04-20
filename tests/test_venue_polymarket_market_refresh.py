@@ -58,6 +58,10 @@ class MarketRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(event.metadata_is_fresh for event in first_events))
         self.assertTrue(all(event.event_type == EventType.MARKET_STATE_UPDATE for event in first_events))
         self.assertTrue(all(event.status == MarketStatus.ACTIVE for event in first_events))
+        self.assertTrue(all(event.fee_metadata_age_ms == 0 for event in first_events))
+        self.assertTrue(all(event.fee_fetched_at_ms is not None for event in first_events))
+        self.assertTrue(all(event.fees_enabled is True for event in first_events))
+        self.assertTrue(all(event.fee_rate_bps == 10.0 for event in first_events))
 
         queued_initial = [await loop.__anext__(), await loop.__anext__()]
         self.assertEqual({event.market_id for event in queued_initial}, {"m1", "m2"})
@@ -71,7 +75,9 @@ class MarketRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(updated.end_time_ms, 1_776_694_560_000)
         self.assertEqual(updated.status, MarketStatus.ACTIVE)
+        self.assertEqual(updated.fee_rate_bps, 10.0)
         self.assertEqual(new_market.status, MarketStatus.ACTIVE)
+        self.assertEqual(new_market.fee_metadata_age_ms, 0)
         self.assertEqual(dropped.status, MarketStatus.CLOSED)
         self.assertFalse(dropped.is_active)
         self.assertEqual(dropped.asset_slug, "ethereum")

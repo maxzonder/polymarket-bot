@@ -1,6 +1,7 @@
 """Polymarket venue adapter boundary."""
 
 from .book_channel import BookNormalizer
+from .fee_metadata import FeeMetadataRefreshLoop
 from .markets import (
     DiscoveryStats,
     DurationWindow,
@@ -26,6 +27,7 @@ __all__ = [
     "BookNormalizer",
     "DiscoveryStats",
     "DurationWindow",
+    "FeeMetadataRefreshLoop",
     "MarketMetadata",
     "MarketRefreshLoop",
     "PolymarketVenueAdapter",

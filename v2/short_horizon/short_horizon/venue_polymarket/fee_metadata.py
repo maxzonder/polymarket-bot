@@ -5,16 +5,19 @@ import contextlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from ..config import MarketDiscoveryConfig
+from ..config import FeesConfig, MarketDiscoveryConfig
 from ..core.events import MarketStateUpdate, MarketStatus
 from ..telemetry import get_logger
 from .markets import DurationWindow, MarketMetadata, UniverseFilter, discover_short_horizon_markets
 
 
 DiscoveryFn = Callable[[UniverseFilter | None, DurationWindow | None, int], Awaitable[list[MarketMetadata]]]
+ClockFn = Callable[[], int]
 
 
-class MarketRefreshLoop:
+class FeeMetadataRefreshLoop:
+    """Refresh fee snapshots for active markets on a cadence safely inside TTL."""
+
     def __init__(
         self,
         *,
@@ -22,22 +25,29 @@ class MarketRefreshLoop:
         universe_filter: UniverseFilter | None = None,
         duration_window: DurationWindow | None = None,
         refresh_interval_seconds: int | None = None,
+        fee_metadata_ttl_seconds: int | None = None,
         max_rows: int = 20_000,
+        clock_ms: ClockFn | None = None,
     ):
         self.discovery_fn = discovery_fn or discover_short_horizon_markets
         self.universe_filter = universe_filter or UniverseFilter()
         self.duration_window = duration_window or DurationWindow()
+        self.fee_metadata_ttl_seconds = int(
+            fee_metadata_ttl_seconds
+            if fee_metadata_ttl_seconds is not None
+            else FeesConfig().fee_metadata_ttl_seconds
+        )
         self.refresh_interval_seconds = int(
             refresh_interval_seconds
             if refresh_interval_seconds is not None
-            else MarketDiscoveryConfig().refresh_interval_seconds
+            else min(MarketDiscoveryConfig().refresh_interval_seconds, self.fee_metadata_ttl_seconds)
         )
         self.max_rows = int(max_rows)
-        self.logger = get_logger("short_horizon.venue_polymarket.market_refresh")
+        self.clock_ms = clock_ms or _default_clock_ms
+        self.logger = get_logger("short_horizon.venue_polymarket.fee_metadata")
         self._queue: asyncio.Queue[MarketStateUpdate | object] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
-        self._previous_markets: dict[str, MarketMetadata] = {}
         self._sentinel = object()
 
     @property
@@ -58,7 +68,7 @@ class MarketRefreshLoop:
         if self._task is not None and not self._task.done():
             return
         self._stop_event.clear()
-        self._task = asyncio.create_task(self._run(), name="market_refresh_loop")
+        self._task = asyncio.create_task(self._run(), name="fee_metadata_refresh_loop")
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -80,84 +90,38 @@ class MarketRefreshLoop:
             raise
 
     async def refresh_once(self) -> list[MarketStateUpdate]:
-        now_ms = int(time.time() * 1000)
+        now_ms = self.clock_ms()
         latest = await self.discovery_fn(self.universe_filter, self.duration_window, self.max_rows)
-        latest_by_id = {market.market_id: market for market in latest}
 
         queued_events: list[MarketStateUpdate] = []
-        new_count = 0
-        updated_count = 0
-        dropped_count = 0
-
-        for market_id, market in latest_by_id.items():
-            previous = self._previous_markets.get(market_id)
-            if previous is None:
-                new_count += 1
-                event = _to_market_state_update(market, event_time_ms=now_ms, ingest_time_ms=now_ms)
-                queued_events.append(event)
-                await self._queue.put(event)
-                continue
-            if _market_changed(previous, market):
-                updated_count += 1
-                event = _to_market_state_update(market, event_time_ms=now_ms, ingest_time_ms=now_ms)
-                queued_events.append(event)
-                await self._queue.put(event)
-
-        for market_id, previous in self._previous_markets.items():
-            if market_id in latest_by_id:
-                continue
-            dropped_count += 1
-            event = _to_market_state_update(
-                previous,
-                event_time_ms=now_ms,
-                ingest_time_ms=now_ms,
-                is_active=False,
-                status=MarketStatus.CLOSED,
-            )
+        for market in latest:
+            event = _to_fee_market_state_update(market, event_time_ms=now_ms, ingest_time_ms=now_ms)
             queued_events.append(event)
             await self._queue.put(event)
 
-        self._previous_markets = latest_by_id
         self.logger.info(
-            "market_refresh_completed",
-            eligible_markets=len(latest_by_id),
-            new=new_count,
-            dropped=dropped_count,
-            updated=updated_count,
+            "fee_metadata_refresh_completed",
+            eligible_markets=len(latest),
+            ttl_seconds=self.fee_metadata_ttl_seconds,
+            refresh_interval_seconds=self.refresh_interval_seconds,
+            emitted=len(queued_events),
         )
         return queued_events
 
 
-def _market_changed(previous: MarketMetadata, current: MarketMetadata) -> bool:
-    return (
-        previous.end_time_ms != current.end_time_ms
-        or previous.start_time_ms != current.start_time_ms
-        or previous.is_active != current.is_active
-        or previous.token_yes_id != current.token_yes_id
-        or previous.token_no_id != current.token_no_id
-        or previous.asset_slug != current.asset_slug
-        or previous.fees_enabled != current.fees_enabled
-        or previous.fee_rate_bps != current.fee_rate_bps
-    )
-
-
-def _to_market_state_update(
+def _to_fee_market_state_update(
     market: MarketMetadata,
     *,
     event_time_ms: int,
     ingest_time_ms: int,
-    is_active: bool | None = None,
-    status: MarketStatus | None = None,
 ) -> MarketStateUpdate:
-    resolved_is_active = market.is_active if is_active is None else is_active
-    resolved_status = status or (MarketStatus.ACTIVE if resolved_is_active else MarketStatus.CLOSED)
     return MarketStateUpdate(
         event_time_ms=event_time_ms,
         ingest_time_ms=ingest_time_ms,
         market_id=market.market_id,
         condition_id=market.condition_id,
         question=market.question,
-        status=resolved_status,
+        status=MarketStatus.ACTIVE if market.is_active else MarketStatus.CLOSED,
         start_time_ms=market.start_time_ms,
         end_time_ms=market.end_time_ms,
         duration_seconds=market.duration_seconds,
@@ -166,12 +130,16 @@ def _to_market_state_update(
         fee_rate_bps=market.fee_rate_bps,
         fee_fetched_at_ms=ingest_time_ms,
         fees_enabled=market.fees_enabled,
-        source="polymarket.gamma.refresh",
+        source="polymarket.gamma.fee_refresh",
         asset_slug=market.asset_slug,
-        is_active=resolved_is_active,
+        is_active=market.is_active,
         metadata_is_fresh=True,
         fee_metadata_age_ms=0,
     )
 
 
-__all__ = ["MarketRefreshLoop"]
+def _default_clock_ms() -> int:
+    return int(time.time() * 1000)
+
+
+__all__ = ["FeeMetadataRefreshLoop"]

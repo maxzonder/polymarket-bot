@@ -47,7 +47,8 @@ def gate_touch(
             event_time_ms=event.event_time_ms,
         )
     if config.fees.reject_if_fee_metadata_stale:
-        if state.fee_metadata_age_ms is None:
+        fee_metadata_age_ms = _resolve_fee_metadata_age_ms(event_time_ms=event.event_time_ms, state=state)
+        if fee_metadata_age_ms is None:
             return SkipDecision(
                 reason="missing_fee_metadata",
                 market_id=state.market_id,
@@ -55,7 +56,7 @@ def gate_touch(
                 level=level,
                 event_time_ms=event.event_time_ms,
             )
-        if state.fee_metadata_age_ms > config.fees.fee_metadata_ttl_seconds * 1000:
+        if fee_metadata_age_ms > config.fees.fee_metadata_ttl_seconds * 1000:
             return SkipDecision(
                 reason="stale_fee_metadata",
                 market_id=state.market_id,
@@ -110,3 +111,11 @@ def gate_touch(
             details=f"best_ask={event.best_ask}",
         )
     return None
+
+
+def _resolve_fee_metadata_age_ms(*, event_time_ms: int, state: MarketState) -> int | None:
+    if state.fee_metadata_age_ms is not None:
+        return state.fee_metadata_age_ms
+    if state.fee_fetched_at_ms is None:
+        return None
+    return max(0, int(event_time_ms) - int(state.fee_fetched_at_ms))
