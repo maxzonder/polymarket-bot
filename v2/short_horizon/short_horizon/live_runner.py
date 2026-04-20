@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import ShortHorizonConfig
 from .core.runtime import StrategyRuntime
 from .market_data import LiveEventSource, MarketDataSource
+from .probe import cross_validate_probe_against_collector, summarize_probe_db
 from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_events
 from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
@@ -52,6 +53,7 @@ async def run_live(
     config_hash: str = "dev",
     source: LiveEventSource | None = None,
     max_events: int | None = None,
+    max_runtime_seconds: float | None = None,
 ) -> RunnerSummary:
     runtime = build_live_runtime(db_path=db_path, run_id=run_id, config=config, config_hash=config_hash)
     source = source or LiveEventSource()
@@ -63,6 +65,7 @@ async def run_live(
             logger_name="short_horizon.live_runner",
             completed_event_name="live_run_completed",
             max_events=max_events,
+            max_runtime_seconds=max_runtime_seconds,
         )
     finally:
         await source.stop()
@@ -80,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default=None, help="Optional explicit run_id; defaults to a fresh live_<suffix>")
     parser.add_argument("--config-hash", default="dev", help="Config hash label stored in runs table")
     parser.add_argument("--max-events", type=int, default=None, help="Optional cap on processed live events, useful for smoke tests")
+    parser.add_argument("--max-runtime-seconds", type=float, default=None, help="Optional wall-clock cap for live probes")
+    parser.add_argument("--collector-csv", default=None, help="Optional collector CSV path for post-run cross-validation")
     return parser
 
 
@@ -107,9 +112,11 @@ def main(argv: list[str] | None = None) -> None:
                 run_id=args.run_id,
                 config_hash=args.config_hash,
                 max_events=args.max_events,
+                max_runtime_seconds=args.max_runtime_seconds,
             )
         )
     logger = get_logger("short_horizon.live_runner", run_id=summary.run_id)
+    probe_summary = summarize_probe_db(args.db_path, run_id=summary.run_id)
     logger.info(
         "live_runner_completed",
         run_id=summary.run_id,
@@ -118,6 +125,36 @@ def main(argv: list[str] | None = None) -> None:
         synthetic_order_events=summary.synthetic_order_events,
         db_path=str(summary.db_path),
     )
+    logger.info(
+        "live_probe_summary",
+        run_id=probe_summary.run_id,
+        total_events=probe_summary.total_events,
+        market_state_updates=probe_summary.market_state_updates,
+        book_updates=probe_summary.book_updates,
+        trade_ticks=probe_summary.trade_ticks,
+        order_events=probe_summary.order_events,
+        distinct_markets=probe_summary.distinct_markets,
+        distinct_tokens=probe_summary.distinct_tokens,
+        first_event_time=probe_summary.first_event_time,
+        last_event_time=probe_summary.last_event_time,
+    )
+    if args.collector_csv:
+        validation = cross_validate_probe_against_collector(
+            args.db_path,
+            run_id=summary.run_id,
+            collector_csv_path=args.collector_csv,
+        )
+        logger.info(
+            "live_probe_cross_validation",
+            run_id=validation.run_id,
+            collector_rows=validation.collector_rows,
+            probe_markets=validation.probe_markets,
+            collector_markets=validation.collector_markets,
+            overlapping_markets=validation.overlapping_markets,
+            probe_tokens=validation.probe_tokens,
+            collector_tokens=validation.collector_tokens,
+            overlapping_tokens=validation.overlapping_tokens,
+        )
 
 
 if __name__ == "__main__":

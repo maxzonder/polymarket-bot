@@ -20,6 +20,7 @@ from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
 from short_horizon.live_runner import build_parser, run_live, run_stub_live
+from short_horizon.probe import cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
@@ -713,9 +714,11 @@ class ReplayRunnerTest(unittest.TestCase):
         self.assertEqual(stub_args.mode, "stub")
         self.assertEqual(stub_args.stub_event_log_path, "sample.jsonl")
 
-        live_args = parser.parse_args(["live.sqlite3", "--mode", "live", "--max-events", "5"])
+        live_args = parser.parse_args(["live.sqlite3", "--mode", "live", "--max-events", "5", "--max-runtime-seconds", "15", "--collector-csv", "collector.csv"])
         self.assertEqual(live_args.mode, "live")
         self.assertEqual(live_args.max_events, 5)
+        self.assertEqual(live_args.max_runtime_seconds, 15.0)
+        self.assertEqual(live_args.collector_csv, "collector.csv")
 
     def test_replay_runner_is_deterministic_for_same_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -863,6 +866,78 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(event_count, 4)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
+
+    async def test_live_runner_probe_summary_and_collector_cross_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_probe.sqlite3"
+            collector_csv = Path(tmpdir) / "collector.csv"
+            collector_csv.write_text(
+                "market_id,token_id\n"
+                "m1,tok_yes\n"
+                "m9,tok_other\n",
+                encoding="utf-8",
+            )
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                ]
+            )
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_probe_test_001",
+                config_hash="test-config",
+                source=source,
+                max_runtime_seconds=1.0,
+            )
+
+            self.assertEqual(summary.event_count, 2)
+
+            probe_summary = summarize_probe_db(db_path, run_id="live_probe_test_001")
+            self.assertEqual(probe_summary.total_events, 2)
+            self.assertEqual(probe_summary.market_state_updates, 1)
+            self.assertEqual(probe_summary.book_updates, 1)
+            self.assertEqual(probe_summary.trade_ticks, 0)
+            self.assertEqual(probe_summary.distinct_markets, 1)
+            self.assertEqual(probe_summary.distinct_tokens, 1)
+            self.assertIsNotNone(probe_summary.first_event_time)
+            self.assertIsNotNone(probe_summary.last_event_time)
+
+            validation = cross_validate_probe_against_collector(
+                db_path,
+                run_id="live_probe_test_001",
+                collector_csv_path=collector_csv,
+            )
+            self.assertEqual(validation.collector_rows, 2)
+            self.assertEqual(validation.probe_markets, 1)
+            self.assertEqual(validation.collector_markets, 2)
+            self.assertEqual(validation.overlapping_markets, 1)
+            self.assertEqual(validation.probe_tokens, 1)
+            self.assertEqual(validation.collector_tokens, 2)
+            self.assertEqual(validation.overlapping_tokens, 1)
 
     def test_sqlite_repository_api_handles_transition_fill_and_reconciliation_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

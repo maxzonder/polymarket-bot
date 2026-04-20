@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,14 +58,29 @@ async def drive_runtime_event_stream(
     logger_name: str,
     completed_event_name: str,
     max_events: int | None = None,
+    max_runtime_seconds: float | None = None,
 ) -> RunnerSummary:
     logger = get_logger(logger_name, run_id=runtime.store.current_run_id)
     execution = ExecutionEngine(store=runtime.store)
     event_count = 0
     order_intents = 0
     synthetic_order_events = 0
+    deadline = None if max_runtime_seconds is None else asyncio.get_running_loop().time() + float(max_runtime_seconds)
 
-    async for event in events:
+    while True:
+        try:
+            if deadline is None:
+                event = await anext(events)
+            else:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                event = await asyncio.wait_for(anext(events), timeout=remaining)
+        except StopAsyncIteration:
+            break
+        except asyncio.TimeoutError:
+            break
+
         event_count += 1
         intent_count, synthetic_count = _handle_runtime_event(event=event, runtime=runtime, execution=execution)
         order_intents += intent_count
