@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..core.events import BookUpdate, MarketStateUpdate
+from ..core.events import BookUpdate, MarketStateUpdate, NormalizedEvent
 from ..core.models import OrderIntent
+from ..core.order_state import OrderState
 
 
 @dataclass(frozen=True)
@@ -23,7 +24,7 @@ class RunContext:
 
 
 class RuntimeStore(Protocol):
-    def append_event(self, event: BookUpdate | MarketStateUpdate) -> None:
+    def append_event(self, event: NormalizedEvent) -> None:
         ...
 
     def upsert_market_state(self, event: MarketStateUpdate) -> None:
@@ -39,11 +40,11 @@ class RuntimeStore(Protocol):
 @dataclass
 class InMemoryIntentStore:
     intents: list[OrderIntent] = field(default_factory=list)
-    events: list[BookUpdate | MarketStateUpdate] = field(default_factory=list)
+    events: list[NormalizedEvent] = field(default_factory=list)
     market_updates: list[MarketStateUpdate] = field(default_factory=list)
     strategy_state: dict[tuple[str, str | None, str], dict[str, Any]] = field(default_factory=dict)
 
-    def append_event(self, event: BookUpdate | MarketStateUpdate) -> None:
+    def append_event(self, event: NormalizedEvent) -> None:
         self.events.append(event)
 
     def upsert_market_state(self, event: MarketStateUpdate) -> None:
@@ -77,9 +78,10 @@ class SQLiteRuntimeStore:
     def close(self) -> None:
         self.conn.close()
 
-    def append_event(self, event: BookUpdate | MarketStateUpdate) -> None:
+    def append_event(self, event: NormalizedEvent) -> None:
         market_id, token_id = _event_market_token(event)
-        self._ensure_market_stub(market_id)
+        if market_id is not None:
+            self._ensure_market_stub(market_id)
         payload = normalize_event_payload(event)
         self.conn.execute(
             """
@@ -192,7 +194,7 @@ class SQLiteRuntimeStore:
                 cumulative_filled_size,
                 remaining_size,
                 reconciliation_required
-            ) VALUES (?, ?, ?, ?, 'BUY', ?, ?, 'intent', ?, NULL, ?, ?, NULL, 0, ?, 0)
+            ) VALUES (?, ?, ?, ?, 'BUY', ?, ?, ?, ?, NULL, ?, ?, NULL, 0, ?, 0)
             ON CONFLICT(order_id) DO UPDATE SET
                 price = excluded.price,
                 size = excluded.size,
@@ -206,6 +208,7 @@ class SQLiteRuntimeStore:
                 intent.token_id,
                 intent.entry_price,
                 size,
+                OrderState.INTENT.value,
                 intent.intent_id,
                 iso_from_ms(intent.event_time_ms),
                 iso_from_ms(intent.event_time_ms),
@@ -254,7 +257,7 @@ class SQLiteRuntimeStore:
         return seq
 
 
-def normalize_event_payload(event: BookUpdate | MarketStateUpdate) -> dict[str, Any]:
+def normalize_event_payload(event: NormalizedEvent) -> dict[str, Any]:
     if isinstance(event, BookUpdate):
         spread = None
         mid_price = None
@@ -290,10 +293,10 @@ def normalize_event_payload(event: BookUpdate | MarketStateUpdate) -> dict[str, 
     return payload
 
 
-def _event_market_token(event: BookUpdate | MarketStateUpdate) -> tuple[str, str | None]:
-    if isinstance(event, BookUpdate):
-        return event.market_id, event.token_id
-    return event.market_id, event.token_id
+def _event_market_token(event: NormalizedEvent) -> tuple[str | None, str | None]:
+    market_id = getattr(event, "market_id", None)
+    token_id = getattr(event, "token_id", None)
+    return market_id, token_id
 
 
 def utc_now_iso() -> str:

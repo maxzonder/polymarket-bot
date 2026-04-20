@@ -12,10 +12,47 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.config import ShortHorizonConfig
+from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.events import BookUpdate, MarketStateUpdate
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
+
+
+class CoreTypesTest(unittest.TestCase):
+    def test_order_state_values_match_phase0_contract(self) -> None:
+        self.assertEqual(OrderState.INTENT, "intent")
+        self.assertEqual(OrderState.PENDING_SEND, "pending_send")
+        self.assertEqual(OrderState.ACCEPTED, "accepted")
+        self.assertEqual(OrderState.PARTIALLY_FILLED, "partially_filled")
+        self.assertEqual(OrderState.FILLED, "filled")
+        self.assertEqual(OrderState.CANCEL_REQUESTED, "cancel_requested")
+        self.assertEqual(OrderState.CANCEL_CONFIRMED, "cancel_confirmed")
+        self.assertEqual(OrderState.REJECTED, "rejected")
+        self.assertEqual(OrderState.EXPIRED, "expired")
+        self.assertEqual(OrderState.UNKNOWN, "unknown")
+        self.assertEqual(OrderState.REPLACE_REQUESTED, "replace_requested")
+        self.assertEqual(OrderState.REPLACED, "replaced")
+
+    def test_normalized_events_expose_canonical_event_type(self) -> None:
+        market = MarketStateUpdate(
+            event_time_ms=1,
+            ingest_time_ms=2,
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+        )
+        book = BookUpdate(
+            event_time_ms=3,
+            ingest_time_ms=4,
+            market_id="m1",
+            token_id="tok_yes",
+            best_bid=0.54,
+            best_ask=0.55,
+        )
+        self.assertEqual(market.event_type, EventType.MARKET_STATE_UPDATE)
+        self.assertEqual(book.event_type, EventType.BOOK_UPDATE)
 
 
 class ShortHorizonEngineTest(unittest.TestCase):
