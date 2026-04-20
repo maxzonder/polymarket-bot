@@ -287,6 +287,7 @@ class SQLiteRuntimeStore:
         self.run = run
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
+        self._closed = False
         self._initialize_schema()
         self._ensure_run()
         row = self.conn.execute(
@@ -300,7 +301,11 @@ class SQLiteRuntimeStore:
         return self.run.run_id
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._finalize_run()
         self.conn.close()
+        self._closed = True
 
     def append_event(self, event: NormalizedEvent) -> None:
         self.append_event_log(event)
@@ -609,6 +614,17 @@ class SQLiteRuntimeStore:
                 self.run.config_hash,
                 self.run.notes,
             ),
+        )
+        self.conn.commit()
+
+    def _finalize_run(self) -> None:
+        self.conn.execute(
+            """
+            UPDATE runs
+            SET finished_at = COALESCE(finished_at, ?)
+            WHERE run_id = ?
+            """,
+            (utc_now_iso(), self.run.run_id),
         )
         self.conn.commit()
 

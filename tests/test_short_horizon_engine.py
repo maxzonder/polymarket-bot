@@ -654,7 +654,7 @@ class ReplayRunnerTest(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 run_row = conn.execute(
-                    "SELECT run_id, mode, strategy_id FROM runs WHERE run_id = 'replay_test_001'"
+                    "SELECT run_id, mode, strategy_id, finished_at FROM runs WHERE run_id = 'replay_test_001'"
                 ).fetchone()
                 event_count = conn.execute(
                     "SELECT COUNT(*) FROM events_log WHERE run_id = 'replay_test_001'"
@@ -668,6 +668,7 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(run_row[0], "replay_test_001")
             self.assertEqual(run_row[1], "replay")
             self.assertEqual(run_row[2], "short_horizon_15m_touch_v1")
+            self.assertIsNotNone(run_row[3])
             self.assertEqual(event_count, 11)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
@@ -694,7 +695,7 @@ class ReplayRunnerTest(unittest.TestCase):
             conn = sqlite3.connect(db_path)
             try:
                 run_row = conn.execute(
-                    "SELECT run_id, mode FROM runs WHERE run_id = 'live_test_001'"
+                    "SELECT run_id, mode, finished_at FROM runs WHERE run_id = 'live_test_001'"
                 ).fetchone()
                 event_count = conn.execute(
                     "SELECT COUNT(*) FROM events_log WHERE run_id = 'live_test_001'"
@@ -704,6 +705,7 @@ class ReplayRunnerTest(unittest.TestCase):
 
             self.assertEqual(run_row[0], "live_test_001")
             self.assertEqual(run_row[1], "live")
+            self.assertIsNotNone(run_row[2])
             self.assertEqual(event_count, 11)
 
     def test_live_runner_parser_supports_stub_and_live_modes(self) -> None:
