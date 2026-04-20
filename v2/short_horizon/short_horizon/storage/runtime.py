@@ -35,6 +35,10 @@ class RunContext:
 
 
 class RuntimeStore(Protocol):
+    @property
+    def current_run_id(self) -> str:
+        ...
+
     def append_event(self, event: NormalizedEvent) -> None:
         ...
 
@@ -54,6 +58,11 @@ class InMemoryIntentStore:
     events: list[NormalizedEvent] = field(default_factory=list)
     market_updates: list[MarketStateUpdate] = field(default_factory=list)
     strategy_state: dict[tuple[str, str | None, str], dict[str, Any]] = field(default_factory=dict)
+    run_id: str = "run_in_memory"
+
+    @property
+    def current_run_id(self) -> str:
+        return self.run_id
 
     def append_event(self, event: NormalizedEvent) -> None:
         self.events.append(event)
@@ -85,6 +94,10 @@ class SQLiteRuntimeStore:
             (self.run.run_id,),
         ).fetchone()
         self._next_seq_value = int(row["max_seq"] or 0) + 1
+
+    @property
+    def current_run_id(self) -> str:
+        return self.run.run_id
 
     def close(self) -> None:
         self.conn.close()

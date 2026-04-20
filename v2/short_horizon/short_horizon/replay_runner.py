@@ -5,7 +5,7 @@ from .core.runtime import StrategyRuntime
 from .replay import ReplayEventSource
 from .storage import InMemoryIntentStore
 from .strategies import ShortHorizon15mTouchStrategy
-from .telemetry import get_logger
+from .telemetry import configure_logging, get_logger
 
 
 def build_replay_runtime() -> StrategyRuntime:
@@ -15,10 +15,15 @@ def build_replay_runtime() -> StrategyRuntime:
 
 
 def main() -> None:
+    configure_logging()
     logger = get_logger("short_horizon.replay_runner")
     _ = ReplayEventSource()
     runtime = build_replay_runtime()
-    logger.info("replay_runner skeleton booted with strategy=%s", runtime.strategy.__class__.__name__)
+    logger.info(
+        "replay_runner_booted",
+        run_id=runtime.store.current_run_id,
+        strategy=runtime.strategy.__class__.__name__,
+    )
 
 
 if __name__ == "__main__":

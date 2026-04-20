@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import sqlite3
 import sys
 import tempfile
@@ -19,6 +21,7 @@ from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import Noop, PlaceOrder
+from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
 
 
 class CoreTypesTest(unittest.TestCase):
@@ -159,6 +162,31 @@ class ShortHorizonEngineTest(unittest.TestCase):
         later_outputs = self.engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
         self.assertEqual(later_outputs, [])
         self.assertEqual(len(self.store.intents), 0)
+
+
+class TelemetryTest(unittest.TestCase):
+    def test_structured_logger_emits_mandatory_fields(self) -> None:
+        stream = io.StringIO()
+        configure_logging(name="short_horizon.test", stream=stream)
+        logger = get_logger("short_horizon.test.runtime", run_id="run_test_telemetry")
+        event = BookUpdate(
+            event_time_ms=3_000,
+            ingest_time_ms=4_000,
+            market_id="m1",
+            token_id="tok_yes",
+            best_bid=0.54,
+            best_ask=0.55,
+        )
+
+        logger.info("book_update_ingested", **event_log_fields(event, order_id="ord_123"), best_ask=0.55)
+
+        payload = json.loads(stream.getvalue().strip())
+        self.assertEqual(payload["run_id"], "run_test_telemetry")
+        self.assertEqual(payload["market_id"], "m1")
+        self.assertEqual(payload["order_id"], "ord_123")
+        self.assertEqual(payload["event_time"], "1970-01-01T00:00:03.000Z")
+        self.assertEqual(payload["ingest_time"], "1970-01-01T00:00:04.000Z")
+        self.assertEqual(payload["event"], "book_update_ingested")
 
 
 class SQLiteRuntimeStoreTest(unittest.TestCase):
@@ -315,6 +343,43 @@ class SQLiteRuntimeStoreTest(unittest.TestCase):
                 self.assertAlmostEqual(fill_row[2], 0.05)
                 self.assertEqual(fill_row[3], "taker")
                 self.assertEqual(fill_row[4], "replay")
+            finally:
+                store.close()
+
+    def test_runtime_logs_are_joinable_to_events_log_by_run_and_event_time(self) -> None:
+        stream = io.StringIO()
+        configure_logging(name="short_horizon", stream=stream)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_test_003",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=store)
+                engine.on_market_state(self._market_state())
+                engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54))
+                engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+                lines = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+                intent_log = next(line for line in lines if line.get("event") == "order_intent_created")
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    event_rows = conn.execute(
+                        "SELECT run_id, event_time, market_id FROM events_log WHERE run_id = ? AND event_time = ? AND market_id = ?",
+                        (intent_log["run_id"], intent_log["event_time"], intent_log["market_id"]),
+                    ).fetchall()
+                finally:
+                    conn.close()
+
+                self.assertEqual(intent_log["run_id"], "run_test_003")
+                self.assertEqual(intent_log["order_id"], "m1:tok_yes:0.55:225000")
+                self.assertGreaterEqual(len(event_rows), 1)
             finally:
                 store.close()
 
