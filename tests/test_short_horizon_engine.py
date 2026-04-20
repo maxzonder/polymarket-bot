@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import sqlite3
@@ -18,13 +19,45 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
-from short_horizon.live_runner import run_stub_live
+from short_horizon.live_runner import build_parser, run_live, run_stub_live
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
+
+
+class _AsyncNormalizedSource:
+    def __init__(self, events):
+        self._events = list(events)
+        self._queue: asyncio.Queue[object] = asyncio.Queue()
+        self._sentinel = object()
+        self.started = False
+        self.stopped = False
+
+    @property
+    def events(self):
+        return self
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        item = await self._queue.get()
+        if item is self._sentinel:
+            raise StopAsyncIteration
+        return item
+
+    async def start(self) -> None:
+        self.started = True
+        for event in self._events:
+            await self._queue.put(event)
+        await self._queue.put(self._sentinel)
+
+    async def stop(self) -> None:
+        self.stopped = True
+        await self._queue.put(self._sentinel)
 
 
 class CoreTypesTest(unittest.TestCase):
@@ -672,6 +705,18 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(run_row[1], "live")
             self.assertEqual(event_count, 11)
 
+    def test_live_runner_parser_supports_stub_and_live_modes(self) -> None:
+        parser = build_parser()
+
+        stub_args = parser.parse_args(["live.sqlite3", "--mode", "stub", "--stub-event-log-path", "sample.jsonl"])
+        self.assertEqual(stub_args.db_path, "live.sqlite3")
+        self.assertEqual(stub_args.mode, "stub")
+        self.assertEqual(stub_args.stub_event_log_path, "sample.jsonl")
+
+        live_args = parser.parse_args(["live.sqlite3", "--mode", "live", "--max-events", "5"])
+        self.assertEqual(live_args.mode, "live")
+        self.assertEqual(live_args.max_events, 5)
+
     def test_replay_runner_is_deterministic_for_same_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -714,6 +759,110 @@ class ReplayRunnerTest(unittest.TestCase):
 
             self.assertEqual(events_a, events_b)
             self.assertEqual(orders_a, orders_b)
+
+
+class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
+    def _market_state(self) -> MarketStateUpdate:
+        return MarketStateUpdate(
+            event_time_ms=200_000,
+            ingest_time_ms=200_050,
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            start_time_ms=0,
+            end_time_ms=900_000,
+            is_active=True,
+            metadata_is_fresh=True,
+            fee_rate_bps=10.0,
+            fee_metadata_age_ms=1_000,
+        )
+
+    def _book(self, *, event_time_ms: int, best_ask: float) -> BookUpdate:
+        return BookUpdate(
+            event_time_ms=event_time_ms,
+            ingest_time_ms=event_time_ms + 20,
+            market_id="m1",
+            token_id="tok_yes",
+            best_bid=best_ask - 0.01,
+            best_ask=best_ask,
+        )
+
+    async def test_live_runner_real_mode_uses_live_event_source_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_real.sqlite3"
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                ]
+            )
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_real_test_001",
+                config_hash="test-config",
+                source=source,
+                max_events=3,
+            )
+
+            self.assertEqual(summary.run_id, "live_real_test_001")
+            self.assertEqual(summary.event_count, 3)
+            self.assertEqual(summary.order_intents, 1)
+            self.assertEqual(summary.synthetic_order_events, 1)
+            self.assertTrue(source.started)
+            self.assertTrue(source.stopped)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                run_row = conn.execute(
+                    "SELECT run_id, mode FROM runs WHERE run_id = 'live_real_test_001'"
+                ).fetchone()
+                event_count = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'live_real_test_001'"
+                ).fetchone()[0]
+                order_row = conn.execute(
+                    "SELECT state, venue_order_status FROM orders WHERE run_id = 'live_real_test_001' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertEqual(run_row[0], "live_real_test_001")
+            self.assertEqual(run_row[1], "live")
+            self.assertEqual(event_count, 4)
+            self.assertEqual(order_row[0], "accepted")
+            self.assertEqual(order_row[1], "accepted")
 
     def test_sqlite_repository_api_handles_transition_fill_and_reconciliation_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
