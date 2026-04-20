@@ -39,6 +39,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.gamma_client import GAMMA_BASE
+from utils.paths import DATA_DIR
 
 try:
     import websockets
@@ -59,6 +60,8 @@ DEFAULT_REFRESH_INTERVAL_SEC = 30
 DEFAULT_DURATION_MIN = 840
 DEFAULT_DURATION_MAX = 960
 DEFAULT_PING_INTERVAL_SEC = 10
+DEFAULT_OUTPUT_SUBDIR = Path("short_horizon") / "phase0"
+DEFAULT_OUTPUT_BASENAME = "live_depth_survival.csv"
 
 
 @dataclass
@@ -787,9 +790,13 @@ def evaluate_notional_fit(ask_levels: list[tuple[float, float]], notionals: tupl
     return results
 
 
+def default_output_csv_path() -> Path:
+    return DATA_DIR / DEFAULT_OUTPUT_SUBDIR / DEFAULT_OUTPUT_BASENAME
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-csv", default="v2/short_horizon/docs/phase0/live_depth_survival.csv")
+    parser.add_argument("--output-csv", default=str(default_output_csv_path()))
     parser.add_argument("--levels", nargs="*", type=float, default=list(DEFAULT_LEVELS))
     parser.add_argument("--notionals", nargs="*", type=float, default=list(DEFAULT_NOTIONALS))
     parser.add_argument("--depth-levels", type=int, default=DEFAULT_DEPTH_LEVELS)
