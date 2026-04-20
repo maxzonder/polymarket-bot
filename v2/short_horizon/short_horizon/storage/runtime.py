@@ -7,7 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..core.events import BookUpdate, MarketStateUpdate, NormalizedEvent
+from ..core.events import (
+    BookUpdate,
+    MarketStateUpdate,
+    NormalizedEvent,
+    OrderAccepted,
+    OrderCanceled,
+    OrderFilled,
+    OrderRejected,
+    TimerEvent,
+    TradeTick,
+)
 from ..core.models import OrderIntent
 from ..core.order_state import OrderState
 
@@ -51,6 +61,67 @@ class RuntimeStore(Protocol):
     def persist_intent(self, intent: OrderIntent) -> None:
         ...
 
+    def append_event_log(self, event: NormalizedEvent, *, order_id: str | None = None) -> None:
+        ...
+
+    def insert_order(
+        self,
+        *,
+        order_id: str,
+        market_id: str,
+        token_id: str,
+        side: str,
+        price: float | None,
+        size: float | None,
+        state: OrderState | str,
+        client_order_id: str | None,
+        intent_created_at_ms: int,
+        last_state_change_at_ms: int,
+        remaining_size: float | None = None,
+        parent_order_id: str | None = None,
+        venue_order_status: str | None = None,
+        reconciliation_required: bool = False,
+    ) -> None:
+        ...
+
+    def update_order_state(
+        self,
+        *,
+        order_id: str,
+        state: OrderState | str,
+        event_time_ms: int,
+        venue_order_status: str | None = None,
+        cumulative_filled_size: float | None = None,
+        remaining_size: float | None = None,
+        reconciliation_required: bool | None = None,
+        reject_code: str | None = None,
+        reject_reason: str | None = None,
+    ) -> None:
+        ...
+
+    def insert_fill(
+        self,
+        *,
+        fill_id: str,
+        order_id: str,
+        market_id: str,
+        token_id: str,
+        price: float,
+        size: float,
+        filled_at_ms: int,
+        source: str,
+        fee_paid_usdc: float | None = None,
+        liquidity_role: str | None = None,
+        venue_fill_id: str | None = None,
+    ) -> None:
+        ...
+
+    def load_order(self, order_id: str) -> dict[str, Any] | None:
+        ...
+
+    def load_non_terminal_orders(self) -> list[dict[str, Any]]:
+        ...
+
 
 @dataclass
 class InMemoryIntentStore:
@@ -58,6 +129,8 @@ class InMemoryIntentStore:
     events: list[NormalizedEvent] = field(default_factory=list)
     market_updates: list[MarketStateUpdate] = field(default_factory=list)
     strategy_state: dict[tuple[str, str | None, str], dict[str, Any]] = field(default_factory=dict)
+    orders: dict[str, dict[str, Any]] = field(default_factory=dict)
+    fills: dict[str, dict[str, Any]] = field(default_factory=dict)
     run_id: str = "run_in_memory"
 
     @property
@@ -65,6 +138,9 @@ class InMemoryIntentStore:
         return self.run_id
 
     def append_event(self, event: NormalizedEvent) -> None:
+        self.events.append(event)
+
+    def append_event_log(self, event: NormalizedEvent, *, order_id: str | None = None) -> None:
         self.events.append(event)
 
     def upsert_market_state(self, event: MarketStateUpdate) -> None:
@@ -78,6 +154,130 @@ class InMemoryIntentStore:
 
     def persist_intent(self, intent: OrderIntent) -> None:
         self.intents.append(intent)
+        size = intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None
+        self.insert_order(
+            order_id=intent.intent_id,
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            side="BUY",
+            price=intent.entry_price,
+            size=size,
+            state=OrderState.INTENT,
+            client_order_id=intent.intent_id,
+            intent_created_at_ms=intent.event_time_ms,
+            last_state_change_at_ms=intent.event_time_ms,
+            remaining_size=size,
+        )
+
+    def insert_order(
+        self,
+        *,
+        order_id: str,
+        market_id: str,
+        token_id: str,
+        side: str,
+        price: float | None,
+        size: float | None,
+        state: OrderState | str,
+        client_order_id: str | None,
+        intent_created_at_ms: int,
+        last_state_change_at_ms: int,
+        remaining_size: float | None = None,
+        parent_order_id: str | None = None,
+        venue_order_status: str | None = None,
+        reconciliation_required: bool = False,
+    ) -> None:
+        state_value = state.value if isinstance(state, OrderState) else str(state)
+        self.orders[order_id] = {
+            "order_id": order_id,
+            "run_id": self.run_id,
+            "market_id": market_id,
+            "token_id": token_id,
+            "side": side,
+            "price": price,
+            "size": size,
+            "state": state_value,
+            "client_order_id": client_order_id,
+            "parent_order_id": parent_order_id,
+            "intent_created_at": iso_from_ms(intent_created_at_ms),
+            "last_state_change_at": iso_from_ms(last_state_change_at_ms),
+            "venue_order_status": venue_order_status,
+            "cumulative_filled_size": 0.0,
+            "remaining_size": remaining_size,
+            "reconciliation_required": reconciliation_required,
+            "last_reject_code": None,
+            "last_reject_reason": None,
+        }
+
+    def update_order_state(
+        self,
+        *,
+        order_id: str,
+        state: OrderState | str,
+        event_time_ms: int,
+        venue_order_status: str | None = None,
+        cumulative_filled_size: float | None = None,
+        remaining_size: float | None = None,
+        reconciliation_required: bool | None = None,
+        reject_code: str | None = None,
+        reject_reason: str | None = None,
+    ) -> None:
+        row = self.orders[order_id]
+        row["state"] = state.value if isinstance(state, OrderState) else str(state)
+        row["last_state_change_at"] = iso_from_ms(event_time_ms)
+        if venue_order_status is not None:
+            row["venue_order_status"] = venue_order_status
+        if cumulative_filled_size is not None:
+            row["cumulative_filled_size"] = cumulative_filled_size
+        if remaining_size is not None:
+            row["remaining_size"] = remaining_size
+        if reconciliation_required is not None:
+            row["reconciliation_required"] = reconciliation_required
+        if reject_code is not None:
+            row["last_reject_code"] = reject_code
+        if reject_reason is not None:
+            row["last_reject_reason"] = reject_reason
+
+    def insert_fill(
+        self,
+        *,
+        fill_id: str,
+        order_id: str,
+        market_id: str,
+        token_id: str,
+        price: float,
+        size: float,
+        filled_at_ms: int,
+        source: str,
+        fee_paid_usdc: float | None = None,
+        liquidity_role: str | None = None,
+        venue_fill_id: str | None = None,
+    ) -> None:
+        self.fills[fill_id] = {
+            "fill_id": fill_id,
+            "order_id": order_id,
+            "run_id": self.run_id,
+            "market_id": market_id,
+            "token_id": token_id,
+            "price": price,
+            "size": size,
+            "fee_paid_usdc": fee_paid_usdc,
+            "liquidity_role": liquidity_role,
+            "filled_at": iso_from_ms(filled_at_ms),
+            "source": source,
+            "venue_fill_id": venue_fill_id,
+        }
+
+    def load_order(self, order_id: str) -> dict[str, Any] | None:
+        row = self.orders.get(order_id)
+        return dict(row) if row is not None else None
+
+    def load_non_terminal_orders(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.orders.values()
+            if row["state"] in NON_TERMINAL_ORDER_STATES
+        ]
 
 
 class SQLiteRuntimeStore:
@@ -381,6 +581,13 @@ class SQLiteRuntimeStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def load_order(self, order_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND order_id = ?",
+            (self.run.run_id, order_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def _initialize_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[2] / "docs" / "phase0" / "storage_schema.sql"
         self.conn.executescript(schema_path.read_text())
@@ -439,6 +646,104 @@ def normalize_event_payload(event: NormalizedEvent) -> dict[str, Any]:
             "best_ask": event.best_ask,
             "spread": spread,
             "mid_price": mid_price,
+        }
+
+    if isinstance(event, TradeTick):
+        return {
+            "event_type": "TradeTick",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "price": event.price,
+            "size": event.size,
+            "trade_id": event.trade_id,
+            "aggressor_side": event.aggressor_side,
+            "venue_seq": event.venue_seq,
+        }
+
+    if isinstance(event, TimerEvent):
+        return {
+            "event_type": "TimerEvent",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "timer_kind": event.timer_kind,
+            "deadline_ms": event.deadline_ms,
+            "payload": event.payload,
+        }
+
+    if isinstance(event, OrderAccepted):
+        return {
+            "event_type": "OrderAccepted",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "order_id": event.order_id,
+            "client_order_id": event.client_order_id,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "side": event.side,
+            "price": event.price,
+            "size": event.size,
+            "time_in_force": event.time_in_force,
+            "post_only": event.post_only,
+            "venue_status": event.venue_status,
+        }
+
+    if isinstance(event, OrderRejected):
+        return {
+            "event_type": "OrderRejected",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "client_order_id": event.client_order_id,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "side": event.side,
+            "price": event.price,
+            "size": event.size,
+            "reject_reason_code": event.reject_reason_code,
+            "reject_reason_text": event.reject_reason_text,
+            "is_retryable": event.is_retryable,
+        }
+
+    if isinstance(event, OrderFilled):
+        return {
+            "event_type": "OrderFilled",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "order_id": event.order_id,
+            "client_order_id": event.client_order_id,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "side": event.side,
+            "fill_price": event.fill_price,
+            "fill_size": event.fill_size,
+            "cumulative_filled_size": event.cumulative_filled_size,
+            "remaining_size": event.remaining_size,
+            "fee_paid_usdc": event.fee_paid_usdc,
+            "liquidity_role": event.liquidity_role,
+            "venue_fill_id": event.venue_fill_id,
+        }
+
+    if isinstance(event, OrderCanceled):
+        return {
+            "event_type": "OrderCanceled",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "order_id": event.order_id,
+            "client_order_id": event.client_order_id,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "cancel_reason": event.cancel_reason,
+            "cumulative_filled_size": event.cumulative_filled_size,
+            "remaining_size": event.remaining_size,
         }
 
     status = "active" if event.is_active else "closed"

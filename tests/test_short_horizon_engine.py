@@ -16,6 +16,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 from short_horizon.config import ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
+from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, SyntheticFillRequest
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
@@ -187,6 +188,112 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(payload["event_time"], "1970-01-01T00:00:03.000Z")
         self.assertEqual(payload["ingest_time"], "1970-01-01T00:00:04.000Z")
         self.assertEqual(payload["event"], "book_update_ingested")
+
+
+class ExecutionEngineTest(unittest.TestCase):
+    def _market_state(self) -> MarketStateUpdate:
+        return MarketStateUpdate(
+            event_time_ms=200_000,
+            ingest_time_ms=200_050,
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            start_time_ms=0,
+            end_time_ms=900_000,
+            is_active=True,
+            metadata_is_fresh=True,
+            fee_rate_bps=10.0,
+            fee_metadata_age_ms=1_000,
+        )
+
+    def _intent(self) -> OrderIntent:
+        return OrderIntent(
+            intent_id="ord_exec_001",
+            strategy_id="short_horizon_15m_touch_v1",
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            level=0.55,
+            entry_price=0.55,
+            notional_usdc=10.0,
+            lifecycle_fraction=0.25,
+            event_time_ms=225_000,
+        )
+
+    def test_execution_boundary_handles_synthetic_accept_and_fill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store)
+
+                accepted_events = execution.submit(self._intent())
+                self.assertEqual(len(accepted_events), 1)
+                self.assertEqual(accepted_events[0].order_id, "ord_exec_001")
+
+                fill_event = execution.apply_fill(SyntheticFillRequest(order_id="ord_exec_001", event_time_ms=225_100))
+                self.assertEqual(fill_event.order_id, "ord_exec_001")
+                self.assertAlmostEqual(fill_event.fill_size, 10.0 / 0.55)
+                self.assertAlmostEqual(fill_event.remaining_size, 0.0)
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, venue_order_status, cumulative_filled_size, remaining_size FROM orders WHERE order_id = 'ord_exec_001'"
+                    ).fetchone()
+                    fill_count = conn.execute("SELECT COUNT(*) FROM fills WHERE order_id = 'ord_exec_001'").fetchone()[0]
+                    event_types = [
+                        row[0]
+                        for row in conn.execute(
+                            "SELECT event_type FROM events_log WHERE run_id = 'run_exec_001' ORDER BY seq ASC"
+                        ).fetchall()
+                    ]
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "filled")
+                self.assertEqual(order_row[1], "filled")
+                self.assertAlmostEqual(order_row[2], 10.0 / 0.55)
+                self.assertAlmostEqual(order_row[3], 0.0)
+                self.assertEqual(fill_count, 1)
+                self.assertIn("OrderAccepted", event_types)
+                self.assertIn("OrderFilled", event_types)
+            finally:
+                store.close()
+
+    def test_execution_boundary_rejects_illegal_intent_to_filled_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_002",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store)
+
+                with self.assertRaises(ExecutionTransitionError):
+                    execution.apply_fill(SyntheticFillRequest(order_id="ord_exec_001", event_time_ms=225_050))
+            finally:
+                store.close()
 
 
 class SQLiteRuntimeStoreTest(unittest.TestCase):
