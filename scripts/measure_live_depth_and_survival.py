@@ -60,6 +60,7 @@ DEFAULT_REFRESH_INTERVAL_SEC = 30
 DEFAULT_DURATION_MIN = 840
 DEFAULT_DURATION_MAX = 960
 DEFAULT_PING_INTERVAL_SEC = 10
+DEFAULT_MAX_DISCOVERY_ROWS = 20000
 DEFAULT_OUTPUT_SUBDIR = Path("short_horizon") / "phase0"
 DEFAULT_OUTPUT_BASENAME = "live_depth_survival.csv"
 
@@ -808,7 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration-metric", choices=("lifecycle", "time_remaining", "implied_series"), default="implied_series")
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")
-    parser.add_argument("--max-discovery-rows", type=int, default=8000)
+    parser.add_argument("--max-discovery-rows", type=int, default=DEFAULT_MAX_DISCOVERY_ROWS)
     parser.add_argument("--require-recurrence", action="store_true", default=True)
     parser.add_argument("--no-require-recurrence", dest="require_recurrence", action="store_false")
     parser.add_argument("--max-events", type=int, default=0)
