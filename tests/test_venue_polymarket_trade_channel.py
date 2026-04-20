@@ -29,6 +29,10 @@ class VenuePolymarketTradeChannelTest(unittest.TestCase):
             ticks.extend(normalizer.normalize_event(frame, ingest_time_ms=int(frame.get("timestamp", 0)) + 25))
         return ticks
 
+    def _mixed_batch_fixture(self) -> str:
+        fixture_path = FIXTURES_DIR / "clob_ws_mixed_batch.json"
+        return fixture_path.read_text(encoding="utf-8")
+
     def test_trade_normalizer_emits_expected_trade_tick_sequence(self) -> None:
         ticks = self._replay_fixture()
 
@@ -49,6 +53,18 @@ class VenuePolymarketTradeChannelTest(unittest.TestCase):
         first = self._serialize_ticks(self._replay_fixture())
         second = self._serialize_ticks(self._replay_fixture())
         self.assertEqual(first, second)
+
+    def test_trade_normalizer_accepts_batch_frame_and_ignores_irrelevant_events(self) -> None:
+        normalizer = TradeNormalizer()
+        ticks = normalizer.normalize_frame(self._mixed_batch_fixture(), ingest_time_ms=2025)
+
+        self.assertEqual(len(ticks), 1)
+        self.assertEqual(ticks[0].market_id, "m1")
+        self.assertEqual(ticks[0].token_id, "tok_yes")
+        self.assertEqual(ticks[0].price, 0.54)
+        self.assertEqual(ticks[0].size, 20.0)
+        self.assertEqual(ticks[0].venue_seq, 7)
+        self.assertEqual(ticks[0].ingest_time_ms, 2025)
 
     @staticmethod
     def _serialize_ticks(ticks) -> str:

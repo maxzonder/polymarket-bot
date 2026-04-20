@@ -1,0 +1,42 @@
+[
+  {
+    "event_type": "book",
+    "asset_id": "tok_yes",
+    "market": "m1",
+    "bids": [
+      {"price": "0.53", "size": "12"}
+    ],
+    "asks": [
+      {"price": "0.54", "size": "15"},
+      {"price": "0.55", "size": "9"}
+    ],
+    "timestamp": "1000",
+    "hash": "h1"
+  },
+  {
+    "event_type": "last_trade_price",
+    "asset_id": "tok_yes",
+    "market": "m1",
+    "price": "0.54",
+    "side": "BUY",
+    "size": "20",
+    "timestamp": "1010",
+    "seq": "7"
+  },
+  {
+    "event_type": "best_bid_ask",
+    "asset_id": "tok_yes",
+    "market": "m1",
+    "best_bid": "0.53",
+    "best_ask": "0.54",
+    "timestamp": "1020"
+  },
+  {
+    "event_type": "tick_size_change",
+    "asset_id": "tok_yes",
+    "market": "m1",
+    "old_tick_size": "0.01",
+    "new_tick_size": "0.001",
+    "timestamp": "1030"
+  }
+]

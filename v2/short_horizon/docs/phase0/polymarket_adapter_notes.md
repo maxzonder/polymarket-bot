@@ -223,9 +223,37 @@ These are not blockers for Phase 0 docs, but they should be treated as concrete 
 6. **Market discovery source for 15m exact live filtering**
    - Gamma appears sufficient for now, but this should be confirmed against real currently active short-duration markets
 
+## 8. Phase 2 implementation status after the lift-first pass
+
+The short-horizon adapter boundary is now materially implemented through `P2-9`.
+
+What is now concretely wired:
+- Gamma market discovery lift into canonical `MarketMetadata`
+- recurring market refresh loop emitting canonical `MarketStateUpdate`
+- market websocket manager with reconnect and subscription replay
+- book-channel normalization for `book`, `price_change`, and `best_bid_ask`
+- trade-channel normalization for `last_trade_price`
+- fee metadata refresh loop with TTL-compatible snapshots
+- composite `LiveEventSource` that merges metadata refresh, fee refresh, and websocket-normalized market data
+- `live_runner --mode live` wired to that composite source with **synthetic execution still preserved**
+- bounded live probe runs plus post-run cross-validation helpers against the independent collector CSV
+
+Important locked-in policies from the implementation:
+- the collector remains independent ground truth and must not be modified as part of the Phase 2 adapter lift
+- Gamma metadata is the current source for market attach / refresh / fee snapshots
+- CLOB websocket is the current source for live book and trade prints
+- out-of-order book frames are dropped by older `timestamp` per token to preserve deterministic replay
+- fee freshness is tracked from attach / refresh snapshots and enforced at decision time before any entry
+
+What is still intentionally open after `P2-9`:
+- authenticated user-stream normalization for real fills / order updates
+- restart reconciliation semantics against exchange truth
+- final authoritative minimum-size / tick-constraint capture for real venue sends
+- whether websocket user stream alone is sufficient, or REST backfill remains necessary after reconnect/restart
+
 ---
 
-## 8. Recommended immediate Phase 1/2 stance
+## 9. Recommended immediate Phase 1/2 stance
 
 Until P0-A / P0-B say otherwise:
 - assume Python-first integration is the default implementation path
@@ -236,7 +264,7 @@ That gives the team the fastest path to real replay/live parity without forcing 
 
 ---
 
-## 9. Practical starting references inside this repo
+## 10. Practical starting references inside this repo
 
 Useful local references before coding:
 - `v2/api/clob_client.py`

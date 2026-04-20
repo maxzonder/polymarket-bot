@@ -15,6 +15,9 @@ from short_horizon.core import EventType, MarketStateUpdate, MarketStatus
 from short_horizon.market_data import LiveEventSource, expand_market_state_update, extract_market_token_ids
 
 
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
 class _AsyncEventStream:
     def __init__(self, events):
         self._events = list(events)
@@ -227,6 +230,27 @@ class LiveEventSourceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(websocket.closed)
         self.assertEqual(websocket.subscribe_calls, [["tok_no", "tok_yes"]])
         self.assertEqual(websocket.unsubscribe_calls, [["tok_no", "tok_yes"]])
+
+    async def test_live_event_source_handles_decoded_batch_websocket_payload(self) -> None:
+        fixture_path = FIXTURES_DIR / "clob_ws_mixed_batch.json"
+        websocket = _FakeWebsocket(messages=[json.loads(fixture_path.read_text(encoding="utf-8"))])
+        source = LiveEventSource(
+            market_refresh=_AsyncEventStream([]),
+            fee_refresh=_AsyncEventStream([]),
+            websocket=websocket,
+            clock_ms=lambda: 9000,
+        )
+
+        await source.start()
+        try:
+            emitted = [await asyncio.wait_for(source.__anext__(), timeout=1.0) for _ in range(3)]
+        finally:
+            await source.stop()
+
+        self.assertEqual([event.event_type for event in emitted], [EventType.BOOK_UPDATE, EventType.BOOK_UPDATE, EventType.TRADE_TICK])
+        self.assertTrue(all(event.market_id == "m1" for event in emitted))
+        self.assertTrue(all(event.token_id == "tok_yes" for event in emitted))
+        self.assertTrue(all(event.ingest_time_ms == 9000 for event in emitted))
 
 
 if __name__ == "__main__":

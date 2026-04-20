@@ -28,6 +28,10 @@ class VenuePolymarketBookChannelTest(unittest.TestCase):
             updates.extend(normalizer.normalize_event(frame, ingest_time_ms=int(frame.get("timestamp", 0)) + 100))
         return updates
 
+    def _mixed_batch_fixture(self):
+        fixture_path = FIXTURES_DIR / "clob_ws_mixed_batch.json"
+        return fixture_path.read_text(encoding="utf-8")
+
     def test_book_normalizer_emits_expected_best_ask_progression(self) -> None:
         updates = self._replay_fixture()
 
@@ -58,6 +62,16 @@ class VenuePolymarketBookChannelTest(unittest.TestCase):
         updates = self._replay_fixture()
         self.assertEqual(updates[-1].event_time_ms, 1030)
         self.assertEqual(updates[-1].best_ask, 0.56)
+
+    def test_book_normalizer_accepts_batch_frame_and_ignores_irrelevant_events(self) -> None:
+        normalizer = BookNormalizer()
+        updates = normalizer.normalize_frame(self._mixed_batch_fixture(), ingest_time_ms=2000)
+
+        self.assertEqual(len(updates), 2)
+        self.assertEqual([update.event_time_ms for update in updates], [1000, 1020])
+        self.assertEqual([update.best_ask for update in updates], [0.54, 0.54])
+        self.assertEqual([update.is_snapshot for update in updates], [True, False])
+        self.assertTrue(all(update.ingest_time_ms == 2000 for update in updates))
 
     @staticmethod
     def _serialize_updates(updates: list) -> str:
