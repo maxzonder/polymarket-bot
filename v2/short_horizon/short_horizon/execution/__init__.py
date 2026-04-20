@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
 from datetime import datetime
@@ -103,6 +104,9 @@ class ExecutionVenueClient(Protocol):
     def place_order(self, order_request: VenueOrderRequest) -> VenuePlaceResult:
         ...
 
+    def cancel_order(self, order_id: str):
+        ...
+
 
 class ExecutionStore(Protocol):
     @property
@@ -167,6 +171,12 @@ class ExecutionStore(Protocol):
         ...
 
     def load_order(self, order_id: str) -> dict | None:
+        ...
+
+    def load_order_by_client_order_id(self, client_order_id: str) -> dict | None:
+        ...
+
+    def load_order_by_venue_order_id(self, venue_order_id: str) -> dict | None:
         ...
 
     def load_non_terminal_orders(self) -> list[dict]:
@@ -496,6 +506,8 @@ class ExecutionEngine:
         if order_row is None:
             return None
         cancel_time_ms = int(event_time_ms if event_time_ms is not None else self._event_time_ms_from_order(order_row))
+        if self.mode is ExecutionMode.LIVE:
+            return self._cancel_live(order_row=order_row, cancel_time_ms=cancel_time_ms, reason=reason)
         self._transition(order_row, OrderState.CANCEL_REQUESTED, event_time_ms=cancel_time_ms, venue_order_status="cancel_requested")
         confirm_time_ms = cancel_time_ms + 1
         self._transition(order_row, OrderState.CANCEL_CONFIRMED, event_time_ms=confirm_time_ms, venue_order_status="canceled")
@@ -522,6 +534,20 @@ class ExecutionEngine:
             reason=reason,
         )
         return event
+
+    def reconcile_order_event(self, event: OrderAccepted | OrderRejected | OrderFilled | OrderCanceled):
+        order_row = self._resolve_order_for_event(event)
+        if order_row is None:
+            return None
+        if isinstance(event, OrderAccepted):
+            return self._reconcile_order_accepted(event, order_row=order_row)
+        if isinstance(event, OrderRejected):
+            return self._reconcile_order_rejected(event, order_row=order_row)
+        if isinstance(event, OrderFilled):
+            return self._reconcile_order_filled(event, order_row=order_row)
+        if isinstance(event, OrderCanceled):
+            return self._reconcile_order_canceled(event, order_row=order_row)
+        raise TypeError(f"Unsupported order event for reconciliation: {type(event)!r}")
 
     def _ensure_order_row(self, intent: OrderIntent) -> dict:
         order_row = self.store.load_order(intent.intent_id)
@@ -550,6 +576,248 @@ class ExecutionEngine:
                 return row
         return None
 
+    def _cancel_live(self, *, order_row: dict, cancel_time_ms: int, reason: str) -> OrderCanceled | None:
+        if self.client is None:
+            raise ExecutionValidationError("Execution client is required in live mode")
+        venue_order_id = str(order_row.get("venue_order_id") or "").strip()
+        if not venue_order_id:
+            raise ExecutionValidationError(
+                f"Live cancel requires venue_order_id for order {order_row['order_id']}"
+            )
+        self._transition(
+            order_row,
+            OrderState.CANCEL_REQUESTED,
+            event_time_ms=cancel_time_ms,
+            venue_order_status="cancel_requested",
+            reconciliation_required=True,
+        )
+        try:
+            cancel_result = self.client.cancel_order(venue_order_id)
+        except Exception as exc:
+            self.logger.warning(
+                "live_cancel_submit_failed",
+                order_id=order_row["order_id"],
+                venue_order_id=venue_order_id,
+                reason=reason,
+                error=str(exc),
+            )
+            return None
+        if _is_canceled_status(cancel_result.status):
+            confirm_time_ms = cancel_time_ms + 1
+            self._transition(
+                order_row,
+                OrderState.CANCEL_CONFIRMED,
+                event_time_ms=confirm_time_ms,
+                venue_order_status=cancel_result.status,
+                remaining_size=0.0,
+                reconciliation_required=False,
+            )
+            refreshed = self._require_order(order_row["order_id"])
+            event = OrderCanceled(
+                event_time_ms=confirm_time_ms,
+                ingest_time_ms=confirm_time_ms,
+                order_id=refreshed["order_id"],
+                market_id=refreshed["market_id"],
+                token_id=refreshed["token_id"],
+                source="execution.live_cancel_ack",
+                client_order_id=refreshed.get("client_order_id"),
+                cancel_reason=reason,
+                cumulative_filled_size=float(refreshed.get("cumulative_filled_size") or 0.0),
+                remaining_size=0.0,
+                run_id=self.store.current_run_id,
+            )
+            self.store.append_event_log(event, order_id=refreshed["order_id"])
+            self.logger.info(
+                "live_order_canceled",
+                order_id=refreshed["order_id"],
+                market_id=refreshed["market_id"],
+                token_id=refreshed["token_id"],
+                venue_order_id=venue_order_id,
+                event_time_ms=confirm_time_ms,
+                reason=reason,
+            )
+            return event
+        self.logger.info(
+            "live_cancel_submitted",
+            order_id=order_row["order_id"],
+            market_id=order_row["market_id"],
+            token_id=order_row["token_id"],
+            venue_order_id=venue_order_id,
+            venue_status=cancel_result.status,
+            event_time_ms=cancel_time_ms,
+            reason=reason,
+        )
+        return None
+
+    def _resolve_order_for_event(self, event: OrderAccepted | OrderRejected | OrderFilled | OrderCanceled) -> dict | None:
+        order_id = getattr(event, "order_id", None)
+        if order_id:
+            row = self.store.load_order(str(order_id))
+            if row is not None:
+                return row
+            row = self.store.load_order_by_venue_order_id(str(order_id))
+            if row is not None:
+                return row
+        client_order_id = getattr(event, "client_order_id", None)
+        if client_order_id:
+            row = self.store.load_order_by_client_order_id(str(client_order_id))
+            if row is not None:
+                return row
+        self.logger.warning(
+            "external_order_event_unmatched",
+            event_type=type(event).__name__,
+            event_order_id=getattr(event, "order_id", None),
+            client_order_id=getattr(event, "client_order_id", None),
+            source=getattr(event, "source", None),
+        )
+        return None
+
+    def _reconcile_order_accepted(self, event: OrderAccepted, *, order_row: dict) -> OrderAccepted | None:
+        current_state = self._state_from_row(order_row)
+        if current_state in {OrderState.CANCEL_CONFIRMED, OrderState.FILLED, OrderState.REJECTED, OrderState.EXPIRED, OrderState.REPLACED}:
+            return None
+        if current_state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED, OrderState.CANCEL_REQUESTED}:
+            return self._canonicalize_order_accepted(event, order_row=order_row)
+        self._transition(
+            order_row,
+            OrderState.ACCEPTED,
+            event_time_ms=event.event_time_ms,
+            venue_order_id=self._external_event_order_id(event, order_row=order_row),
+            venue_order_status=event.venue_status,
+            reconciliation_required=False,
+        )
+        return self._canonicalize_order_accepted(event, order_row=self._require_order(order_row["order_id"]))
+
+    def _reconcile_order_rejected(self, event: OrderRejected, *, order_row: dict) -> OrderRejected | None:
+        current_state = self._state_from_row(order_row)
+        if current_state is OrderState.REJECTED:
+            return self._canonicalize_order_rejected(event, order_row=order_row)
+        if current_state in TERMINAL_ORDER_STATES - {OrderState.REJECTED}:
+            return None
+        self._transition(
+            order_row,
+            OrderState.REJECTED,
+            event_time_ms=event.event_time_ms,
+            venue_order_status="rejected",
+            reconciliation_required=False,
+            reject_code=event.reject_reason_code,
+            reject_reason=event.reject_reason_text,
+        )
+        return self._canonicalize_order_rejected(event, order_row=self._require_order(order_row["order_id"]))
+
+    def _reconcile_order_filled(self, event: OrderFilled, *, order_row: dict) -> OrderFilled | None:
+        current_state = self._state_from_row(order_row)
+        if current_state in {OrderState.CANCEL_CONFIRMED, OrderState.REJECTED, OrderState.EXPIRED, OrderState.REPLACED}:
+            return None
+        current_cumulative = float(order_row.get("cumulative_filled_size") or 0.0)
+        event_cumulative = float(event.cumulative_filled_size)
+        if event_cumulative <= current_cumulative + 1e-12:
+            return None
+        canonical = self._canonicalize_order_filled(event, order_row=order_row)
+        next_state = OrderState.FILLED if canonical.remaining_size <= 1e-12 else OrderState.PARTIALLY_FILLED
+        fill_id = canonical.venue_fill_id or f"{order_row['order_id']}:fill:{canonical.event_time_ms}:{int(round(canonical.cumulative_filled_size * 1_000_000))}"
+        self.store.insert_fill(
+            fill_id=fill_id,
+            order_id=order_row["order_id"],
+            market_id=order_row["market_id"],
+            token_id=order_row["token_id"],
+            price=canonical.fill_price,
+            size=canonical.fill_size,
+            filled_at_ms=canonical.event_time_ms,
+            source=_normalize_fill_source(canonical.source),
+            fee_paid_usdc=canonical.fee_paid_usdc,
+            liquidity_role=canonical.liquidity_role.value if hasattr(canonical.liquidity_role, "value") else canonical.liquidity_role,
+            venue_fill_id=canonical.venue_fill_id,
+        )
+        self._transition(
+            order_row,
+            next_state,
+            event_time_ms=canonical.event_time_ms,
+            venue_order_id=self._external_event_order_id(event, order_row=order_row),
+            venue_order_status="filled" if next_state is OrderState.FILLED else "partially_filled",
+            cumulative_filled_size=canonical.cumulative_filled_size,
+            remaining_size=canonical.remaining_size,
+            reconciliation_required=False,
+        )
+        return canonical
+
+    def _reconcile_order_canceled(self, event: OrderCanceled, *, order_row: dict) -> OrderCanceled | None:
+        current_state = self._state_from_row(order_row)
+        if current_state is OrderState.CANCEL_CONFIRMED:
+            return self._canonicalize_order_canceled(event, order_row=order_row)
+        if current_state in {OrderState.FILLED, OrderState.REJECTED, OrderState.EXPIRED, OrderState.REPLACED}:
+            return None
+        if current_state in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
+            self._transition(
+                order_row,
+                OrderState.CANCEL_REQUESTED,
+                event_time_ms=max(event.event_time_ms - 1, 0),
+                venue_order_id=self._external_event_order_id(event, order_row=order_row),
+                venue_order_status="cancel_requested",
+                reconciliation_required=True,
+            )
+            order_row = self._require_order(order_row["order_id"])
+        remaining_size = float(event.remaining_size) if event.remaining_size is not None else 0.0
+        cumulative = (
+            float(event.cumulative_filled_size)
+            if event.cumulative_filled_size is not None
+            else float(order_row.get("cumulative_filled_size") or 0.0)
+        )
+        self._transition(
+            order_row,
+            OrderState.CANCEL_CONFIRMED,
+            event_time_ms=event.event_time_ms,
+            venue_order_id=self._external_event_order_id(event, order_row=order_row),
+            venue_order_status="canceled",
+            cumulative_filled_size=cumulative,
+            remaining_size=remaining_size,
+            reconciliation_required=False,
+        )
+        return self._canonicalize_order_canceled(event, order_row=self._require_order(order_row["order_id"]))
+
+    def _canonicalize_order_accepted(self, event: OrderAccepted, *, order_row: dict) -> OrderAccepted:
+        return replace(
+            event,
+            order_id=order_row["order_id"],
+            client_order_id=order_row.get("client_order_id") or event.client_order_id,
+            market_id=order_row["market_id"],
+            token_id=order_row["token_id"],
+        )
+
+    def _canonicalize_order_rejected(self, event: OrderRejected, *, order_row: dict) -> OrderRejected:
+        return replace(
+            event,
+            client_order_id=order_row.get("client_order_id") or event.client_order_id,
+            market_id=order_row["market_id"],
+            token_id=order_row["token_id"],
+        )
+
+    def _canonicalize_order_filled(self, event: OrderFilled, *, order_row: dict) -> OrderFilled:
+        return replace(
+            event,
+            order_id=order_row["order_id"],
+            client_order_id=order_row.get("client_order_id") or event.client_order_id,
+            market_id=order_row["market_id"],
+            token_id=order_row["token_id"],
+        )
+
+    def _canonicalize_order_canceled(self, event: OrderCanceled, *, order_row: dict) -> OrderCanceled:
+        return replace(
+            event,
+            order_id=order_row["order_id"],
+            client_order_id=order_row.get("client_order_id") or event.client_order_id,
+            market_id=order_row["market_id"],
+            token_id=order_row["token_id"],
+        )
+
+    @staticmethod
+    def _external_event_order_id(event: OrderAccepted | OrderFilled | OrderCanceled, *, order_row: dict) -> str | None:
+        raw = getattr(event, "order_id", None)
+        if raw and str(raw) != str(order_row["order_id"]):
+            return str(raw)
+        existing = order_row.get("venue_order_id")
+        return str(existing) if existing else None
+
     def _require_order(self, order_id: str) -> dict:
         row = self.store.load_order(order_id)
         if row is None:
@@ -566,6 +834,7 @@ class ExecutionEngine:
         venue_order_status: str | None = None,
         cumulative_filled_size: float | None = None,
         remaining_size: float | None = None,
+        reconciliation_required: bool | None = None,
         reject_code: str | None = None,
         reject_reason: str | None = None,
     ) -> None:
@@ -587,6 +856,7 @@ class ExecutionEngine:
             venue_order_status=venue_order_status,
             cumulative_filled_size=cumulative_filled_size,
             remaining_size=remaining_size,
+            reconciliation_required=reconciliation_required,
             reject_code=reject_code,
             reject_reason=reject_reason,
         )
@@ -655,6 +925,22 @@ def is_valid_tick_size(price: float, tick_size: float, *, tolerance: float = 1e-
         raise ValueError("tick_size must be positive")
     units = price / tick_size
     return abs(units - round(units)) <= tolerance
+
+
+def _is_canceled_status(status: str | None) -> bool:
+    normalized = str(status or "").strip().lower()
+    return normalized in {"canceled", "cancelled", "order_status_canceled", "order_status_cancelled"}
+
+
+def _normalize_fill_source(source: str | None) -> str:
+    normalized = str(source or "").strip().lower()
+    if normalized in {"venue_ws", "venue_rest", "reconciled", "replay"}:
+        return normalized
+    if "ws" in normalized or "websocket" in normalized:
+        return "venue_ws"
+    if "rest" in normalized or "execution" in normalized:
+        return "venue_rest"
+    return "reconciled"
 
 
 __all__ = [

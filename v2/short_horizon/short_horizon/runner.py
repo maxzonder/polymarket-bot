@@ -133,9 +133,8 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
                 synthetic_order_events += len(execution.submit(output, event_time_ms=event.event_time_ms))
         return order_intents, synthetic_order_events
 
-    runtime.store.append_event(event)
-
     if isinstance(event, TradeTick):
+        runtime.store.append_event(event)
         return 0, apply_strategy_intents(
             runtime.strategy.on_market_event(event),
             execution=execution,
@@ -143,6 +142,7 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
         )
 
     if isinstance(event, TimerEvent):
+        runtime.store.append_event(event)
         return 0, apply_strategy_intents(
             runtime.strategy.on_timer(event),
             execution=execution,
@@ -150,10 +150,14 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
         )
 
     if isinstance(event, (OrderAccepted, OrderRejected, OrderFilled, OrderCanceled)):
+        canonical_event = execution.reconcile_order_event(event)
+        if canonical_event is None:
+            return 0, 0
+        runtime.store.append_event_log(canonical_event, order_id=getattr(canonical_event, "order_id", None))
         return 0, apply_strategy_intents(
-            runtime.strategy.on_order_event(event),
+            runtime.strategy.on_order_event(canonical_event),
             execution=execution,
-            fallback_event_time_ms=event.event_time_ms,
+            fallback_event_time_ms=canonical_event.event_time_ms,
         )
 
     raise TypeError(f"Unsupported runner event: {type(event)!r}")

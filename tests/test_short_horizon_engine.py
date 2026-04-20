@@ -20,7 +20,7 @@ from short_horizon.config import ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
-from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
+from short_horizon.events import BookUpdate, MarketStateUpdate, OrderCanceled, OrderFilled, TimerEvent
 from short_horizon.live_runner import build_live_source, build_parser, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
@@ -68,6 +68,7 @@ class _FakeLiveRunnerClient:
     def __init__(self) -> None:
         self.started = False
         self.place_calls = []
+        self.cancel_calls = []
         self.api_credentials_calls = 0
 
     def startup(self) -> None:
@@ -84,6 +85,12 @@ class _FakeLiveRunnerClient:
             status="live",
             client_order_id=order_request.client_order_id,
         )
+
+    def cancel_order(self, order_id):
+        self.cancel_calls.append(order_id)
+        from short_horizon.venue_polymarket.execution_client import VenueCancelResult
+
+        return VenueCancelResult(order_id=order_id, success=True, status="canceled")
 
 
 class CoreTypesTest(unittest.TestCase):
@@ -283,6 +290,7 @@ class _FakeExecutionClient:
         self.place_result = place_result or {"order_id": "venue-ord-1", "status": "live"}
         self.error = error
         self.place_calls = []
+        self.cancel_calls = []
 
     def place_order(self, order_request):
         self.place_calls.append(order_request)
@@ -298,6 +306,14 @@ class _FakeExecutionClient:
             client_order_id=self.place_result.get("client_order_id"),
             raw=self.place_result,
         )
+
+    def cancel_order(self, order_id):
+        self.cancel_calls.append(order_id)
+        from short_horizon.venue_polymarket.execution_client import VenueCancelResult
+
+        if self.error is not None:
+            raise self.error
+        return VenueCancelResult(order_id=order_id, success=True, status="canceled")
 
 
 class ExecutionEngineTest(unittest.TestCase):
@@ -627,6 +643,103 @@ class ExecutionEngineTest(unittest.TestCase):
                 self.assertIsNone(order_row[1])
                 self.assertEqual(order_row[2], "VENUE_ERROR")
                 self.assertIn("insufficient balance", order_row[3])
+            finally:
+                store.close()
+
+    def test_execution_boundary_live_mode_cancels_by_venue_order_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_live_cancel_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE)
+                execution.submit(self._intent())
+
+                cancel_event = execution.cancel(
+                    market_id="m1",
+                    token_id="tok_yes",
+                    event_time_ms=225_050,
+                    reason="test_cancel",
+                )
+
+                self.assertIsNotNone(cancel_event)
+                self.assertEqual(client.cancel_calls, ["venue-123"])
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, venue_order_id, venue_order_status, reconciliation_required FROM orders WHERE order_id = 'ord_exec_001'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "cancel_confirmed")
+                self.assertEqual(order_row[1], "venue-123")
+                self.assertEqual(order_row[2], "canceled")
+                self.assertEqual(order_row[3], 0)
+            finally:
+                store.close()
+
+    def test_execution_boundary_reconciles_user_stream_fill_by_venue_order_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_live_fill_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE)
+                execution.submit(self._intent())
+
+                reconciled = execution.reconcile_order_event(
+                    OrderFilled(
+                        event_time_ms=225_100,
+                        ingest_time_ms=225_110,
+                        order_id="venue-123",
+                        market_id="m1",
+                        token_id="tok_yes",
+                        side="BUY",
+                        source="polymarket_clob_user_ws",
+                        client_order_id="ord_exec_001",
+                        fill_price=0.55,
+                        fill_size=10.0 / 0.55,
+                        cumulative_filled_size=10.0 / 0.55,
+                        remaining_size=0.0,
+                    )
+                )
+
+                self.assertIsNotNone(reconciled)
+                self.assertEqual(reconciled.order_id, "ord_exec_001")
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, venue_order_id, venue_order_status, cumulative_filled_size, remaining_size FROM orders WHERE order_id = 'ord_exec_001'"
+                    ).fetchone()
+                    fill_count = conn.execute("SELECT COUNT(*) FROM fills WHERE order_id = 'ord_exec_001'").fetchone()[0]
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "filled")
+                self.assertEqual(order_row[1], "venue-123")
+                self.assertEqual(order_row[2], "filled")
+                self.assertAlmostEqual(order_row[3], 10.0 / 0.55)
+                self.assertAlmostEqual(order_row[4], 0.0)
+                self.assertEqual(fill_count, 1)
             finally:
                 store.close()
 
@@ -1350,6 +1463,87 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(order_row[2], "venue-live-1")
             self.assertEqual(order_row[3], "live")
 
+    async def test_live_runner_live_execution_mode_reconciles_user_stream_cancel_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_exec_cancel.sqlite3"
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                    OrderCanceled(
+                        event_time_ms=225_100,
+                        ingest_time_ms=225_110,
+                        order_id="venue-live-1",
+                        market_id="m1",
+                        token_id="tok_yes",
+                        source="polymarket_clob_user_ws",
+                        client_order_id="m1:tok_yes:0.55:225000",
+                        cancel_reason="user_canceled",
+                        cumulative_filled_size=0.0,
+                        remaining_size=10.0 / 0.55,
+                    ),
+                ]
+            )
+            client = _FakeLiveRunnerClient()
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_exec_cancel_test_001",
+                config_hash="test-config",
+                source=source,
+                max_events=4,
+                execution_mode=ExecutionMode.LIVE,
+                execution_client=client,
+            )
+
+            self.assertEqual(summary.run_id, "live_exec_cancel_test_001")
+            conn = sqlite3.connect(db_path)
+            try:
+                order_row = conn.execute(
+                    "SELECT state, venue_order_id, venue_order_status, cumulative_filled_size FROM orders WHERE run_id = 'live_exec_cancel_test_001' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()
+                canceled_events = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'live_exec_cancel_test_001' AND event_type = 'OrderCanceled' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(order_row[0], "cancel_confirmed")
+            self.assertEqual(order_row[1], "venue-live-1")
+            self.assertEqual(order_row[2], "canceled")
+            self.assertAlmostEqual(order_row[3], 0.0)
+            self.assertEqual(canceled_events, 1)
+
     def test_build_live_source_live_mode_requires_client_api_credentials(self) -> None:
         with self.assertRaises(ValueError):
             build_live_source(execution_mode=ExecutionMode.LIVE, execution_client=None)
@@ -1557,10 +1751,21 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                     remaining_size=8.1818,
                 )
                 open_orders = store.load_non_terminal_orders()
+                by_client_order = store.load_order_by_client_order_id("cli_001")
+
+                store.update_order_state(
+                    order_id="ord_001",
+                    state=OrderState.PARTIALLY_FILLED,
+                    event_time_ms=225_201,
+                    venue_order_id="venue_001",
+                )
+                by_venue_order = store.load_order_by_venue_order_id("venue_001")
 
                 self.assertEqual(len(open_orders), 1)
                 self.assertEqual(open_orders[0]["order_id"], "ord_001")
                 self.assertEqual(open_orders[0]["state"], "partially_filled")
+                self.assertEqual(by_client_order["order_id"], "ord_001")
+                self.assertEqual(by_venue_order["order_id"], "ord_001")
 
                 conn = sqlite3.connect(db_path)
                 try:

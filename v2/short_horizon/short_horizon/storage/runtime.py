@@ -121,6 +121,12 @@ class RuntimeStore(Protocol):
     def load_order(self, order_id: str) -> dict[str, Any] | None:
         ...
 
+    def load_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
+        ...
+
+    def load_order_by_venue_order_id(self, venue_order_id: str) -> dict[str, Any] | None:
+        ...
+
     def load_non_terminal_orders(self) -> list[dict[str, Any]]:
         ...
 
@@ -285,6 +291,18 @@ class InMemoryIntentStore:
             for row in self.orders.values()
             if row["state"] in NON_TERMINAL_ORDER_STATES
         ]
+
+    def load_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
+        for row in reversed(list(self.orders.values())):
+            if row.get("client_order_id") == client_order_id:
+                return dict(row)
+        return None
+
+    def load_order_by_venue_order_id(self, venue_order_id: str) -> dict[str, Any] | None:
+        for row in reversed(list(self.orders.values())):
+            if row.get("venue_order_id") == venue_order_id:
+                return dict(row)
+        return None
 
 
 class SQLiteRuntimeStore:
@@ -604,6 +622,20 @@ class SQLiteRuntimeStore:
         row = self.conn.execute(
             "SELECT * FROM orders WHERE run_id = ? AND order_id = ?",
             (self.run.run_id, order_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def load_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND client_order_id = ? ORDER BY last_state_change_at DESC, order_id DESC LIMIT 1",
+            (self.run.run_id, client_order_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def load_order_by_venue_order_id(self, venue_order_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM orders WHERE run_id = ? AND venue_order_id = ? ORDER BY last_state_change_at DESC, order_id DESC LIMIT 1",
+            (self.run.run_id, venue_order_id),
         ).fetchone()
         return dict(row) if row is not None else None
 
