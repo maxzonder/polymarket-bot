@@ -105,21 +105,41 @@ Until one of those happens, the correct statement is:
 There is also a real **signal-rate discrepancy** between the live collector readout and the historical research estimate.
 
 Observed values from the current Phase 0 work:
-- live BTC+ETH first-touch collector readout: about **`902/day`** across all relative buckets
+- live BTC+ETH first-touch collector readout: about **`902/day`**
 - historical taker research estimate from the strict validated slice: about **`60/day`**
 
 This is roughly a **15x gap**.
 
+The important audit point is that these two numbers are **not the same denominator**.
+
+What the `902/day` live collector number includes:
+- BTC + ETH markets
+- **both YES and NO tokens**
+- **all relative lifecycle buckets**
+- live **`best_ask` first-touch** events from the collector
+- execution-viability monitoring, not edge-estimation filtering
+
+What the `60/day` research number includes:
+- BTC + ETH markets
+- the strict validated MVP slice only
+- **relative `20_40pct`** lifecycle bucket only
+- **ascending** touch construction only
+- price levels **`{0.55, 0.65, 0.70}`** only
+- historical **trade-price first-touch** events from research tape
+
 Current best explanation is structural, not mysterious:
+- the live collector fires on a much wider **trigger population** than the validated research slice
 - the live collector fires on **both YES and NO tokens**
-- the live collector currently records **best_ask first-touch** without the research-side `ascending` trade-price construction
+- the live collector currently records **best_ask first-touch**, while the research baseline is **ascending trade-price first-touch**
 - the live collector coverage used **all relative buckets**, while the strict MVP research slice is only **`20_40pct`**
+- the research estimate is further narrowed to levels **`0.55 / 0.65 / 0.70`**
 - the historical research path also bundles in its own directional / touch-construction assumptions from trade tape
 
 What this means operationally:
 - the live collector should be treated as an **execution-viability superset** signal source
 - the historical research estimate should be treated as the **edge-estimation baseline** for the stricter research slice
 - the two numbers should **not** be compared as if they were the same trigger population
+- therefore the `902/day` vs `60/day` gap should be read as a **scope mismatch**, not as evidence that one side is numerically broken
 
 So the discrepancy is:
 - **documented**
