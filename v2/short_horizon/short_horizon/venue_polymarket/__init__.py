@@ -7,6 +7,7 @@ from .execution_client import (
     ExecutionClientConfigError,
     ExecutionClientNotStartedError,
     PolymarketExecutionClient,
+    VenueApiCredentials,
     VenueCancelResult,
     VenueOrderRequest,
     VenueOrderState,
@@ -24,6 +25,7 @@ from .markets import (
 )
 from .market_refresh import MarketRefreshLoop
 from .trade_channel import TradeNormalizer
+from .user_stream import PolymarketUserStream, UserStreamNormalizer
 from .websocket import PolymarketWebsocket
 
 
@@ -46,10 +48,13 @@ __all__ = [
     "MarketMetadata",
     "MarketRefreshLoop",
     "PolymarketExecutionClient",
+    "PolymarketUserStream",
     "PolymarketVenueAdapter",
     "PolymarketWebsocket",
     "TradeNormalizer",
+    "UserStreamNormalizer",
     "UniverseFilter",
+    "VenueApiCredentials",
     "VenueCancelResult",
     "VenueOrderRequest",
     "VenueOrderState",

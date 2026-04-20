@@ -14,6 +14,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 from short_horizon.venue_polymarket import (
     ExecutionClientConfigError,
     PolymarketExecutionClient,
+    VenueApiCredentials,
     VenueOrderRequest,
 )
 
@@ -30,7 +31,7 @@ class _FakeVenueClient:
         self.get_orders_calls = []
 
     def create_or_derive_api_creds(self):
-        return {"api_key": "derived"}
+        return {"api_key": "derived", "secret": "derived-secret", "passphrase": "derived-pass"}
 
     def set_api_creds(self, api_creds):
         self.api_creds = api_creds
@@ -94,8 +95,26 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertEqual(captured["host"], "https://clob.polymarket.com")
         self.assertEqual(captured["key"], "env-secret")
         self.assertEqual(captured["chain_id"], 137)
-        self.assertEqual(captured["client"].api_creds, {"api_key": "derived"})
+        self.assertEqual(
+            captured["client"].api_creds,
+            {"api_key": "derived", "secret": "derived-secret", "passphrase": "derived-pass"},
+        )
         self.assertEqual(captured["client"].get_orders_calls, [{}])
+
+    def test_api_credentials_exposed_after_startup(self) -> None:
+        fake_client = _FakeVenueClient(host="https://clob.polymarket.com", key="env-secret", chain_id=137)
+        client = PolymarketExecutionClient(
+            client_factory=lambda **kwargs: fake_client,
+            order_args_factory=_FakeOrderArgs,
+        )
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            client.startup()
+
+        self.assertEqual(
+            client.api_credentials(),
+            VenueApiCredentials(api_key="derived", secret="derived-secret", passphrase="derived-pass"),
+        )
 
     def test_missing_env_private_key_raises_before_initialization(self) -> None:
         calls = []

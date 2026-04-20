@@ -11,7 +11,7 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
-from short_horizon.core import EventType, MarketStateUpdate, MarketStatus
+from short_horizon.core import EventType, MarketStateUpdate, MarketStatus, OrderAccepted, OrderSide
 from short_horizon.market_data import LiveEventSource, expand_market_state_update, extract_market_token_ids
 
 
@@ -66,6 +66,32 @@ class _FakeWebsocket:
 
     async def recv(self):
         return await self._messages.get()
+
+
+class _FakeUserStream:
+    def __init__(self, events=None):
+        self._events: asyncio.Queue[object] = asyncio.Queue()
+        self.connected = False
+        self.closed = False
+        self.subscribe_calls: list[list[str]] = []
+        self.unsubscribe_calls: list[list[str]] = []
+        for event in events or []:
+            self._events.put_nowait(event)
+
+    async def connect(self) -> None:
+        self.connected = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def subscribe(self, market_ids):
+        self.subscribe_calls.append(list(market_ids))
+
+    async def unsubscribe(self, market_ids):
+        self.unsubscribe_calls.append(list(market_ids))
+
+    async def recv(self):
+        return await self._events.get()
 
 
 class LiveSourceHelpersTest(unittest.TestCase):
@@ -254,6 +280,72 @@ class LiveEventSourceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(event.market_id == "m1" for event in emitted))
         self.assertTrue(all(event.token_id == "tok_yes" for event in emitted))
         self.assertTrue(all(event.ingest_time_ms == 9000 for event in emitted))
+
+    async def test_live_event_source_forwards_optional_user_stream_events(self) -> None:
+        market_events = [
+            MarketStateUpdate(
+                event_time_ms=1000,
+                ingest_time_ms=1000,
+                market_id="m1",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                status=MarketStatus.ACTIVE,
+                token_yes_id="tok_yes",
+                token_no_id="tok_no",
+                asset_slug="bitcoin",
+                is_active=True,
+                source="polymarket.gamma.refresh",
+            ),
+            MarketStateUpdate(
+                event_time_ms=2000,
+                ingest_time_ms=2000,
+                market_id="m1",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                status=MarketStatus.CLOSED,
+                token_yes_id="tok_yes",
+                token_no_id="tok_no",
+                asset_slug="bitcoin",
+                is_active=False,
+                source="polymarket.gamma.refresh",
+            ),
+        ]
+        user_stream = _FakeUserStream(
+            events=[
+                OrderAccepted(
+                    event_time_ms=1500,
+                    ingest_time_ms=1501,
+                    order_id="ord-1",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side=OrderSide.BUY,
+                    price=0.55,
+                    size=10.0,
+                    source="polymarket_clob_user_ws.order",
+                )
+            ]
+        )
+        source = LiveEventSource(
+            market_refresh=_AsyncEventStream(market_events),
+            fee_refresh=_AsyncEventStream([]),
+            websocket=_FakeWebsocket(messages=[]),
+            user_stream=user_stream,
+            clock_ms=lambda: 5000,
+        )
+
+        await source.start()
+        try:
+            emitted = [await asyncio.wait_for(source.__anext__(), timeout=1.0) for _ in range(5)]
+        finally:
+            await source.stop()
+
+        user_events = [event for event in emitted if event.event_type == EventType.ORDER_ACCEPTED]
+        self.assertEqual(len(user_events), 1)
+        self.assertEqual(user_events[0].order_id, "ord-1")
+        self.assertTrue(user_stream.connected)
+        self.assertTrue(user_stream.closed)
+        self.assertEqual(user_stream.subscribe_calls, [["c1"]])
+        self.assertEqual(user_stream.unsubscribe_calls, [["c1"]])
 
 
 if __name__ == "__main__":

@@ -21,6 +21,13 @@ class ExecutionClientNotStartedError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class VenueApiCredentials:
+    api_key: str
+    secret: str
+    passphrase: str
+
+
+@dataclass(frozen=True)
 class VenueOrderRequest:
     token_id: str
     side: str
@@ -80,6 +87,7 @@ class PolymarketExecutionClient:
         self._client_factory = client_factory
         self._order_args_factory = order_args_factory
         self._client = None
+        self._api_credentials: VenueApiCredentials | None = None
 
     def startup(self) -> None:
         private_key = self._resolve_private_key()
@@ -91,6 +99,7 @@ class PolymarketExecutionClient:
             order_args_factory = order_args_factory or sdk_order_args_factory
         client = client_factory(host=self.host, key=private_key, chain_id=self.chain_id)
         api_creds = client.create_or_derive_api_creds()
+        self._api_credentials = _normalize_api_creds(api_creds)
         client.set_api_creds(api_creds)
         self._client = client
         self._client_factory = client_factory
@@ -131,6 +140,11 @@ class PolymarketExecutionClient:
         items = raw if isinstance(raw, list) else raw.get("data", [])
         results = [self._normalize_order_state(item) for item in items]
         return [row for row in results if _is_live_status(row.status)]
+
+    def api_credentials(self) -> VenueApiCredentials:
+        if self._api_credentials is None:
+            raise ExecutionClientNotStartedError("Execution client API credentials unavailable before startup()")
+        return self._api_credentials
 
     def _build_order_args(self, order_request: VenueOrderRequest):
         order_args_factory = self._order_args_factory
@@ -235,6 +249,22 @@ def _is_live_status(status: str) -> bool:
     return normalized in {"live", "open", "accepted", "order_status_live"}
 
 
+def _normalize_api_creds(raw: Any) -> VenueApiCredentials:
+    if hasattr(raw, "api_key") and hasattr(raw, "secret") and hasattr(raw, "passphrase"):
+        api_key = getattr(raw, "api_key")
+        secret = getattr(raw, "secret")
+        passphrase = getattr(raw, "passphrase")
+    elif isinstance(raw, dict):
+        api_key = raw.get("api_key") or raw.get("apiKey")
+        secret = raw.get("secret")
+        passphrase = raw.get("passphrase")
+    else:
+        raise ExecutionClientConfigError("Unsupported API credentials shape returned by py-clob-client")
+    if not api_key or not secret or not passphrase:
+        raise ExecutionClientConfigError("Incomplete API credentials returned by py-clob-client")
+    return VenueApiCredentials(api_key=str(api_key), secret=str(secret), passphrase=str(passphrase))
+
+
 __all__ = [
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
@@ -242,6 +272,7 @@ __all__ = [
     "ExecutionClientNotStartedError",
     "PolymarketExecutionClient",
     "PRIVATE_KEY_ENV_VAR",
+    "VenueApiCredentials",
     "VenueCancelResult",
     "VenueOrderRequest",
     "VenueOrderState",

@@ -9,7 +9,7 @@ from typing import Any
 
 from ..core.events import MarketStateUpdate, NormalizedEvent
 from ..telemetry import get_logger
-from ..venue_polymarket import BookNormalizer, FeeMetadataRefreshLoop, MarketRefreshLoop, PolymarketWebsocket, TradeNormalizer
+from ..venue_polymarket import BookNormalizer, FeeMetadataRefreshLoop, MarketRefreshLoop, PolymarketUserStream, PolymarketWebsocket, TradeNormalizer
 
 
 class LiveEventSource:
@@ -21,6 +21,7 @@ class LiveEventSource:
         market_refresh: MarketRefreshLoop | AsyncIterator[MarketStateUpdate] | None = None,
         fee_refresh: FeeMetadataRefreshLoop | AsyncIterator[MarketStateUpdate] | None = None,
         websocket: PolymarketWebsocket | Any | None = None,
+        user_stream: PolymarketUserStream | Any | None = None,
         book_normalizer: BookNormalizer | None = None,
         trade_normalizer: TradeNormalizer | None = None,
         clock_ms: callable | None = None,
@@ -28,6 +29,7 @@ class LiveEventSource:
         self.market_refresh = market_refresh or MarketRefreshLoop()
         self.fee_refresh = fee_refresh or FeeMetadataRefreshLoop()
         self.websocket = websocket or PolymarketWebsocket()
+        self.user_stream = user_stream
         self.book_normalizer = book_normalizer or BookNormalizer()
         self.trade_normalizer = trade_normalizer or TradeNormalizer()
         self.clock_ms = clock_ms or _default_clock_ms
@@ -36,6 +38,7 @@ class LiveEventSource:
         self._sentinel = object()
         self._forward_tasks: list[asyncio.Task[None]] = []
         self._market_tokens: dict[str, set[str]] = {}
+        self._market_conditions: dict[str, str] = {}
         self._started = False
 
     @property
@@ -56,11 +59,14 @@ class LiveEventSource:
             return
         self._started = True
         await _maybe_call(self.websocket, "connect")
+        await _maybe_call(self.user_stream, "connect")
         self._forward_tasks = [
             asyncio.create_task(self._consume_market_refresh(), name="live_source_market_refresh"),
             asyncio.create_task(self._consume_fee_refresh(), name="live_source_fee_refresh"),
             asyncio.create_task(self._consume_websocket(), name="live_source_websocket"),
         ]
+        if self.user_stream is not None:
+            self._forward_tasks.append(asyncio.create_task(self._consume_user_stream(), name="live_source_user_stream"))
         await _maybe_call(self.market_refresh, "start")
         await _maybe_call(self.fee_refresh, "start")
 
@@ -77,6 +83,7 @@ class LiveEventSource:
         await _maybe_call(self.market_refresh, "stop")
         await _maybe_call(self.fee_refresh, "stop")
         await _maybe_call(self.websocket, "close")
+        await _maybe_call(self.user_stream, "close")
         await self._queue.put(self._sentinel)
 
     async def _consume_market_refresh(self) -> None:
@@ -114,6 +121,13 @@ class LiveEventSource:
             for event in [*book_events, *trade_events]:
                 await self._queue.put(event)
 
+    async def _consume_user_stream(self) -> None:
+        if self.user_stream is None:
+            return
+        while True:
+            event = await self.user_stream.recv()
+            await self._queue.put(event)
+
     def _register_market_event(self, event: MarketStateUpdate) -> None:
         register_book = getattr(self.book_normalizer, "register_market", None)
         if callable(register_book):
@@ -126,22 +140,34 @@ class LiveEventSource:
         market_id = str(event.market_id)
         previous_tokens = self._market_tokens.get(market_id, set())
         current_tokens = extract_market_token_ids(event) if bool(event.is_active) else set()
+        previous_condition = self._market_conditions.get(market_id)
+        current_condition = str(event.condition_id).strip() if bool(event.is_active) and event.condition_id else None
         added = current_tokens - previous_tokens
         removed = previous_tokens - current_tokens
         if added:
             await self.websocket.subscribe(sorted(added))
         if removed:
             await self.websocket.unsubscribe(sorted(removed))
+        if self.user_stream is not None:
+            if previous_condition and previous_condition != current_condition:
+                await self.user_stream.unsubscribe([previous_condition])
+            if current_condition and current_condition != previous_condition:
+                await self.user_stream.subscribe([current_condition])
         if current_tokens:
             self._market_tokens[market_id] = current_tokens
         else:
             self._market_tokens.pop(market_id, None)
+        if current_condition:
+            self._market_conditions[market_id] = current_condition
+        else:
+            self._market_conditions.pop(market_id, None)
         if added or removed:
             self.logger.info(
                 "live_source_market_subscription_reconciled",
                 market_id=market_id,
                 added=len(added),
                 removed=len(removed),
+                user_market_subscribed=bool(self.user_stream is not None and current_condition),
                 subscribed_markets=len(self._market_tokens),
             )
 
