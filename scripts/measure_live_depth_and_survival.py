@@ -357,7 +357,10 @@ class LiveDepthCollector:
                 if seconds_until_start is not None and seconds_until_start > self.args.max_seconds_until_start:
                     stats["skipped_duration_window"] += 1
                     continue
-                if remaining_seconds > self.args.max_seconds_to_end:
+                if (
+                    self.args.duration_metric == "time_remaining"
+                    and remaining_seconds > self.args.max_seconds_to_end
+                ):
                     stats["skipped_duration_window"] += 1
                     continue
 
@@ -787,7 +790,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-duration-seconds", type=int, default=DEFAULT_DURATION_MIN)
     parser.add_argument("--max-duration-seconds", type=int, default=DEFAULT_DURATION_MAX)
     parser.add_argument("--max-seconds-until-start", type=int, default=1800)
-    parser.add_argument("--max-seconds-to-end", type=int, default=1800)
+    parser.add_argument(
+        "--max-seconds-to-end",
+        type=int,
+        default=1800,
+        help="Only used when --duration-metric=time_remaining; recurring 15m markets expose long-horizon endDate values",
+    )
     parser.add_argument("--duration-metric", choices=("lifecycle", "time_remaining", "implied_series"), default="implied_series")
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")

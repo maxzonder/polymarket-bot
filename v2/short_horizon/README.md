@@ -33,5 +33,6 @@ Phase 0 design and decision artifacts live in:
 
 Notable Phase 0 clarification already captured there:
 - `trigger_definition_alignment.md` documents the exact gap between historical research (`trade-price` first-touch) and live MVP semantics (`best_ask` first-touch), plus why the current historical dataset cannot honestly remove that gap.
+- `taker_slippage_stress_check.md` records the completed `+1 tick` pessimistic entry stress on the strict `20_40pct / ascending / {0.55, 0.65, 0.70}` research slice.
 
 These docs are intended to be concrete enough that a developer can implement Phase 1 without reopening core design debates.

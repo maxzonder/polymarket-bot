@@ -99,3 +99,29 @@ Until one of those happens, the correct statement is:
 - **research trigger = trade-price first-touch**
 - **live MVP trigger = best_ask first-touch**
 - **the gap is explicit, not resolved**
+
+## 7. Signal-rate discrepancy note
+
+There is also a real **signal-rate discrepancy** between the live collector readout and the historical research estimate.
+
+Observed values from the current Phase 0 work:
+- live BTC+ETH first-touch collector readout: about **`902/day`** across all relative buckets
+- historical taker research estimate from the strict validated slice: about **`60/day`**
+
+This is roughly a **15x gap**.
+
+Current best explanation is structural, not mysterious:
+- the live collector fires on **both YES and NO tokens**
+- the live collector currently records **best_ask first-touch** without the research-side `ascending` trade-price construction
+- the live collector coverage used **all relative buckets**, while the strict MVP research slice is only **`20_40pct`**
+- the historical research path also bundles in its own directional / touch-construction assumptions from trade tape
+
+What this means operationally:
+- the live collector should be treated as an **execution-viability superset** signal source
+- the historical research estimate should be treated as the **edge-estimation baseline** for the stricter research slice
+- the two numbers should **not** be compared as if they were the same trigger population
+
+So the discrepancy is:
+- **documented**
+- **expected under the current definitions**
+- **not a blocker** for Phase 1 module work
