@@ -17,7 +17,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 from short_horizon.config import ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
-from short_horizon.execution import ExecutionEngine, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
+from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, TimerEvent
 from short_horizon.live_runner import build_parser, run_live, run_stub_live
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
@@ -253,6 +253,28 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(payload["event"], "book_update_ingested")
 
 
+class _FakeExecutionClient:
+    def __init__(self, *, place_result=None, error: Exception | None = None):
+        self.place_result = place_result or {"order_id": "venue-ord-1", "status": "live"}
+        self.error = error
+        self.place_calls = []
+
+    def place_order(self, order_request):
+        self.place_calls.append(order_request)
+        if self.error is not None:
+            raise self.error
+        from short_horizon.venue_polymarket.execution_client import VenuePlaceResult
+
+        if isinstance(self.place_result, VenuePlaceResult):
+            return self.place_result
+        return VenuePlaceResult(
+            order_id=self.place_result.get("order_id", "venue-ord-1"),
+            status=self.place_result.get("status", "live"),
+            client_order_id=self.place_result.get("client_order_id"),
+            raw=self.place_result,
+        )
+
+
 class ExecutionEngineTest(unittest.TestCase):
     def _market_state(self) -> MarketStateUpdate:
         return MarketStateUpdate(
@@ -465,6 +487,121 @@ class ExecutionEngineTest(unittest.TestCase):
 
                 with self.assertRaises(ExecutionValidationError):
                     execution.submit(bad_intent)
+            finally:
+                store.close()
+
+    def test_execution_boundary_dry_run_logs_translated_order_without_hitting_venue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_dry_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            client = _FakeExecutionClient()
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.DRY_RUN)
+
+                events = execution.submit(self._intent())
+
+                self.assertEqual(len(client.place_calls), 0)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].event_type, EventType.ORDER_ACCEPTED)
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, client_order_id, venue_order_id, venue_order_status FROM orders WHERE order_id = 'ord_exec_001'"
+                    ).fetchone()
+                    dry_run_rows = conn.execute(
+                        "SELECT event_type, payload_json FROM events_log WHERE run_id = 'run_exec_dry_001' ORDER BY seq ASC"
+                    ).fetchall()
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "accepted")
+                self.assertIsNotNone(order_row[1])
+                self.assertIsNone(order_row[2])
+                self.assertEqual(order_row[3], "accepted")
+                dry_payloads = [json.loads(row[1]) for row in dry_run_rows if row[0] == "TimerEvent"]
+                self.assertTrue(any(payload.get("timer_kind") == "dry_run_order_logged" for payload in dry_payloads))
+            finally:
+                store.close()
+
+    def test_execution_boundary_live_mode_binds_venue_order_id_on_accept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_live_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE)
+
+                events = execution.submit(self._intent())
+
+                self.assertEqual(len(client.place_calls), 1)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].order_id, "ord_exec_001")
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, client_order_id, venue_order_id, venue_order_status FROM orders WHERE order_id = 'ord_exec_001'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "accepted")
+                self.assertIsNotNone(order_row[1])
+                self.assertEqual(order_row[2], "venue-123")
+                self.assertEqual(order_row[3], "live")
+            finally:
+                store.close()
+
+    def test_execution_boundary_live_mode_maps_venue_error_to_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_live_reject_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            client = _FakeExecutionClient(error=RuntimeError("insufficient balance"))
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE)
+
+                events = execution.submit(self._intent())
+
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].event_type, EventType.ORDER_REJECTED)
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, venue_order_id, last_reject_code, last_reject_reason FROM orders WHERE order_id = 'ord_exec_001'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "rejected")
+                self.assertIsNone(order_row[1])
+                self.assertEqual(order_row[2], "VENUE_ERROR")
+                self.assertIn("insufficient balance", order_row[3])
             finally:
                 store.close()
 

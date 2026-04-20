@@ -3,13 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
 from datetime import datetime
-from typing import Protocol
+from enum import StrEnum
+from typing import Any, Protocol
 
-from ..core.events import OrderAccepted, OrderCanceled, OrderFilled, OrderSide
+from ..core.events import OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, OrderSide, TimerEvent
 from ..core.models import OrderIntent
 from ..core.order_state import OrderState
 from ..strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 from ..telemetry import get_logger
+from ..venue_polymarket.execution_client import VenueOrderRequest, VenuePlaceResult
+from ..venue_polymarket.markets import MarketMetadata
 from .order_translator import TranslationPolicy, VenueConstraints, VenueTranslationError, translate_place_order
 
 
@@ -72,6 +75,12 @@ ALLOWED_TRANSITIONS: dict[OrderState, set[OrderState]] = {
 }
 
 
+class ExecutionMode(StrEnum):
+    SYNTHETIC = "synthetic"
+    DRY_RUN = "dry_run"
+    LIVE = "live"
+
+
 class ExecutionTransitionError(RuntimeError):
     pass
 
@@ -88,6 +97,11 @@ class SyntheticFillRequest:
     fill_price: float | None = None
     fee_paid_usdc: float | None = None
     source: str = "replay"
+
+
+class ExecutionVenueClient(Protocol):
+    def place_order(self, order_request: VenueOrderRequest) -> VenuePlaceResult:
+        ...
 
 
 class ExecutionStore(Protocol):
@@ -109,6 +123,7 @@ class ExecutionStore(Protocol):
         size: float | None,
         state: OrderState | str,
         client_order_id: str | None,
+        venue_order_id: str | None = None,
         intent_created_at_ms: int,
         last_state_change_at_ms: int,
         remaining_size: float | None = None,
@@ -124,6 +139,7 @@ class ExecutionStore(Protocol):
         order_id: str,
         state: OrderState | str,
         event_time_ms: int,
+        venue_order_id: str | None = None,
         venue_order_status: str | None = None,
         cumulative_filled_size: float | None = None,
         remaining_size: float | None = None,
@@ -158,19 +174,24 @@ class ExecutionStore(Protocol):
 
 
 class ExecutionEngine:
-    """Synthetic Phase-1 execution boundary.
+    """Execution boundary for synthetic, dry-run, and live order placement."""
 
-    Current responsibility in P1-6:
-    - consume strategy intents
-    - materialize orders in storage when needed
-    - enforce the P0-C state machine for placeholder send/cancel/fill flows
-    - emit synthetic order events until real venue wiring lands in Phase 3
-    """
-
-    def __init__(self, *, store: ExecutionStore, tick_size: float = 0.01, min_order_size: float = 1.0):
+    def __init__(
+        self,
+        *,
+        store: ExecutionStore,
+        client: ExecutionVenueClient | None = None,
+        mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
+        tick_size: float = 0.01,
+        min_order_size: float = 1.0,
+        translation_policy: TranslationPolicy | None = None,
+    ):
         self.store = store
+        self.client = client
+        self.mode = ExecutionMode(str(mode))
         self.tick_size = float(tick_size)
         self.min_order_size = float(min_order_size)
+        self.translation_policy = translation_policy or TranslationPolicy()
         self.logger = get_logger("short_horizon.execution", run_id=store.current_run_id)
 
     def handle_intent(self, intent: StrategyIntent, *, event_time_ms: int | None = None):
@@ -183,14 +204,75 @@ class ExecutionEngine:
             return []
         raise TypeError(f"Unsupported strategy intent: {type(intent)!r}")
 
-    def submit(self, intent: OrderIntent, *, event_time_ms: int | None = None) -> list[OrderAccepted]:
+    def submit(self, intent: OrderIntent, *, event_time_ms: int | None = None) -> list[OrderAccepted | OrderRejected]:
         send_time_ms = int(event_time_ms if event_time_ms is not None else intent.event_time_ms)
-        accepted_time_ms = send_time_ms + 1
         order_row = self._ensure_order_row(intent)
-        self._validate_order_row(order_row)
+
+        if self.mode is ExecutionMode.SYNTHETIC:
+            self._validate_order_row(order_row)
+            return [self._emit_synthetic_accept(intent=intent, order_row=order_row, send_time_ms=send_time_ms)]
+
+        try:
+            order_request = self._translate_order_request(intent)
+        except VenueTranslationError as exc:
+            return [self._emit_rejected(intent=intent, order_row=order_row, send_time_ms=send_time_ms, reason=str(exc), reason_code="TRANSLATION_ERROR")]
+
+        order_row = self._bind_translated_request(intent=intent, order_request=order_request, event_time_ms=send_time_ms)
+        if self.mode is ExecutionMode.DRY_RUN:
+            self._log_dry_run_order(intent=intent, order_request=order_request, event_time_ms=send_time_ms)
+            return [self._emit_synthetic_accept(intent=intent, order_row=order_row, send_time_ms=send_time_ms, source="execution.dry_run.synthetic_accept")]
+
+        if self.client is None:
+            raise ExecutionValidationError("Execution client is required in live mode")
+
+        self._transition(order_row, OrderState.PENDING_SEND, event_time_ms=send_time_ms, venue_order_status="sending")
+        try:
+            place_result = self.client.place_order(order_request)
+        except Exception as exc:
+            return [self._emit_rejected(intent=intent, order_row=order_row, send_time_ms=send_time_ms + 1, reason=str(exc), reason_code="VENUE_ERROR")]
+        return [self._emit_live_accept(intent=intent, order_row=order_row, place_result=place_result, accepted_time_ms=send_time_ms + 1)]
+
+    def _translate_order_request(self, intent: OrderIntent) -> VenueOrderRequest:
+        return translate_place_order(
+            intent,
+            self._market_meta_for_intent(intent),
+            VenueConstraints(tick_size=self.tick_size, min_order_size=self.min_order_size),
+            client_order_id_seed=self.store.current_run_id,
+            policy=self.translation_policy,
+        )
+
+    def _bind_translated_request(self, *, intent: OrderIntent, order_request: VenueOrderRequest, event_time_ms: int) -> dict:
+        order_row = self._require_order(intent.intent_id)
+        self.store.insert_order(
+            order_id=order_row["order_id"],
+            market_id=order_row["market_id"],
+            token_id=order_row["token_id"],
+            side=order_row["side"],
+            price=order_request.price,
+            size=order_request.size,
+            state=order_row["state"],
+            client_order_id=order_request.client_order_id,
+            venue_order_id=order_row.get("venue_order_id"),
+            intent_created_at_ms=self._event_time_ms_from_iso(str(order_row["intent_created_at"])),
+            last_state_change_at_ms=event_time_ms,
+            remaining_size=order_request.size,
+            parent_order_id=order_row.get("parent_order_id"),
+            venue_order_status=order_row.get("venue_order_status") or "intent",
+            reconciliation_required=bool(order_row.get("reconciliation_required")),
+        )
+        return self._require_order(intent.intent_id)
+
+    def _emit_synthetic_accept(
+        self,
+        *,
+        intent: OrderIntent,
+        order_row: dict,
+        send_time_ms: int,
+        source: str = "execution.synthetic_accept",
+    ) -> OrderAccepted:
+        accepted_time_ms = send_time_ms + 1
         self._transition(order_row, OrderState.PENDING_SEND, event_time_ms=send_time_ms, venue_order_status="sending")
         order_row = self._require_order(intent.intent_id)
-
         accepted = OrderAccepted(
             event_time_ms=accepted_time_ms,
             ingest_time_ms=accepted_time_ms,
@@ -200,7 +282,7 @@ class ExecutionEngine:
             side=OrderSide.BUY,
             price=float(order_row["price"]),
             size=float(order_row["size"]),
-            source="execution.synthetic_accept",
+            source=source,
             client_order_id=order_row.get("client_order_id") or intent.intent_id,
             venue_status="accepted",
             run_id=self.store.current_run_id,
@@ -213,8 +295,130 @@ class ExecutionEngine:
             market_id=intent.market_id,
             token_id=intent.token_id,
             event_time_ms=accepted_time_ms,
+            execution_mode=self.mode.value,
         )
-        return [accepted]
+        return accepted
+
+    def _emit_live_accept(self, *, intent: OrderIntent, order_row: dict, place_result: VenuePlaceResult, accepted_time_ms: int) -> OrderAccepted:
+        self._transition(
+            order_row,
+            OrderState.ACCEPTED,
+            event_time_ms=accepted_time_ms,
+            venue_order_id=place_result.order_id or None,
+            venue_order_status=place_result.status,
+        )
+        refreshed = self._require_order(intent.intent_id)
+        accepted = OrderAccepted(
+            event_time_ms=accepted_time_ms,
+            ingest_time_ms=accepted_time_ms,
+            order_id=refreshed["order_id"],
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            side=OrderSide.BUY,
+            price=float(refreshed["price"]),
+            size=float(refreshed["size"]),
+            source="execution.live_accept",
+            client_order_id=refreshed.get("client_order_id"),
+            venue_status=place_result.status,
+            run_id=self.store.current_run_id,
+        )
+        self.store.append_event_log(accepted, order_id=refreshed["order_id"])
+        self.logger.info(
+            "live_order_accepted",
+            order_id=refreshed["order_id"],
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            client_order_id=refreshed.get("client_order_id"),
+            venue_order_id=place_result.order_id,
+            event_time_ms=accepted_time_ms,
+        )
+        return accepted
+
+    def _emit_rejected(
+        self,
+        *,
+        intent: OrderIntent,
+        order_row: dict,
+        send_time_ms: int,
+        reason: str,
+        reason_code: str,
+    ) -> OrderRejected:
+        current_state = self._state_from_row(order_row)
+        if current_state is OrderState.INTENT:
+            self._transition(
+                order_row,
+                OrderState.PENDING_SEND,
+                event_time_ms=max(send_time_ms - 1, intent.event_time_ms),
+                venue_order_status="sending",
+            )
+            order_row = self._require_order(intent.intent_id)
+        self._transition(
+            order_row,
+            OrderState.REJECTED,
+            event_time_ms=send_time_ms,
+            venue_order_status="rejected",
+            reject_code=reason_code,
+            reject_reason=reason,
+        )
+        refreshed = self._require_order(intent.intent_id)
+        rejected = OrderRejected(
+            event_time_ms=send_time_ms,
+            ingest_time_ms=send_time_ms,
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            side=OrderSide.BUY,
+            source="execution.live_reject" if self.mode is ExecutionMode.LIVE else "execution.dry_run_reject",
+            client_order_id=refreshed.get("client_order_id"),
+            price=float(refreshed["price"]) if refreshed.get("price") is not None else None,
+            size=float(refreshed["size"]) if refreshed.get("size") is not None else None,
+            reject_reason_code=reason_code,
+            reject_reason_text=reason,
+            is_retryable=False,
+            run_id=self.store.current_run_id,
+        )
+        self.store.append_event_log(rejected, order_id=refreshed["order_id"])
+        self.logger.warning(
+            "order_rejected",
+            order_id=refreshed["order_id"],
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            client_order_id=refreshed.get("client_order_id"),
+            reason_code=reason_code,
+            reason=reason,
+            execution_mode=self.mode.value,
+        )
+        return rejected
+
+    def _log_dry_run_order(self, *, intent: OrderIntent, order_request: VenueOrderRequest, event_time_ms: int) -> None:
+        event = TimerEvent(
+            event_time_ms=event_time_ms,
+            ingest_time_ms=event_time_ms,
+            timer_kind="dry_run_order_logged",
+            source="execution.dry_run",
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            payload={
+                "order_id": intent.intent_id,
+                "client_order_id": order_request.client_order_id,
+                "token_id": order_request.token_id,
+                "side": order_request.side,
+                "price": order_request.price,
+                "size": order_request.size,
+                "time_in_force": order_request.time_in_force,
+                "post_only": order_request.post_only,
+            },
+            run_id=self.store.current_run_id,
+        )
+        self.store.append_event_log(event, order_id=intent.intent_id)
+        self.logger.info(
+            "dry_run_order_logged",
+            order_id=intent.intent_id,
+            market_id=intent.market_id,
+            token_id=intent.token_id,
+            client_order_id=order_request.client_order_id,
+            price=order_request.price,
+            size=order_request.size,
+        )
 
     def apply_fill(self, request: SyntheticFillRequest) -> OrderFilled:
         order_row = self._require_order(request.order_id)
@@ -358,9 +562,12 @@ class ExecutionEngine:
         next_state: OrderState,
         *,
         event_time_ms: int,
+        venue_order_id: str | None = None,
         venue_order_status: str | None = None,
         cumulative_filled_size: float | None = None,
         remaining_size: float | None = None,
+        reject_code: str | None = None,
+        reject_reason: str | None = None,
     ) -> None:
         current_state = self._state_from_row(order_row)
         if current_state in TERMINAL_ORDER_STATES:
@@ -376,9 +583,12 @@ class ExecutionEngine:
             order_id=order_row["order_id"],
             state=next_state,
             event_time_ms=event_time_ms,
+            venue_order_id=venue_order_id,
             venue_order_status=venue_order_status,
             cumulative_filled_size=cumulative_filled_size,
             remaining_size=remaining_size,
+            reject_code=reject_code,
+            reject_reason=reject_reason,
         )
         order_row.update(self._require_order(order_row["order_id"]))
 
@@ -396,6 +606,23 @@ class ExecutionEngine:
                 f"Order {order_row['order_id']} price {price} is not aligned to tick size {self.tick_size}"
             )
 
+    def _market_meta_for_intent(self, intent: OrderIntent) -> MarketMetadata:
+        return MarketMetadata(
+            market_id=intent.market_id,
+            condition_id=intent.condition_id or intent.market_id,
+            question=intent.question or "",
+            token_yes_id=intent.token_id,
+            token_no_id=f"{intent.market_id}:other",
+            start_time_ms=intent.event_time_ms,
+            end_time_ms=intent.event_time_ms,
+            asset_slug=intent.asset_slug,
+            is_active=True,
+            duration_seconds=None,
+            fees_enabled=True,
+            fee_rate_bps=None,
+            tick_size=self.tick_size,
+        )
+
     @staticmethod
     def _state_from_row(order_row: dict) -> OrderState:
         return OrderState(str(order_row["state"]))
@@ -403,6 +630,12 @@ class ExecutionEngine:
     @staticmethod
     def _event_time_ms_from_order(order_row: dict) -> int:
         text = str(order_row.get("last_state_change_at") or order_row.get("intent_created_at"))
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return int(round(datetime.fromisoformat(text).timestamp() * 1000))
+
+    @staticmethod
+    def _event_time_ms_from_iso(text: str) -> int:
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
         return int(round(datetime.fromisoformat(text).timestamp() * 1000))
@@ -427,9 +660,11 @@ def is_valid_tick_size(price: float, tick_size: float, *, tolerance: float = 1e-
 __all__ = [
     "ALLOWED_TRANSITIONS",
     "ExecutionEngine",
+    "ExecutionMode",
     "ExecutionStore",
     "ExecutionTransitionError",
     "ExecutionValidationError",
+    "ExecutionVenueClient",
     "SyntheticFillRequest",
     "TranslationPolicy",
     "VenueConstraints",
