@@ -2,3 +2,4 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 py-clob-client>=0.15.0
 structlog>=24.4.0
+websockets>=12.0
