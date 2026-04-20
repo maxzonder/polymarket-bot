@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from api.gamma_client import GAMMA_BASE
+GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 
 @dataclass(frozen=True)
