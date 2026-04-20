@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Iterable
+
 from ..config import ShortHorizonConfig
+from ..core.order_state import OrderState
 from ..core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
 from ..core.lifecycle import compute_lifecycle_fraction
 from ..core.models import MarketState, OrderIntent, SkipDecision, TouchSignal
@@ -56,6 +59,7 @@ class ShortHorizon15mTouchStrategy:
         self.config = config
         self.touch_tracker = FirstTouchTracker(config.triggers.price_levels)
         self.market_state_by_token: dict[str, MarketState] = {}
+        self.active_order_ids_by_market_token: dict[tuple[str, str], str] = {}
 
     def on_market_event(self, event: BookUpdate | MarketStateUpdate | TradeTick) -> list[StrategyIntent]:
         if isinstance(event, MarketStateUpdate):
@@ -66,6 +70,16 @@ class ShortHorizon15mTouchStrategy:
 
         outputs: list[StrategyIntent] = []
         for touch in self.detect_touches(event):
+            if self._has_active_order(market_id=event.market_id, token_id=event.token_id):
+                outputs.append(
+                    Noop(
+                        reason="open_order_exists",
+                        market_id=event.market_id,
+                        token_id=event.token_id,
+                        details={"existing_order_id": self.active_order_ids_by_market_token[(event.market_id, event.token_id)]},
+                    )
+                )
+                continue
             decision = self.decide_on_touch(event=event, touch=touch)
             if isinstance(decision, OrderIntent):
                 outputs.append(PlaceOrder(decision))
@@ -81,10 +95,29 @@ class ShortHorizon15mTouchStrategy:
         return outputs
 
     def on_order_event(self, event: OrderAccepted | OrderRejected | OrderFilled | OrderCanceled) -> list[StrategyIntent]:
+        key = (event.market_id, event.token_id)
+        if isinstance(event, OrderAccepted):
+            self.active_order_ids_by_market_token[key] = event.order_id
+            return []
+        if isinstance(event, OrderFilled):
+            if event.remaining_size > 1e-12:
+                self.active_order_ids_by_market_token[key] = event.order_id
+            else:
+                self.active_order_ids_by_market_token.pop(key, None)
+            return []
+        self.active_order_ids_by_market_token.pop(key, None)
         return []
 
     def on_timer(self, timer: TimerEvent) -> list[StrategyIntent]:
         return []
+
+    def hydrate_open_orders(self, rows: Iterable[dict]) -> None:
+        self.active_order_ids_by_market_token.clear()
+        for row in rows:
+            state = OrderState(str(row["state"]))
+            if state in {OrderState.REJECTED, OrderState.FILLED, OrderState.CANCEL_CONFIRMED, OrderState.EXPIRED, OrderState.REPLACED}:
+                continue
+            self.active_order_ids_by_market_token[(str(row["market_id"]), str(row["token_id"]))] = str(row["order_id"])
 
     def on_market_state(self, event: MarketStateUpdate) -> None:
         self.market_state_by_token[event.token_id] = MarketState(
@@ -136,3 +169,6 @@ class ShortHorizon15mTouchStrategy:
             lifecycle_fraction=float(lifecycle_fraction),
             event_time_ms=event.event_time_ms,
         )
+
+    def _has_active_order(self, *, market_id: str, token_id: str) -> bool:
+        return (market_id, token_id) in self.active_order_ids_by_market_token

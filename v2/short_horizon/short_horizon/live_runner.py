@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import ShortHorizonConfig
 from .core.runtime import StrategyRuntime
-from .execution import ExecutionMode
+from .execution import ExecutionEngine, ExecutionMode
 from .market_data import LiveEventSource, MarketDataSource
 from .probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_events
@@ -29,6 +29,9 @@ def build_live_runtime(*, db_path: str | Path, run_id: str | None = None, config
     )
     store = SQLiteRuntimeStore(db_path, run=run_context)
     strategy = ShortHorizon15mTouchStrategy(config=config)
+    hydrate_open_orders = getattr(strategy, "hydrate_open_orders", None)
+    if callable(hydrate_open_orders):
+        hydrate_open_orders(store.load_non_terminal_orders())
     return StrategyRuntime(strategy=strategy, intent_store=store)
 
 
@@ -79,6 +82,7 @@ async def run_live(
     if resolved_mode is ExecutionMode.LIVE:
         client = client or PolymarketExecutionClient()
         client.startup()
+        reconcile_runtime_orders(runtime=runtime, execution_client=client, execution_mode=resolved_mode)
     source = source or build_live_source(execution_mode=resolved_mode, execution_client=client)
     try:
         await source.start()
@@ -114,6 +118,20 @@ def build_live_source(
     if not callable(credentials):
         raise TypeError("live execution mode requires execution_client.api_credentials() for authenticated user stream")
     return LiveEventSource(user_stream=PolymarketUserStream(auth=credentials()))
+
+
+def reconcile_runtime_orders(
+    *,
+    runtime: StrategyRuntime,
+    execution_client: PolymarketExecutionClient,
+    execution_mode: ExecutionMode | str,
+) -> int:
+    resolved_mode = ExecutionMode(str(execution_mode))
+    reconciled = ExecutionEngine(store=runtime.store, client=execution_client, mode=resolved_mode).reconcile_persisted_orders()
+    hydrate_open_orders = getattr(runtime.strategy, "hydrate_open_orders", None)
+    if callable(hydrate_open_orders):
+        hydrate_open_orders(runtime.store.load_non_terminal_orders())
+    return reconciled
 
 
 def build_parser() -> argparse.ArgumentParser:

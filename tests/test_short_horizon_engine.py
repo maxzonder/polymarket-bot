@@ -20,8 +20,8 @@ from short_horizon.config import ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
-from short_horizon.events import BookUpdate, MarketStateUpdate, OrderCanceled, OrderFilled, TimerEvent
-from short_horizon.live_runner import build_live_source, build_parser, run_live, run_stub_live, validate_cli_args
+from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
+from short_horizon.live_runner import build_live_source, build_live_runtime, build_parser, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -29,7 +29,7 @@ from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntime
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
-from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, VenueApiCredentials, VenuePlaceResult
+from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, VenueApiCredentials, VenueOrderState, VenuePlaceResult
 
 
 class _AsyncNormalizedSource:
@@ -70,6 +70,8 @@ class _FakeLiveRunnerClient:
         self.place_calls = []
         self.cancel_calls = []
         self.api_credentials_calls = 0
+        self.order_lookup_by_id = {}
+        self.open_orders_by_market = {}
 
     def startup(self) -> None:
         self.started = True
@@ -91,6 +93,14 @@ class _FakeLiveRunnerClient:
         from short_horizon.venue_polymarket.execution_client import VenueCancelResult
 
         return VenueCancelResult(order_id=order_id, success=True, status="canceled")
+
+    def get_order(self, order_id):
+        if order_id in self.order_lookup_by_id:
+            return self.order_lookup_by_id[order_id]
+        raise RuntimeError(f"unknown order {order_id}")
+
+    def list_open_orders(self, market_id=None):
+        return list(self.open_orders_by_market.get(market_id, []))
 
 
 class CoreTypesTest(unittest.TestCase):
@@ -160,6 +170,73 @@ class StrategyApiContractTest(unittest.TestCase):
         outputs = strategy.on_timer(TimerEvent(event_time_ms=1, ingest_time_ms=1, timer_kind="decision_tick"))
         self.assertEqual(outputs, [])
         self.assertEqual([Noop(reason="x")][0].reason, "x")
+
+    def test_touch_strategy_skips_when_open_order_is_hydrated(self) -> None:
+        strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig())
+        strategy.on_market_event(
+            MarketStateUpdate(
+                event_time_ms=200_000,
+                ingest_time_ms=200_050,
+                market_id="m1",
+                token_id="tok_yes",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                asset_slug="bitcoin",
+                start_time_ms=0,
+                end_time_ms=900_000,
+                is_active=True,
+                metadata_is_fresh=True,
+                fee_rate_bps=10.0,
+                fee_metadata_age_ms=1_000,
+            )
+        )
+        strategy.hydrate_open_orders(
+            [
+                {
+                    "order_id": "ord_live_1",
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "state": OrderState.ACCEPTED,
+                }
+            ]
+        )
+        self.assertEqual(strategy.on_market_event(BookUpdate(event_time_ms=220_000, ingest_time_ms=220_020, market_id="m1", token_id="tok_yes", best_bid=0.53, best_ask=0.54)), [])
+        outputs = strategy.on_market_event(BookUpdate(event_time_ms=225_000, ingest_time_ms=225_020, market_id="m1", token_id="tok_yes", best_bid=0.54, best_ask=0.55))
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], Noop)
+        self.assertEqual(outputs[0].reason, "open_order_exists")
+
+    def test_touch_strategy_clears_active_order_after_terminal_event(self) -> None:
+        strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig())
+        strategy.on_order_event(
+            OrderAccepted(
+                event_time_ms=1,
+                ingest_time_ms=1,
+                order_id="ord_live_1",
+                market_id="m1",
+                token_id="tok_yes",
+                side="buy",
+                price=0.55,
+                size=10.0,
+                source="test",
+                client_order_id="cid-1",
+                venue_status="live",
+                run_id="run1",
+            )
+        )
+        strategy.on_order_event(
+            OrderCanceled(
+                event_time_ms=2,
+                ingest_time_ms=2,
+                order_id="ord_live_1",
+                market_id="m1",
+                token_id="tok_yes",
+                source="test",
+                cancel_reason="done",
+                run_id="run1",
+            )
+        )
+        self.assertEqual(strategy.active_order_ids_by_market_token, {})
 
 
 class ShortHorizonEngineTest(unittest.TestCase):
@@ -286,11 +363,13 @@ class TelemetryTest(unittest.TestCase):
 
 
 class _FakeExecutionClient:
-    def __init__(self, *, place_result=None, error: Exception | None = None):
+    def __init__(self, *, place_result=None, error: Exception | None = None, order_lookup_by_id=None, open_orders_by_market=None):
         self.place_result = place_result or {"order_id": "venue-ord-1", "status": "live"}
         self.error = error
         self.place_calls = []
         self.cancel_calls = []
+        self.order_lookup_by_id = dict(order_lookup_by_id or {})
+        self.open_orders_by_market = dict(open_orders_by_market or {})
 
     def place_order(self, order_request):
         self.place_calls.append(order_request)
@@ -314,6 +393,18 @@ class _FakeExecutionClient:
         if self.error is not None:
             raise self.error
         return VenueCancelResult(order_id=order_id, success=True, status="canceled")
+
+    def get_order(self, order_id):
+        if self.error is not None:
+            raise self.error
+        if order_id in self.order_lookup_by_id:
+            return self.order_lookup_by_id[order_id]
+        raise RuntimeError(f"unknown order {order_id}")
+
+    def list_open_orders(self, market_id=None):
+        if self.error is not None:
+            raise self.error
+        return list(self.open_orders_by_market.get(market_id, []))
 
 
 class ExecutionEngineTest(unittest.TestCase):
@@ -740,6 +831,118 @@ class ExecutionEngineTest(unittest.TestCase):
                 self.assertAlmostEqual(order_row[3], 10.0 / 0.55)
                 self.assertAlmostEqual(order_row[4], 0.0)
                 self.assertEqual(fill_count, 1)
+            finally:
+                store.close()
+
+    def test_execution_boundary_reconciles_persisted_live_order_on_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_live_reconcile_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            client = _FakeExecutionClient(
+                order_lookup_by_id={
+                    "venue-123": VenueOrderState(
+                        order_id="venue-123",
+                        status="live",
+                        market_id="m1",
+                        token_id="tok_yes",
+                        side="buy",
+                        price=0.55,
+                        original_size=18.1818181818,
+                        remaining_size=18.1818181818,
+                        cumulative_filled_size=0.0,
+                        client_order_id="cid-123",
+                    )
+                }
+            )
+            try:
+                store.insert_order(
+                    order_id="ord_exec_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=18.1818181818,
+                    state=OrderState.CANCEL_REQUESTED,
+                    client_order_id="cid-123",
+                    venue_order_id="venue-123",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_050,
+                    remaining_size=18.1818181818,
+                    venue_order_status="cancelling",
+                    reconciliation_required=True,
+                )
+                execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE)
+
+                reconciled = execution.reconcile_persisted_orders(event_time_ms=225_200)
+
+                self.assertEqual(reconciled, 1)
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, venue_order_status, reconciliation_required FROM orders WHERE order_id = 'ord_exec_001'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "accepted")
+                self.assertEqual(order_row[1], "live")
+                self.assertEqual(order_row[2], 0)
+            finally:
+                store.close()
+
+    def test_execution_boundary_marks_missing_persisted_live_order_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_live_reconcile_002",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            client = _FakeExecutionClient()
+            try:
+                store.insert_order(
+                    order_id="ord_exec_002",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=18.1818181818,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="cid-123",
+                    venue_order_id="venue-404",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_050,
+                    remaining_size=18.1818181818,
+                    venue_order_status="live",
+                    reconciliation_required=True,
+                )
+                execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE)
+
+                reconciled = execution.reconcile_persisted_orders(event_time_ms=225_200)
+
+                self.assertEqual(reconciled, 1)
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, venue_order_status, reconciliation_required, last_reject_code FROM orders WHERE order_id = 'ord_exec_002'"
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], "unknown")
+                self.assertEqual(order_row[1], "not_found")
+                self.assertEqual(order_row[2], 1)
+                self.assertEqual(order_row[3], "VENUE_NOT_FOUND")
             finally:
                 store.close()
 
@@ -1543,6 +1746,100 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(order_row[2], "canceled")
             self.assertAlmostEqual(order_row[3], 0.0)
             self.assertEqual(canceled_events, 1)
+
+    def test_build_live_runtime_hydrates_strategy_open_orders_from_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_restart.sqlite3"
+            seed_store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="live_restart_test_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                seed_store.insert_order(
+                    order_id="ord_seed_1",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=18.1818181818,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="cid-1",
+                    venue_order_id="venue-1",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_001,
+                    remaining_size=18.1818181818,
+                    venue_order_status="live",
+                    reconciliation_required=False,
+                )
+            finally:
+                seed_store.close()
+
+            runtime = build_live_runtime(db_path=db_path, run_id="live_restart_test_001", config_hash="test-config")
+            try:
+                self.assertEqual(runtime.strategy.active_order_ids_by_market_token, {("m1", "tok_yes"): "ord_seed_1"})
+            finally:
+                runtime.store.close()
+
+    def test_reconcile_runtime_orders_refreshes_strategy_after_startup_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_restart_reconcile.sqlite3"
+            seed_store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="live_restart_test_002",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                seed_store.insert_order(
+                    order_id="ord_seed_2",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=18.1818181818,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="cid-2",
+                    venue_order_id="venue-2",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_001,
+                    remaining_size=18.1818181818,
+                    venue_order_status="live",
+                    reconciliation_required=True,
+                )
+            finally:
+                seed_store.close()
+
+            runtime = build_live_runtime(db_path=db_path, run_id="live_restart_test_002", config_hash="test-config")
+            client = _FakeLiveRunnerClient()
+            client.order_lookup_by_id["venue-2"] = VenueOrderState(
+                order_id="venue-2",
+                status="canceled",
+                market_id="m1",
+                token_id="tok_yes",
+                side="buy",
+                price=0.55,
+                original_size=18.1818181818,
+                remaining_size=18.1818181818,
+                cumulative_filled_size=0.0,
+                client_order_id="cid-2",
+            )
+            try:
+                reconciled = reconcile_runtime_orders(
+                    runtime=runtime,
+                    execution_client=client,
+                    execution_mode=ExecutionMode.LIVE,
+                )
+
+                self.assertEqual(reconciled, 1)
+                self.assertEqual(runtime.strategy.active_order_ids_by_market_token, {})
+            finally:
+                runtime.store.close()
 
     def test_build_live_source_live_mode_requires_client_api_credentials(self) -> None:
         with self.assertRaises(ValueError):
