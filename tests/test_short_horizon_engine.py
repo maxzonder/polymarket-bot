@@ -297,6 +297,30 @@ class ExecutionEngineTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_execution_boundary_rejects_fill_after_cancel_confirmed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="run_exec_003",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                store.upsert_market_state(self._market_state())
+                store.persist_intent(self._intent())
+                execution = ExecutionEngine(store=store)
+                execution.submit(self._intent())
+                cancel_event = execution.cancel(market_id="m1", token_id="tok_yes", event_time_ms=225_050, reason="test_cancel")
+
+                self.assertIsNotNone(cancel_event)
+                with self.assertRaises(ExecutionTransitionError):
+                    execution.apply_fill(SyntheticFillRequest(order_id="ord_exec_001", event_time_ms=225_100))
+            finally:
+                store.close()
+
 
 class SQLiteRuntimeStoreTest(unittest.TestCase):
     def _market_state(self) -> MarketStateUpdate:
@@ -534,6 +558,49 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(run_row[0], "live_test_001")
             self.assertEqual(run_row[1], "live")
             self.assertEqual(event_count, 11)
+
+    def test_replay_runner_is_deterministic_for_same_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            event_log_path = tmp_path / "deterministic_events.jsonl"
+            db_path_a = tmp_path / "replay_a.sqlite3"
+            db_path_b = tmp_path / "replay_b.sqlite3"
+            event_log_path.write_text("\n".join(json.dumps(row) for row in self._sample_replay_rows()) + "\n", encoding="utf-8")
+
+            replay_file(
+                event_log_path=event_log_path,
+                db_path=db_path_a,
+                run_id="replay_deterministic",
+                config_hash="test-config",
+            )
+            replay_file(
+                event_log_path=event_log_path,
+                db_path=db_path_b,
+                run_id="replay_deterministic",
+                config_hash="test-config",
+            )
+
+            conn_a = sqlite3.connect(db_path_a)
+            conn_b = sqlite3.connect(db_path_b)
+            try:
+                events_a = conn_a.execute(
+                    "SELECT seq, event_type, event_time, ingest_time, market_id, token_id, order_id, payload_json FROM events_log WHERE run_id = 'replay_deterministic' ORDER BY seq ASC"
+                ).fetchall()
+                events_b = conn_b.execute(
+                    "SELECT seq, event_type, event_time, ingest_time, market_id, token_id, order_id, payload_json FROM events_log WHERE run_id = 'replay_deterministic' ORDER BY seq ASC"
+                ).fetchall()
+                orders_a = conn_a.execute(
+                    "SELECT order_id, state, price, size, venue_order_status FROM orders WHERE run_id = 'replay_deterministic' ORDER BY order_id ASC"
+                ).fetchall()
+                orders_b = conn_b.execute(
+                    "SELECT order_id, state, price, size, venue_order_status FROM orders WHERE run_id = 'replay_deterministic' ORDER BY order_id ASC"
+                ).fetchall()
+            finally:
+                conn_a.close()
+                conn_b.close()
+
+            self.assertEqual(events_a, events_b)
+            self.assertEqual(orders_a, orders_b)
 
     def test_sqlite_repository_api_handles_transition_fill_and_reconciliation_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
