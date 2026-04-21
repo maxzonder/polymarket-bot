@@ -99,6 +99,16 @@ class StrategyRuntime:
         if risk is None:
             return decision
 
+        if bool(getattr(risk, "global_safe_mode", False)):
+            return SkipDecision(
+                reason="global_safe_mode",
+                market_id=decision.market_id,
+                token_id=decision.token_id,
+                level=decision.level,
+                event_time_ms=decision.event_time_ms,
+                details="operator_requested",
+            )
+
         open_orders = self.store.load_non_terminal_orders()
         max_open_orders_total = int(getattr(risk, "max_open_orders_total", 0) or 0)
         if max_open_orders_total > 0 and len(open_orders) >= max_open_orders_total:

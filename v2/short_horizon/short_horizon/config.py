@@ -41,6 +41,7 @@ class MarketDiscoveryConfig:
 
 @dataclass(frozen=True)
 class RiskConfig:
+    global_safe_mode: bool = False
     max_open_orders_total: int = 10
     micro_live_total_stake_cap_usdc: float = 100.0
 

@@ -4,9 +4,10 @@ import argparse
 import asyncio
 import os
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
-from .config import ShortHorizonConfig
+from .config import RiskConfig, ShortHorizonConfig
 from .core.runtime import StrategyRuntime
 from .execution import ExecutionEngine, ExecutionMode
 from .market_data import LiveEventSource, MarketDataSource
@@ -149,6 +150,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicit operator acknowledgement required before --execution-mode live can touch mainnet",
     )
+    parser.add_argument(
+        "--safe-mode",
+        action="store_true",
+        help="Operator-requested global safe mode: consume live data and reconciliation, but block new entry intents",
+    )
     parser.add_argument("--stub-event-log-path", default=None, help="Path to a JSONL file of normalized stub events for --mode stub")
     parser.add_argument("--run-id", default=None, help="Optional explicit run_id; defaults to a fresh live_<suffix>")
     parser.add_argument("--config-hash", default="dev", help="Config hash label stored in runs table")
@@ -186,16 +192,25 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     return execution_mode
 
 
+def apply_cli_config_overrides(config: ShortHorizonConfig | None, args: argparse.Namespace) -> ShortHorizonConfig | None:
+    base = config or ShortHorizonConfig()
+    if not getattr(args, "safe_mode", False):
+        return config
+    return replace(base, risk=replace(base.risk, global_safe_mode=True))
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     execution_mode = validate_cli_args(parser, args)
+    config = apply_cli_config_overrides(None, args)
     configure_logging()
     logger = get_logger("short_horizon.live_runner", run_id=args.run_id)
     logger.info(
         "live_runner_starting",
         input_mode=args.mode,
         execution_mode=execution_mode.value,
+        safe_mode=bool(args.safe_mode),
         db_path=str(args.db_path),
         max_events=args.max_events,
         max_runtime_seconds=args.max_runtime_seconds,
@@ -207,6 +222,7 @@ def main(argv: list[str] | None = None) -> None:
             stub_event_log_path=args.stub_event_log_path,
             db_path=args.db_path,
             run_id=args.run_id,
+            config=config,
             config_hash=args.config_hash,
             execution_mode=execution_mode,
         )
@@ -215,6 +231,7 @@ def main(argv: list[str] | None = None) -> None:
             run_live(
                 db_path=args.db_path,
                 run_id=args.run_id,
+                config=config,
                 config_hash=args.config_hash,
                 max_events=args.max_events,
                 max_runtime_seconds=args.max_runtime_seconds,
@@ -230,6 +247,7 @@ def main(argv: list[str] | None = None) -> None:
         order_intents=summary.order_intents,
         synthetic_order_events=summary.synthetic_order_events,
         execution_mode=execution_mode.value,
+        safe_mode=bool(args.safe_mode),
         db_path=str(summary.db_path),
     )
     logger.info(

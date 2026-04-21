@@ -473,6 +473,22 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(outputs[0].reason, "max_open_orders_total_reached")
         self.assertEqual(len(engine.store.intents), 0)
 
+    def test_runtime_blocks_new_intent_in_global_safe_mode(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True, max_open_orders_total=10, micro_live_total_stake_cap_usdc=100.0)),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "global_safe_mode")
+        self.assertEqual(outputs[0].details, "operator_requested")
+        self.assertEqual(len(engine.store.intents), 0)
+
     def test_runtime_blocks_new_intent_when_micro_live_stake_cap_would_be_exceeded(self) -> None:
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=10, micro_live_total_stake_cap_usdc=15.0)),
@@ -1521,6 +1537,7 @@ class ReplayRunnerTest(unittest.TestCase):
             "--execution-mode",
             "live",
             "--allow-live-execution",
+            "--safe-mode",
             "--max-events",
             "5",
             "--max-runtime-seconds",
@@ -1531,6 +1548,7 @@ class ReplayRunnerTest(unittest.TestCase):
         self.assertEqual(live_args.mode, "live")
         self.assertEqual(live_args.execution_mode, "live")
         self.assertTrue(live_args.allow_live_execution)
+        self.assertTrue(live_args.safe_mode)
         self.assertEqual(live_args.max_events, 5)
         self.assertEqual(live_args.max_runtime_seconds, 15.0)
         self.assertEqual(live_args.collector_csv, "collector.csv")
@@ -2282,6 +2300,76 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(order_count, 1)
             self.assertEqual(existing_row[0], "accepted")
             self.assertEqual(existing_row[1], "live")
+
+    async def test_live_runner_global_safe_mode_blocks_new_order_but_keeps_live_path_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_exec_safe_mode.sqlite3"
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                ]
+            )
+            client = _FakeLiveRunnerClient()
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_exec_safe_mode_test_001",
+                config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True, max_open_orders_total=10, micro_live_total_stake_cap_usdc=100.0)),
+                config_hash="test-config",
+                source=source,
+                max_events=3,
+                execution_mode=ExecutionMode.LIVE,
+                execution_client=client,
+            )
+
+            self.assertEqual(summary.run_id, "live_exec_safe_mode_test_001")
+            self.assertTrue(client.started)
+            self.assertEqual(len(client.place_calls), 0)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                order_count = conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE run_id = 'live_exec_safe_mode_test_001'"
+                ).fetchone()[0]
+                total_events = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'live_exec_safe_mode_test_001'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(order_count, 0)
+            self.assertEqual(total_events, 3)
 
     def test_build_live_runtime_hydrates_strategy_open_orders_from_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
