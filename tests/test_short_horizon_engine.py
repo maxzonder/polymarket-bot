@@ -21,7 +21,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
-from short_horizon.live_runner import build_live_source, build_live_runtime, build_parser, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
+from short_horizon.live_runner import KillSwitchSummary, build_live_source, build_live_runtime, build_parser, execute_kill_switch, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -1597,6 +1597,79 @@ class ReplayRunnerTest(unittest.TestCase):
         with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
             with self.assertRaises(SystemExit):
                 validate_cli_args(parser, args)
+
+    def test_live_runner_cli_validation_for_kill_switch(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--kill-switch",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+        ])
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            self.assertEqual(validate_cli_args(parser, args), ExecutionMode.LIVE)
+
+        # Missing allow-live-execution
+        args = parser.parse_args(["live.sqlite3", "--kill-switch", "--mode", "live", "--execution-mode", "live"])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, args)
+
+    def test_execute_kill_switch_cancels_all_open_orders_and_returns_summary(self) -> None:
+        client = _FakeLiveRunnerClient()
+        client.open_orders_by_market[None] = [
+            VenueOrderState(order_id="venue-live-1", status="live", market_id="m1", token_id="tok_yes"),
+            VenueOrderState(order_id="venue-live-2", status="live", market_id="m2", token_id="tok_no"),
+        ]
+
+        summary = execute_kill_switch(run_id="kill_switch_test_001", execution_client=client)
+
+        self.assertTrue(client.started)
+        self.assertEqual(client.cancel_calls, ["venue-live-1", "venue-live-2"])
+        self.assertEqual(summary, KillSwitchSummary(open_order_count=2, canceled_count=2, failed_count=0))
+
+    def test_main_runs_kill_switch_and_returns_early(self) -> None:
+        argv = [
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--kill-switch",
+        ]
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True), patch(
+            "short_horizon.live_runner.execute_kill_switch",
+            return_value=KillSwitchSummary(open_order_count=1, canceled_count=1, failed_count=0),
+        ) as execute_mock, patch("short_horizon.live_runner.asyncio.run", side_effect=AssertionError("should not run live loop")):
+            self.assertIsNone(main(argv))
+
+        execute_mock.assert_called_once_with(None)
+
+    def test_main_kill_switch_exits_nonzero_when_cancel_has_failures(self) -> None:
+        argv = [
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--kill-switch",
+        ]
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True), patch(
+            "short_horizon.live_runner.execute_kill_switch",
+            return_value=KillSwitchSummary(open_order_count=2, canceled_count=1, failed_count=1),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                main(argv)
+
+        self.assertEqual(ctx.exception.code, 1)
 
     def test_live_runner_cli_validation_requires_bounded_live_probe(self) -> None:
         parser = build_parser()

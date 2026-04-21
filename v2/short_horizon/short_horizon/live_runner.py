@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import os
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .config import RiskConfig, ShortHorizonConfig
@@ -18,6 +18,13 @@ from .strategies import ShortHorizon15mTouchStrategy
 from .telemetry import configure_logging, get_logger
 from .venue_polymarket import PolymarketUserStream
 from .venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolymarketExecutionClient
+
+
+@dataclass(frozen=True)
+class KillSwitchSummary:
+    open_order_count: int
+    canceled_count: int
+    failed_count: int
 
 
 def build_live_runtime(*, db_path: str | Path, run_id: str | None = None, config: ShortHorizonConfig | None = None, config_hash: str = "dev") -> StrategyRuntime:
@@ -155,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Operator-requested global safe mode: consume live data and reconciliation, but block new entry intents",
     )
+    parser.add_argument(
+        "--kill-switch",
+        action="store_true",
+        help="Cancel all active live orders across the account and exit immediately",
+    )
     parser.add_argument("--stub-event-log-path", default=None, help="Path to a JSONL file of normalized stub events for --mode stub")
     parser.add_argument("--run-id", default=None, help="Optional explicit run_id; defaults to a fresh live_<suffix>")
     parser.add_argument("--config-hash", default="dev", help="Config hash label stored in runs table")
@@ -176,6 +188,16 @@ def generate_run_id() -> str:
 
 def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> ExecutionMode:
     execution_mode = ExecutionMode(str(args.execution_mode))
+    kill_switch = getattr(args, "kill_switch", False)
+    if kill_switch:
+        if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
+            parser.error("--kill-switch requires --mode live and --execution-mode live")
+        if not args.allow_live_execution:
+            parser.error("--kill-switch requires --allow-live-execution")
+        if not os.getenv(PRIVATE_KEY_ENV_VAR):
+            parser.error(f"{PRIVATE_KEY_ENV_VAR} is required when --execution-mode live")
+        return execution_mode
+
     if args.max_events is not None and args.max_events <= 0:
         parser.error("--max-events must be positive when provided")
     if args.max_runtime_seconds is not None and args.max_runtime_seconds <= 0:
@@ -199,12 +221,109 @@ def apply_cli_config_overrides(config: ShortHorizonConfig | None, args: argparse
     return replace(base, risk=replace(base.risk, global_safe_mode=True))
 
 
+def execute_kill_switch(
+    run_id: str | None = None,
+    *,
+    execution_client: PolymarketExecutionClient | None = None,
+) -> KillSwitchSummary:
+    logger = get_logger("short_horizon.live_runner", run_id=run_id or "kill_switch")
+    logger.warning("kill_switch_engaged", action="canceling_all_orders")
+    client = execution_client or PolymarketExecutionClient()
+    try:
+        client.startup()
+    except Exception as exc:
+        logger.error("kill_switch_startup_failed", error=str(exc))
+        raise
+
+    try:
+        orders = client.list_open_orders()
+    except Exception as exc:
+        logger.error("kill_switch_list_failed", error=str(exc))
+        raise
+
+    open_order_count = len(orders)
+    if not orders:
+        summary = KillSwitchSummary(open_order_count=0, canceled_count=0, failed_count=0)
+        logger.info(
+            "kill_switch_completed",
+            open_order_count=summary.open_order_count,
+            canceled_count=summary.canceled_count,
+            failed_count=summary.failed_count,
+            message="No open orders found",
+        )
+        return summary
+
+    canceled_count = 0
+    failed_count = 0
+    for order in orders:
+        venue_order_id = str(order.order_id).strip()
+        if not venue_order_id:
+            failed_count += 1
+            logger.error(
+                "kill_switch_cancel_failed",
+                venue_order_id=None,
+                market_id=order.market_id,
+                error="missing venue order id",
+            )
+            continue
+        try:
+            result = client.cancel_order(venue_order_id)
+            if getattr(result, "success", True):
+                canceled_count += 1
+                logger.info(
+                    "kill_switch_order_canceled",
+                    venue_order_id=venue_order_id,
+                    market_id=order.market_id,
+                    venue_status=getattr(result, "status", None),
+                )
+            else:
+                failed_count += 1
+                logger.error(
+                    "kill_switch_cancel_failed",
+                    venue_order_id=venue_order_id,
+                    market_id=order.market_id,
+                    venue_status=getattr(result, "status", None),
+                    error="venue_cancel_unsuccessful",
+                )
+        except Exception as exc:
+            failed_count += 1
+            logger.error(
+                "kill_switch_cancel_failed",
+                venue_order_id=venue_order_id,
+                market_id=order.market_id,
+                error=str(exc),
+            )
+
+    summary = KillSwitchSummary(
+        open_order_count=open_order_count,
+        canceled_count=canceled_count,
+        failed_count=failed_count,
+    )
+    logger.warning(
+        "kill_switch_completed",
+        open_order_count=summary.open_order_count,
+        canceled_count=summary.canceled_count,
+        failed_count=summary.failed_count,
+    )
+    return summary
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     execution_mode = validate_cli_args(parser, args)
     config = apply_cli_config_overrides(None, args)
     configure_logging()
+
+    if getattr(args, "kill_switch", False):
+        try:
+            summary = execute_kill_switch(args.run_id)
+        except Exception:
+            raise SystemExit(1) from None
+        if summary.failed_count:
+            raise SystemExit(1)
+        return
+
     logger = get_logger("short_horizon.live_runner", run_id=args.run_id)
     logger.info(
         "live_runner_starting",
