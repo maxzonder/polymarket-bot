@@ -12,7 +12,7 @@ universe:
 
 market_discovery:
   refresh_interval_seconds: 30
-  max_rows: 500
+  max_rows: 20000
   target_duration_seconds: 900
   duration_tolerance_seconds: 60
   required_market_status: active

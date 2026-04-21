@@ -37,7 +37,7 @@ class FeesConfig:
 @dataclass(frozen=True)
 class MarketDiscoveryConfig:
     refresh_interval_seconds: int = 30
-    max_rows: int = 500
+    max_rows: int = 20_000
 
 
 @dataclass(frozen=True)
