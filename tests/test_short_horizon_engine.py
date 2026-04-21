@@ -1431,9 +1431,23 @@ class ReplayRunnerTest(unittest.TestCase):
         self.assertEqual(stub_args.execution_mode, "dry_run")
         self.assertEqual(stub_args.stub_event_log_path, "sample.jsonl")
 
-        live_args = parser.parse_args(["live.sqlite3", "--mode", "live", "--execution-mode", "live", "--max-events", "5", "--max-runtime-seconds", "15", "--collector-csv", "collector.csv"])
+        live_args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--max-events",
+            "5",
+            "--max-runtime-seconds",
+            "15",
+            "--collector-csv",
+            "collector.csv",
+        ])
         self.assertEqual(live_args.mode, "live")
         self.assertEqual(live_args.execution_mode, "live")
+        self.assertTrue(live_args.allow_live_execution)
         self.assertEqual(live_args.max_events, 5)
         self.assertEqual(live_args.max_runtime_seconds, 15.0)
         self.assertEqual(live_args.collector_csv, "collector.csv")
@@ -1447,7 +1461,16 @@ class ReplayRunnerTest(unittest.TestCase):
 
     def test_live_runner_cli_validation_requires_private_key_for_live_execution(self) -> None:
         parser = build_parser()
-        args = parser.parse_args(["live.sqlite3", "--mode", "live", "--execution-mode", "live"])
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--max-events",
+            "1",
+        ])
 
         env_backup = os.environ.get(PRIVATE_KEY_ENV_VAR)
         try:
@@ -1457,6 +1480,48 @@ class ReplayRunnerTest(unittest.TestCase):
         finally:
             if env_backup is not None:
                 os.environ[PRIVATE_KEY_ENV_VAR] = env_backup
+
+    def test_live_runner_cli_validation_requires_explicit_live_ack(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--max-events",
+            "1",
+        ])
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, args)
+
+    def test_live_runner_cli_validation_requires_bounded_live_probe(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+        ])
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, args)
+
+    def test_live_runner_cli_validation_rejects_non_positive_runtime_caps(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(["live.sqlite3", "--max-events", "0"])
+        with self.assertRaises(SystemExit):
+            validate_cli_args(parser, args)
+
+        args = parser.parse_args(["live.sqlite3", "--max-runtime-seconds", "0"])
+        with self.assertRaises(SystemExit):
+            validate_cli_args(parser, args)
 
     def test_replay_runner_is_deterministic_for_same_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -144,6 +144,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=ExecutionMode.SYNTHETIC.value,
         help="Execution mode: synthetic preserves Phase 2 behavior, dry_run translates orders without sending, live sends real orders",
     )
+    parser.add_argument(
+        "--allow-live-execution",
+        action="store_true",
+        help="Explicit operator acknowledgement required before --execution-mode live can touch mainnet",
+    )
     parser.add_argument("--stub-event-log-path", default=None, help="Path to a JSONL file of normalized stub events for --mode stub")
     parser.add_argument("--run-id", default=None, help="Optional explicit run_id; defaults to a fresh live_<suffix>")
     parser.add_argument("--config-hash", default="dev", help="Config hash label stored in runs table")
@@ -165,10 +170,19 @@ def generate_run_id() -> str:
 
 def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> ExecutionMode:
     execution_mode = ExecutionMode(str(args.execution_mode))
+    if args.max_events is not None and args.max_events <= 0:
+        parser.error("--max-events must be positive when provided")
+    if args.max_runtime_seconds is not None and args.max_runtime_seconds <= 0:
+        parser.error("--max-runtime-seconds must be positive when provided")
     if args.mode == "stub" and execution_mode is ExecutionMode.LIVE:
         parser.error("--execution-mode live requires --mode live")
+    if args.mode == "live" and execution_mode is ExecutionMode.LIVE and not args.allow_live_execution:
+        parser.error("--execution-mode live requires --allow-live-execution")
     if args.mode == "live" and execution_mode is ExecutionMode.LIVE and not os.getenv(PRIVATE_KEY_ENV_VAR):
         parser.error(f"{PRIVATE_KEY_ENV_VAR} is required when --execution-mode live")
+    if args.mode == "live" and execution_mode is ExecutionMode.LIVE:
+        if args.max_events is None and args.max_runtime_seconds is None:
+            parser.error("--execution-mode live requires --max-events or --max-runtime-seconds")
     return execution_mode
 
 
