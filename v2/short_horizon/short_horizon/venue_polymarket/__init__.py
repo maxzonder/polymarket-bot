@@ -24,6 +24,7 @@ from .markets import (
     parse_market_discovery_rows,
 )
 from .market_refresh import MarketRefreshLoop
+from .shared_discovery import SharedMarketDiscovery
 from .trade_channel import TradeNormalizer
 from .user_stream import PolymarketUserStream, UserStreamNormalizer
 from .websocket import PolymarketWebsocket
@@ -51,6 +52,7 @@ __all__ = [
     "PolymarketUserStream",
     "PolymarketVenueAdapter",
     "PolymarketWebsocket",
+    "SharedMarketDiscovery",
     "TradeNormalizer",
     "UserStreamNormalizer",
     "UniverseFilter",

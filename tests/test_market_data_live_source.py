@@ -94,6 +94,20 @@ class _FakeUserStream:
         return await self._events.get()
 
 
+class _BlockingAsyncStream:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.Future()
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
 class LiveSourceHelpersTest(unittest.TestCase):
     def test_expand_market_state_update_fans_out_per_token(self) -> None:
         event = MarketStateUpdate(
@@ -346,6 +360,28 @@ class LiveEventSourceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(user_stream.closed)
         self.assertEqual(user_stream.subscribe_calls, [["c1"]])
         self.assertEqual(user_stream.unsubscribe_calls, [["c1"]])
+
+    async def test_live_event_source_aborts_when_refresh_component_dies(self) -> None:
+        class _FailedRefresh(_BlockingAsyncStream):
+            def failed(self) -> bool:
+                return True
+
+            def failure_exception(self):
+                return RuntimeError("market refresh died")
+
+        source = LiveEventSource(
+            market_refresh=_FailedRefresh(),
+            fee_refresh=_BlockingAsyncStream(),
+            websocket=_FakeWebsocket(messages=[]),
+            clock_ms=lambda: 5000,
+        )
+
+        await source.start()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "market_refresh"):
+                await asyncio.wait_for(source.__anext__(), timeout=1.0)
+        finally:
+            await source.stop()
 
 
 if __name__ == "__main__":

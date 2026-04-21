@@ -7,9 +7,18 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from ..config import MarketDiscoveryConfig
 from ..core.events import MarketStateUpdate, NormalizedEvent
 from ..telemetry import get_logger
-from ..venue_polymarket import BookNormalizer, FeeMetadataRefreshLoop, MarketRefreshLoop, PolymarketUserStream, PolymarketWebsocket, TradeNormalizer
+from ..venue_polymarket import (
+    BookNormalizer,
+    FeeMetadataRefreshLoop,
+    MarketRefreshLoop,
+    PolymarketUserStream,
+    PolymarketWebsocket,
+    SharedMarketDiscovery,
+    TradeNormalizer,
+)
 
 
 class LiveEventSource:
@@ -26,8 +35,13 @@ class LiveEventSource:
         trade_normalizer: TradeNormalizer | None = None,
         clock_ms: callable | None = None,
     ):
-        self.market_refresh = market_refresh or MarketRefreshLoop()
-        self.fee_refresh = fee_refresh or FeeMetadataRefreshLoop()
+        discovery_config = MarketDiscoveryConfig()
+        shared_discovery = SharedMarketDiscovery(
+            refresh_interval_seconds=discovery_config.refresh_interval_seconds,
+            max_rows=discovery_config.max_rows,
+        )
+        self.market_refresh = market_refresh or MarketRefreshLoop(discovery_fn=shared_discovery, max_rows=discovery_config.max_rows)
+        self.fee_refresh = fee_refresh or FeeMetadataRefreshLoop(discovery_fn=shared_discovery, max_rows=discovery_config.max_rows)
         self.websocket = websocket or PolymarketWebsocket()
         self.user_stream = user_stream
         self.book_normalizer = book_normalizer or BookNormalizer()
@@ -40,6 +54,7 @@ class LiveEventSource:
         self._market_tokens: dict[str, set[str]] = {}
         self._market_conditions: dict[str, str] = {}
         self._started = False
+        self._terminal_error: BaseException | None = None
 
     @property
     def events(self) -> AsyncIterator[NormalizedEvent]:
@@ -49,26 +64,33 @@ class LiveEventSource:
         return self
 
     async def __anext__(self) -> NormalizedEvent:
+        if self._terminal_error is not None:
+            raise self._terminal_error
         item = await self._queue.get()
         if item is self._sentinel:
             raise StopAsyncIteration
+        if isinstance(item, BaseException):
+            self._terminal_error = item
+            raise item
         return item  # type: ignore[return-value]
 
     async def start(self) -> None:
         if self._started:
             return
         self._started = True
+        self._terminal_error = None
         await _maybe_call(self.websocket, "connect")
         await _maybe_call(self.user_stream, "connect")
+        await _maybe_call(self.market_refresh, "start")
+        await _maybe_call(self.fee_refresh, "start")
         self._forward_tasks = [
             asyncio.create_task(self._consume_market_refresh(), name="live_source_market_refresh"),
             asyncio.create_task(self._consume_fee_refresh(), name="live_source_fee_refresh"),
             asyncio.create_task(self._consume_websocket(), name="live_source_websocket"),
+            asyncio.create_task(self._monitor_components(), name="live_source_component_monitor"),
         ]
         if self.user_stream is not None:
             self._forward_tasks.append(asyncio.create_task(self._consume_user_stream(), name="live_source_user_stream"))
-        await _maybe_call(self.market_refresh, "start")
-        await _maybe_call(self.fee_refresh, "start")
 
     async def stop(self) -> None:
         if not self._started:
@@ -77,7 +99,7 @@ class LiveEventSource:
         for task in self._forward_tasks:
             task.cancel()
         for task in self._forward_tasks:
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._forward_tasks.clear()
         await _maybe_call(self.market_refresh, "stop")
@@ -87,46 +109,94 @@ class LiveEventSource:
         await self._queue.put(self._sentinel)
 
     async def _consume_market_refresh(self) -> None:
-        async for event in self.market_refresh:
-            self._register_market_event(event)
-            await self._reconcile_market_subscriptions(event)
-            for token_event in expand_market_state_update(event):
-                await self._queue.put(token_event)
+        try:
+            async for event in self.market_refresh:
+                self._register_market_event(event)
+                await self._reconcile_market_subscriptions(event)
+                for token_event in expand_market_state_update(event):
+                    await self._queue.put(token_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._signal_terminal_error(exc, component="market_refresh_consumer")
 
     async def _consume_fee_refresh(self) -> None:
-        async for event in self.fee_refresh:
-            self._register_market_event(event)
-            for token_event in expand_market_state_update(event):
-                await self._queue.put(token_event)
+        try:
+            async for event in self.fee_refresh:
+                self._register_market_event(event)
+                for token_event in expand_market_state_update(event):
+                    await self._queue.put(token_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._signal_terminal_error(exc, component="fee_refresh_consumer")
 
     async def _consume_websocket(self) -> None:
-        while True:
-            raw_message = await self.websocket.recv()
-            if _is_control_message(raw_message):
-                continue
-            ingest_time_ms = self.clock_ms()
-            try:
-                payload = _decode_json_payload(raw_message)
-            except json.JSONDecodeError:
-                self.logger.warning(
-                    "live_source_ws_message_dropped",
-                    reason="invalid_json",
-                    raw_message_preview=str(raw_message)[:120],
-                )
-                continue
-            if payload is None:
-                continue
-            book_events = self.book_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
-            trade_events = self.trade_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
-            for event in [*book_events, *trade_events]:
-                await self._queue.put(event)
+        try:
+            while True:
+                raw_message = await self.websocket.recv()
+                if _is_control_message(raw_message):
+                    continue
+                ingest_time_ms = self.clock_ms()
+                try:
+                    payload = _decode_json_payload(raw_message)
+                except json.JSONDecodeError:
+                    self.logger.warning(
+                        "live_source_ws_message_dropped",
+                        reason="invalid_json",
+                        raw_message_preview=str(raw_message)[:120],
+                    )
+                    continue
+                if payload is None:
+                    continue
+                book_events = self.book_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
+                trade_events = self.trade_normalizer.normalize_frame(payload, ingest_time_ms=ingest_time_ms)
+                for event in [*book_events, *trade_events]:
+                    await self._queue.put(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._signal_terminal_error(exc, component="websocket_consumer")
 
     async def _consume_user_stream(self) -> None:
         if self.user_stream is None:
             return
-        while True:
-            event = await self.user_stream.recv()
-            await self._queue.put(event)
+        try:
+            while True:
+                event = await self.user_stream.recv()
+                await self._queue.put(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._signal_terminal_error(exc, component="user_stream_consumer")
+
+    async def _monitor_components(self) -> None:
+        try:
+            while self._started and self._terminal_error is None:
+                for task in self._forward_tasks:
+                    if task.done() and not task.cancelled():
+                        exc = task.exception()
+                        if exc is not None:
+                            await self._signal_terminal_error(exc, component=task.get_name())
+                            return
+                for component_name, component in (("market_refresh", self.market_refresh), ("fee_refresh", self.fee_refresh)):
+                    if _component_failed(component):
+                        await self._signal_terminal_error(
+                            _component_failure_exception(component) or RuntimeError(f"{component_name} failed"),
+                            component=component_name,
+                        )
+                        return
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+
+    async def _signal_terminal_error(self, exc: BaseException, *, component: str) -> None:
+        if self._terminal_error is not None:
+            return
+        error = RuntimeError(f"LiveEventSource component failed: {component}: {exc}")
+        self._terminal_error = error
+        self.logger.error("live_source_component_failed", component=component, error=str(exc))
+        await self._queue.put(error)
 
     def _register_market_event(self, event: MarketStateUpdate) -> None:
         register_book = getattr(self.book_normalizer, "register_market", None)
@@ -252,6 +322,22 @@ def _is_control_message(raw_message: Any) -> bool:
 
 def _default_clock_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _component_failed(component: Any) -> bool:
+    failed = getattr(component, "failed", None)
+    if callable(failed):
+        return bool(failed())
+    return False
+
+
+def _component_failure_exception(component: Any) -> BaseException | None:
+    failure_exception = getattr(component, "failure_exception", None)
+    if callable(failure_exception):
+        result = failure_exception()
+        if isinstance(result, BaseException):
+            return result
+    return None
 
 
 __all__ = ["LiveEventSource", "expand_market_state_update", "extract_market_token_ids"]

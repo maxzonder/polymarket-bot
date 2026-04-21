@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -85,6 +86,34 @@ class FeeMetadataRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second[0].fee_fetched_at_ms, 1_776_694_030_000)
         self.assertEqual(first[0].fee_metadata_age_ms, 0)
         self.assertEqual(second[0].fee_metadata_age_ms, 0)
+
+    async def test_fee_refresh_loop_retries_after_transient_failure(self) -> None:
+        calls = 0
+
+        async def fake_discovery(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("429 Too Many Requests")
+            return [self._market("m1", fee_rate_bps=35.0)]
+
+        loop = FeeMetadataRefreshLoop(
+            discovery_fn=fake_discovery,
+            refresh_interval_seconds=30,
+            fee_metadata_ttl_seconds=60,
+            retry_backoff_initial_seconds=0.01,
+            retry_backoff_max_seconds=0.01,
+        )
+
+        await loop.start()
+        try:
+            event = await asyncio.wait_for(loop.__anext__(), timeout=0.2)
+        finally:
+            await loop.stop()
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(event.market_id, "m1")
+        self.assertFalse(loop.failed())
 
 
 if __name__ == "__main__":

@@ -26,9 +26,13 @@ class FeeMetadataRefreshLoop:
         duration_window: DurationWindow | None = None,
         refresh_interval_seconds: int | None = None,
         fee_metadata_ttl_seconds: int | None = None,
-        max_rows: int = 20_000,
+        max_rows: int | None = None,
+        retry_backoff_initial_seconds: float = 5.0,
+        retry_backoff_max_seconds: float = 120.0,
+        max_consecutive_failures: int = 5,
         clock_ms: ClockFn | None = None,
     ):
+        discovery_config = MarketDiscoveryConfig()
         self.discovery_fn = discovery_fn or discover_short_horizon_markets
         self.universe_filter = universe_filter or UniverseFilter()
         self.duration_window = duration_window or DurationWindow()
@@ -40,15 +44,20 @@ class FeeMetadataRefreshLoop:
         self.refresh_interval_seconds = int(
             refresh_interval_seconds
             if refresh_interval_seconds is not None
-            else min(MarketDiscoveryConfig().refresh_interval_seconds, self.fee_metadata_ttl_seconds)
+            else min(discovery_config.refresh_interval_seconds, self.fee_metadata_ttl_seconds)
         )
-        self.max_rows = int(max_rows)
+        self.max_rows = int(max_rows if max_rows is not None else discovery_config.max_rows)
+        self.retry_backoff_initial_seconds = float(retry_backoff_initial_seconds)
+        self.retry_backoff_max_seconds = float(retry_backoff_max_seconds)
+        self.max_consecutive_failures = int(max_consecutive_failures)
         self.clock_ms = clock_ms or _default_clock_ms
         self.logger = get_logger("short_horizon.venue_polymarket.fee_metadata")
         self._queue: asyncio.Queue[MarketStateUpdate | object] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._sentinel = object()
+        self._consecutive_failures = 0
+        self._last_exception: Exception | None = None
 
     @property
     def events(self) -> AsyncIterator[MarketStateUpdate]:
@@ -74,14 +83,53 @@ class FeeMetadataRefreshLoop:
         self._stop_event.set()
         if self._task is not None:
             self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._task
         await self._queue.put(self._sentinel)
+
+    def failed(self) -> bool:
+        return self._task is not None and self._task.done() and not self._stop_event.is_set()
+
+    def failure_exception(self) -> BaseException | None:
+        if not self.failed() or self._task is None:
+            return None
+        try:
+            return self._task.exception()
+        except asyncio.CancelledError:
+            return None
 
     async def _run(self) -> None:
         try:
             while not self._stop_event.is_set():
-                await self.refresh_once()
+                try:
+                    await self.refresh_once()
+                    self._consecutive_failures = 0
+                    self._last_exception = None
+                except Exception as exc:
+                    self._consecutive_failures += 1
+                    self._last_exception = exc
+                    backoff_seconds = min(
+                        self.retry_backoff_initial_seconds * (2 ** (self._consecutive_failures - 1)),
+                        self.retry_backoff_max_seconds,
+                    )
+                    self.logger.warning(
+                        "fee_metadata_refresh_retry_scheduled",
+                        consecutive_failures=self._consecutive_failures,
+                        backoff_seconds=backoff_seconds,
+                        error=str(exc),
+                    )
+                    if self._consecutive_failures >= self.max_consecutive_failures:
+                        self.logger.error(
+                            "fee_metadata_refresh_failed",
+                            consecutive_failures=self._consecutive_failures,
+                            error=str(exc),
+                        )
+                        raise
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=backoff_seconds)
+                    except asyncio.TimeoutError:
+                        continue
+                    continue
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=self.refresh_interval_seconds)
                 except asyncio.TimeoutError:

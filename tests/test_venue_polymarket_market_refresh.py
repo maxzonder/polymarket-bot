@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -84,6 +85,53 @@ class MarketRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
 
         queued_second = [await loop.__anext__(), await loop.__anext__(), await loop.__anext__()]
         self.assertEqual({event.market_id for event in queued_second}, {"m1", "m2", "m3"})
+
+    async def test_market_refresh_loop_retries_after_transient_failure(self) -> None:
+        calls = 0
+
+        async def fake_discovery(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("429 Too Many Requests")
+            return [self._market("m1", asset_slug="bitcoin", end_time_ms=1_776_694_500_000)]
+
+        loop = MarketRefreshLoop(
+            discovery_fn=fake_discovery,
+            refresh_interval_seconds=999,
+            retry_backoff_initial_seconds=0.01,
+            retry_backoff_max_seconds=0.01,
+        )
+
+        await loop.start()
+        try:
+            event = await asyncio.wait_for(loop.__anext__(), timeout=0.2)
+        finally:
+            await loop.stop()
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(event.market_id, "m1")
+        self.assertFalse(loop.failed())
+
+    async def test_market_refresh_loop_exposes_failure_after_repeated_errors(self) -> None:
+        async def fake_discovery(*_args, **_kwargs):
+            raise RuntimeError("429 Too Many Requests")
+
+        loop = MarketRefreshLoop(
+            discovery_fn=fake_discovery,
+            refresh_interval_seconds=999,
+            retry_backoff_initial_seconds=0.01,
+            retry_backoff_max_seconds=0.01,
+            max_consecutive_failures=2,
+        )
+
+        await loop.start()
+        try:
+            await asyncio.sleep(0.05)
+            self.assertTrue(loop.failed())
+            self.assertIsInstance(loop.failure_exception(), RuntimeError)
+        finally:
+            await loop.stop()
 
 
 if __name__ == "__main__":
