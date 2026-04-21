@@ -3,13 +3,29 @@ from __future__ import annotations
 import importlib
 import inspect
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
 DEFAULT_CLOB_HOST = "https://clob.polymarket.com"
 DEFAULT_CHAIN_ID = 137
+DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
 PRIVATE_KEY_ENV_VAR = "POLY_PRIVATE_KEY"
+POLYMARKET_USDC_TOKEN = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+POLYMARKET_CTF_TOKEN = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+POLYMARKET_SPENDER_ADDRESSES = (
+    "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+)
+MAX_UINT256 = (1 << 256) - 1
+KNOWN_SELECTORS = {
+    "allowance(address,address)": "dd62ed3e",
+    "approve(address,uint256)": "095ea7b3",
+    "isApprovedForAll(address,address)": "e985e9c5",
+    "setApprovalForAll(address,bool)": "a22cb465",
+}
 
 
 class ExecutionClientConfigError(RuntimeError):
@@ -18,6 +34,14 @@ class ExecutionClientConfigError(RuntimeError):
 
 class ExecutionClientNotStartedError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class AllowanceApprovalResult:
+    asset_type: str
+    spender: str
+    tx_hash: str | None
+    status: str
 
 
 @dataclass(frozen=True)
@@ -140,6 +164,66 @@ class PolymarketExecutionClient:
         items = raw if isinstance(raw, list) else raw.get("data", [])
         results = [self._normalize_order_state(item) for item in items]
         return [row for row in results if _is_live_status(row.status)]
+
+    def approve_allowances(
+        self,
+        *,
+        rpc_url: str = DEFAULT_POLYGON_RPC_URL,
+        rpc_call: Callable[[str, list[Any]], Any] | None = None,
+        sign_transaction: Callable[[dict[str, Any]], str] | None = None,
+        signer_address: str | None = None,
+        wait_timeout_seconds: float = 300.0,
+        sleep_func: Callable[[float], None] = time.sleep,
+    ) -> list[AllowanceApprovalResult]:
+        private_key = self._resolve_private_key()
+        rpc = rpc_call or _build_rpc_call(rpc_url)
+        resolved_signer_address = signer_address or _address_from_private_key(private_key)
+        resolved_sign_transaction = sign_transaction or (lambda tx: _sign_transaction(tx, private_key))
+
+        results: list[AllowanceApprovalResult] = []
+        for spender in POLYMARKET_SPENDER_ADDRESSES:
+            allowance = _read_erc20_allowance(
+                rpc,
+                token_address=POLYMARKET_USDC_TOKEN,
+                owner=resolved_signer_address,
+                spender=spender,
+            )
+            if allowance > 0:
+                results.append(AllowanceApprovalResult(asset_type="collateral", spender=spender, tx_hash=None, status="already_approved"))
+            else:
+                tx_hash = _send_contract_transaction(
+                    rpc,
+                    signer_address=resolved_signer_address,
+                    sign_transaction=resolved_sign_transaction,
+                    chain_id=self.chain_id,
+                    to=POLYMARKET_USDC_TOKEN,
+                    data=_encode_approve_calldata(spender, MAX_UINT256),
+                    wait_timeout_seconds=wait_timeout_seconds,
+                    sleep_func=sleep_func,
+                )
+                results.append(AllowanceApprovalResult(asset_type="collateral", spender=spender, tx_hash=tx_hash, status="approved"))
+
+            approved = _read_erc1155_approval_for_all(
+                rpc,
+                token_address=POLYMARKET_CTF_TOKEN,
+                owner=resolved_signer_address,
+                operator=spender,
+            )
+            if approved:
+                results.append(AllowanceApprovalResult(asset_type="conditional", spender=spender, tx_hash=None, status="already_approved"))
+            else:
+                tx_hash = _send_contract_transaction(
+                    rpc,
+                    signer_address=resolved_signer_address,
+                    sign_transaction=resolved_sign_transaction,
+                    chain_id=self.chain_id,
+                    to=POLYMARKET_CTF_TOKEN,
+                    data=_encode_set_approval_for_all_calldata(spender, True),
+                    wait_timeout_seconds=wait_timeout_seconds,
+                    sleep_func=sleep_func,
+                )
+                results.append(AllowanceApprovalResult(asset_type="conditional", spender=spender, tx_hash=tx_hash, status="approved"))
+        return results
 
     def api_credentials(self) -> VenueApiCredentials:
         if self._api_credentials is None:
@@ -269,12 +353,151 @@ def _normalize_api_creds(raw: Any) -> VenueApiCredentials:
     return VenueApiCredentials(api_key=str(api_key), secret=str(secret), passphrase=str(passphrase))
 
 
+def _build_rpc_call(rpc_url: str) -> Callable[[str, list[Any]], Any]:
+    def _rpc(method: str, params: list[Any]) -> Any:
+        try:
+            import requests
+        except ImportError as exc:  # pragma: no cover
+            raise ExecutionClientConfigError("requests is required for Polygon allowance approvals") from exc
+        response = requests.post(
+            rpc_url,
+            json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
+            headers={"User-Agent": "polymarket-bot/short_horizon", "Content-Type": "application/json"},
+            timeout=45,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if "error" in payload:
+            raise ExecutionClientConfigError(f"Polygon RPC {method} failed: {payload['error']}")
+        return payload["result"]
+
+    return _rpc
+
+
+def _address_from_private_key(private_key: str) -> str:
+    try:
+        from eth_account import Account
+    except ImportError as exc:  # pragma: no cover
+        raise ExecutionClientConfigError("eth-account is required for Polygon allowance approvals") from exc
+    return str(Account.from_key(private_key).address)
+
+
+def _sign_transaction(tx: dict[str, Any], private_key: str) -> str:
+    try:
+        from eth_account import Account
+    except ImportError as exc:  # pragma: no cover
+        raise ExecutionClientConfigError("eth-account is required for Polygon allowance approvals") from exc
+    signed = Account.sign_transaction(tx, private_key)
+    raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+    if raw is None:
+        raise ExecutionClientConfigError("eth-account returned no signed raw transaction")
+    return "0x" + raw.hex()
+
+
+def _selector(signature: str) -> str:
+    known = KNOWN_SELECTORS.get(signature)
+    if known is not None:
+        return known
+    try:
+        from eth_utils import keccak
+    except ImportError as exc:  # pragma: no cover
+        raise ExecutionClientConfigError("eth-utils is required for Polygon allowance approvals") from exc
+    return keccak(text=signature)[:4].hex()
+
+
+def _encode_address(address: str) -> str:
+    return str(address).lower().replace("0x", "").rjust(64, "0")
+
+
+def _encode_uint(value: int) -> str:
+    return hex(int(value))[2:].rjust(64, "0")
+
+
+def _encode_bool(value: bool) -> str:
+    return ("1" if value else "0").rjust(64, "0")
+
+
+def _encode_approve_calldata(spender: str, amount: int) -> str:
+    return "0x" + _selector("approve(address,uint256)") + _encode_address(spender) + _encode_uint(amount)
+
+
+def _encode_set_approval_for_all_calldata(operator: str, approved: bool) -> str:
+    return "0x" + _selector("setApprovalForAll(address,bool)") + _encode_address(operator) + _encode_bool(approved)
+
+
+def _read_erc20_allowance(rpc: Callable[[str, list[Any]], Any], *, token_address: str, owner: str, spender: str) -> int:
+    result = rpc(
+        "eth_call",
+        [
+            {"to": token_address, "data": "0x" + _selector("allowance(address,address)") + _encode_address(owner) + _encode_address(spender)},
+            "latest",
+        ],
+    )
+    return int(str(result), 16)
+
+
+def _read_erc1155_approval_for_all(rpc: Callable[[str, list[Any]], Any], *, token_address: str, owner: str, operator: str) -> bool:
+    result = rpc(
+        "eth_call",
+        [
+            {"to": token_address, "data": "0x" + _selector("isApprovedForAll(address,address)") + _encode_address(owner) + _encode_address(operator)},
+            "latest",
+        ],
+    )
+    return bool(int(str(result), 16))
+
+
+def _send_contract_transaction(
+    rpc: Callable[[str, list[Any]], Any],
+    *,
+    signer_address: str,
+    sign_transaction: Callable[[dict[str, Any]], str],
+    chain_id: int,
+    to: str,
+    data: str,
+    wait_timeout_seconds: float,
+    sleep_func: Callable[[float], None],
+) -> str:
+    nonce = int(str(rpc("eth_getTransactionCount", [signer_address, "pending"])), 16)
+    gas_price = int(str(rpc("eth_gasPrice", [])), 16)
+    try:
+        gas_estimate = int(str(rpc("eth_estimateGas", [{"from": signer_address, "to": to, "data": data}])), 16)
+    except Exception:
+        gas_estimate = 120_000
+    tx = {
+        "chainId": int(chain_id),
+        "nonce": nonce,
+        "to": to,
+        "data": data,
+        "value": 0,
+        "gas": max(21_000, int(gas_estimate * 1.2)),
+        "gasPrice": max(1, int(gas_price * 1.2)),
+    }
+    tx_hash = str(rpc("eth_sendRawTransaction", [sign_transaction(tx)]))
+    deadline = time.time() + float(wait_timeout_seconds)
+    while time.time() < deadline:
+        receipt = rpc("eth_getTransactionReceipt", [tx_hash])
+        if receipt is not None:
+            status = int(str(receipt.get("status") or "0x0"), 16)
+            if status != 1:
+                raise ExecutionClientConfigError(f"Polygon approval transaction failed: {tx_hash}")
+            return tx_hash
+        sleep_func(3.0)
+    raise ExecutionClientConfigError(f"Timed out waiting for Polygon approval receipt: {tx_hash}")
+
+
 __all__ = [
+    "AllowanceApprovalResult",
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
+    "DEFAULT_POLYGON_RPC_URL",
     "ExecutionClientConfigError",
     "ExecutionClientNotStartedError",
+    "MAX_UINT256",
     "PolymarketExecutionClient",
+    "POLYMARKET_CTF_TOKEN",
+    "POLYMARKET_SPENDER_ADDRESSES",
+    "POLYMARKET_USDC_TOKEN",
     "PRIVATE_KEY_ENV_VAR",
     "VenueApiCredentials",
     "VenueCancelResult",

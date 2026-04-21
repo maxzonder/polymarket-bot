@@ -2,11 +2,17 @@
 
 from .book_channel import BookNormalizer
 from .execution_client import (
+    AllowanceApprovalResult,
     DEFAULT_CHAIN_ID,
     DEFAULT_CLOB_HOST,
+    DEFAULT_POLYGON_RPC_URL,
     ExecutionClientConfigError,
     ExecutionClientNotStartedError,
+    MAX_UINT256,
     PolymarketExecutionClient,
+    POLYMARKET_CTF_TOKEN,
+    POLYMARKET_SPENDER_ADDRESSES,
+    POLYMARKET_USDC_TOKEN,
     VenueApiCredentials,
     VenueCancelResult,
     VenueOrderRequest,
@@ -38,17 +44,23 @@ class PolymarketVenueAdapter:
 
 
 __all__ = [
+    "AllowanceApprovalResult",
     "BookNormalizer",
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
+    "DEFAULT_POLYGON_RPC_URL",
     "DiscoveryStats",
     "DurationWindow",
     "ExecutionClientConfigError",
     "ExecutionClientNotStartedError",
     "FeeMetadataRefreshLoop",
+    "MAX_UINT256",
     "MarketMetadata",
     "MarketRefreshLoop",
     "PolymarketExecutionClient",
+    "POLYMARKET_CTF_TOKEN",
+    "POLYMARKET_SPENDER_ADDRESSES",
+    "POLYMARKET_USDC_TOKEN",
     "PolymarketUserStream",
     "PolymarketVenueAdapter",
     "PolymarketWebsocket",

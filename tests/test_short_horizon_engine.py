@@ -21,7 +21,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
-from short_horizon.live_runner import KillSwitchSummary, OperatorConfirmLiveOrderGuard, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_kill_switch, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
+from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -69,6 +69,7 @@ class _FakeLiveRunnerClient:
         self.started = False
         self.place_calls = []
         self.cancel_calls = []
+        self.approve_calls = 0
         self.api_credentials_calls = 0
         self.order_lookup_by_id = {}
         self.open_orders_by_market = {}
@@ -93,6 +94,15 @@ class _FakeLiveRunnerClient:
         from short_horizon.venue_polymarket.execution_client import VenueCancelResult
 
         return VenueCancelResult(order_id=order_id, success=True, status="canceled")
+
+    def approve_allowances(self):
+        self.approve_calls += 1
+        from short_horizon.venue_polymarket.execution_client import AllowanceApprovalResult
+
+        return [
+            AllowanceApprovalResult(asset_type="collateral", spender="spender-1", tx_hash="0xabc", status="approved"),
+            AllowanceApprovalResult(asset_type="conditional", spender="spender-1", tx_hash=None, status="already_approved"),
+        ]
 
     def get_order(self, order_id):
         if order_id in self.order_lookup_by_id:
@@ -1721,6 +1731,19 @@ class ReplayRunnerTest(unittest.TestCase):
         self.assertEqual(live_args.max_runtime_seconds, 15.0)
         self.assertEqual(live_args.collector_csv, "collector.csv")
 
+        approval_args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--approve-allowances",
+            "--max-events",
+            "1",
+        ])
+        self.assertTrue(approval_args.approve_allowances)
+
     def test_live_runner_cli_validation_requires_live_input_for_live_execution(self) -> None:
         parser = build_parser()
         args = parser.parse_args(["live.sqlite3", "--mode", "stub", "--execution-mode", "live", "--stub-event-log-path", "sample.jsonl"])
@@ -1786,6 +1809,54 @@ class ReplayRunnerTest(unittest.TestCase):
         with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
             with self.assertRaises(SystemExit):
                 validate_cli_args(parser, args)
+
+    def test_live_runner_cli_validation_for_approve_allowances(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--approve-allowances",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--max-events",
+            "1",
+        ])
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            self.assertEqual(validate_cli_args(parser, args), ExecutionMode.LIVE)
+
+        bad_args = parser.parse_args(["live.sqlite3", "--approve-allowances"])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, bad_args)
+
+        bad_combo = parser.parse_args([
+            "live.sqlite3",
+            "--approve-allowances",
+            "--kill-switch",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+        ])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, bad_combo)
+
+    def test_execute_allowance_approve_uses_client_and_summarizes(self) -> None:
+        client = _FakeLiveRunnerClient()
+
+        summary = execute_allowance_approve("approve_test_001", execution_client=client)
+
+        self.assertEqual(
+            summary,
+            AllowanceApprovalSummary(total_actions=2, approved_count=1, already_approved_count=1),
+        )
+        self.assertTrue(client.started)
+        self.assertEqual(client.approve_calls, 1)
 
     def test_execute_kill_switch_cancels_all_open_orders_and_returns_summary(self) -> None:
         client = _FakeLiveRunnerClient()

@@ -12,6 +12,10 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.venue_polymarket import (
+    MAX_UINT256,
+    POLYMARKET_CTF_TOKEN,
+    POLYMARKET_SPENDER_ADDRESSES,
+    POLYMARKET_USDC_TOKEN,
     ExecutionClientConfigError,
     PolymarketExecutionClient,
     VenueApiCredentials,
@@ -209,6 +213,69 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
 
         self.assertEqual([order.order_id for order in orders], ["ord_live"])
         self.assertEqual(fake_client.get_orders_calls[-1], {"market": "market-1"})
+
+    def test_approve_allowances_submits_missing_usdc_and_conditional_approvals(self) -> None:
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+
+        sent_raw = []
+        tx_counter = 0
+
+        def sign_transaction(tx):
+            nonlocal tx_counter
+            tx_counter += 1
+            sent_raw.append(tx)
+            return f"0xsigned{tx_counter}"
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return "0x0"
+            if method == "eth_getTransactionCount":
+                return hex(len(sent_raw))
+            if method == "eth_gasPrice":
+                return hex(100)
+            if method == "eth_estimateGas":
+                return hex(50_000)
+            if method == "eth_sendRawTransaction":
+                return f"0xhash{len(sent_raw)}"
+            if method == "eth_getTransactionReceipt":
+                return {"status": "0x1"}
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            results = client.approve_allowances(
+                rpc_call=rpc_call,
+                sign_transaction=sign_transaction,
+                signer_address="0x0000000000000000000000000000000000000abc",
+                sleep_func=lambda _: None,
+            )
+
+        self.assertEqual(len(results), 6)
+        self.assertTrue(all(result.status == "approved" for result in results))
+        self.assertEqual([result.asset_type for result in results], ["collateral", "conditional"] * 3)
+        self.assertEqual([result.spender for result in results], [spender for spender in POLYMARKET_SPENDER_ADDRESSES for _ in (0, 1)])
+        self.assertEqual(len(sent_raw), 6)
+        self.assertEqual(sent_raw[0]["to"], POLYMARKET_USDC_TOKEN)
+        self.assertEqual(sent_raw[1]["to"], POLYMARKET_CTF_TOKEN)
+        self.assertIn(hex(MAX_UINT256)[2:].lower(), sent_raw[0]["data"].lower())
+
+    def test_approve_allowances_skips_when_already_approved(self) -> None:
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return "0x1"
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            results = client.approve_allowances(
+                rpc_call=rpc_call,
+                sign_transaction=lambda tx: (_ for _ in ()).throw(AssertionError("should not sign tx")),
+                signer_address="0x0000000000000000000000000000000000000abc",
+                sleep_func=lambda _: None,
+            )
+
+        self.assertEqual(len(results), 6)
+        self.assertTrue(all(result.status == "already_approved" for result in results))
 
     @unittest.skipUnless(os.getenv("POLYMARKET_RUN_VENUE_TESTS") == "1", "set POLYMARKET_RUN_VENUE_TESTS=1 to hit real venue")
     def test_startup_and_list_open_orders_against_real_venue(self) -> None:

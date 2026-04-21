@@ -29,6 +29,13 @@ class KillSwitchSummary:
     failed_count: int
 
 
+@dataclass(frozen=True)
+class AllowanceApprovalSummary:
+    total_actions: int
+    approved_count: int
+    already_approved_count: int
+
+
 @dataclass
 class OperatorConfirmLiveOrderGuard:
     max_live_orders_total: int | None = None
@@ -258,6 +265,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Cancel all active live orders across the account and exit immediately",
     )
+    parser.add_argument(
+        "--approve-allowances",
+        action="store_true",
+        help="Send Polygon approval transactions for Polymarket USDC + conditional-token spend before the live run",
+    )
     parser.add_argument("--stub-event-log-path", default=None, help="Path to a JSONL file of normalized stub events for --mode stub")
     parser.add_argument("--run-id", default=None, help="Optional explicit run_id; defaults to a fresh live_<suffix>")
     parser.add_argument("--config-hash", default="dev", help="Config hash label stored in runs table")
@@ -281,6 +293,8 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     execution_mode = ExecutionMode(str(args.execution_mode))
     kill_switch = getattr(args, "kill_switch", False)
     if kill_switch:
+        if getattr(args, "approve_allowances", False):
+            parser.error("--approve-allowances cannot be combined with --kill-switch")
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
             parser.error("--kill-switch requires --mode live and --execution-mode live")
         if not args.allow_live_execution:
@@ -307,6 +321,9 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if getattr(args, "confirm_live_order", False) or args.max_live_orders_total is not None:
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
             parser.error("--confirm-live-order and --max-live-orders-total require --mode live and --execution-mode live")
+    if getattr(args, "approve_allowances", False):
+        if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
+            parser.error("--approve-allowances requires --mode live and --execution-mode live")
     if getattr(args, "confirm_live_order", False) and not sys.stdin.isatty():
         parser.error("--confirm-live-order requires an interactive TTY")
     return execution_mode
@@ -406,6 +423,50 @@ def execute_kill_switch(
     return summary
 
 
+def execute_allowance_approve(
+    run_id: str | None = None,
+    *,
+    execution_client: PolymarketExecutionClient | None = None,
+) -> AllowanceApprovalSummary:
+    logger = get_logger("short_horizon.live_runner", run_id=run_id or "allowance_approve")
+    client = execution_client or PolymarketExecutionClient()
+    if not _client_is_started(client):
+        client.startup()
+    results = client.approve_allowances()
+    approved_count = 0
+    already_approved_count = 0
+    for result in results:
+        if result.status == "approved":
+            approved_count += 1
+        else:
+            already_approved_count += 1
+        logger.info(
+            "live_allowance_status",
+            asset_type=result.asset_type,
+            spender=result.spender,
+            status=result.status,
+            tx_hash=result.tx_hash,
+        )
+    summary = AllowanceApprovalSummary(
+        total_actions=len(results),
+        approved_count=approved_count,
+        already_approved_count=already_approved_count,
+    )
+    logger.info(
+        "live_allowance_completed",
+        total_actions=summary.total_actions,
+        approved_count=summary.approved_count,
+        already_approved_count=summary.already_approved_count,
+    )
+    return summary
+
+
+def _client_is_started(client: object) -> bool:
+    if getattr(client, "started", False):
+        return True
+    return getattr(client, "_client", None) is not None
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -428,6 +489,7 @@ def main(argv: list[str] | None = None) -> None:
         input_mode=args.mode,
         execution_mode=execution_mode.value,
         safe_mode=bool(args.safe_mode),
+        approve_allowances=bool(getattr(args, "approve_allowances", False)),
         confirm_live_order=bool(getattr(args, "confirm_live_order", False)),
         max_live_orders_total=getattr(args, "max_live_orders_total", None),
         db_path=str(args.db_path),
@@ -446,6 +508,10 @@ def main(argv: list[str] | None = None) -> None:
             execution_mode=execution_mode,
         )
     else:
+        execution_client = None
+        if execution_mode is ExecutionMode.LIVE and getattr(args, "approve_allowances", False):
+            execution_client = PolymarketExecutionClient()
+            execute_allowance_approve(args.run_id, execution_client=execution_client)
         summary = asyncio.run(
             run_live(
                 db_path=args.db_path,
@@ -455,6 +521,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_events=args.max_events,
                 max_runtime_seconds=args.max_runtime_seconds,
                 execution_mode=execution_mode,
+                execution_client=execution_client,
                 live_submit_guard=build_live_submit_guard(args),
             )
         )
