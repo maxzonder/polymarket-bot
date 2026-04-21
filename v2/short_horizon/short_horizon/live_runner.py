@@ -3,13 +3,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
 
 from .config import RiskConfig, ShortHorizonConfig
 from .core.runtime import StrategyRuntime
-from .execution import ExecutionEngine, ExecutionMode
+from .execution import ExecutionEngine, ExecutionMode, LiveSubmitGuard, LiveSubmitGuardRejected
 from .market_data import LiveEventSource, MarketDataSource
 from .probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_events
@@ -25,6 +27,82 @@ class KillSwitchSummary:
     open_order_count: int
     canceled_count: int
     failed_count: int
+
+
+@dataclass
+class OperatorConfirmLiveOrderGuard:
+    max_live_orders_total: int | None = None
+    require_confirmation: bool = False
+    input_func: Callable[[str], str] = input
+    output_func: Callable[[str], None] = print
+
+    def __post_init__(self) -> None:
+        self._approved_attempts = 0
+
+    def __call__(self, intent, order_request, order_row) -> None:
+        if self.max_live_orders_total is not None and self._approved_attempts >= self.max_live_orders_total:
+            raise LiveSubmitGuardRejected(
+                f"live order cap reached for this run: {self.max_live_orders_total}",
+                reason_code="LIVE_ORDER_LIMIT_REACHED",
+            )
+
+        attempt_number = self._approved_attempts + 1
+        if self.require_confirmation:
+            self.output_func(
+                format_live_order_confirmation(
+                    intent=intent,
+                    order_request=order_request,
+                    order_row=order_row,
+                    attempt_number=attempt_number,
+                    max_live_orders_total=self.max_live_orders_total,
+                )
+            )
+            response = str(self.input_func("Submit this live order? [y/N]: ")).strip().lower()
+            if response != "y":
+                raise LiveSubmitGuardRejected(
+                    "operator declined live order submission",
+                    reason_code="OPERATOR_DECLINED",
+                )
+
+        self._approved_attempts += 1
+
+
+def format_live_order_confirmation(
+    *,
+    intent,
+    order_request,
+    order_row: dict,
+    attempt_number: int,
+    max_live_orders_total: int | None,
+) -> str:
+    lines = [
+        "=== LIVE ORDER CONFIRMATION REQUIRED ===",
+        f"attempt={attempt_number}",
+        f"run_id={order_row.get('run_id') or 'live'}",
+        f"intent_id={intent.intent_id}",
+        f"market_id={intent.market_id}",
+        f"token_id={intent.token_id}",
+        f"side={order_request.side}",
+        f"price={order_request.price}",
+        f"size={order_request.size}",
+        f"notional_usdc={intent.notional_usdc}",
+        f"client_order_id={order_request.client_order_id}",
+    ]
+    if max_live_orders_total is not None:
+        lines.append(f"max_live_orders_total={max_live_orders_total}")
+    lines.append("Type 'y' to submit. Any other input aborts this order.")
+    return "\n".join(lines)
+
+
+def build_live_submit_guard(args: argparse.Namespace) -> LiveSubmitGuard | None:
+    max_live_orders_total = getattr(args, "max_live_orders_total", None)
+    require_confirmation = bool(getattr(args, "confirm_live_order", False))
+    if max_live_orders_total is None and not require_confirmation:
+        return None
+    return OperatorConfirmLiveOrderGuard(
+        max_live_orders_total=max_live_orders_total,
+        require_confirmation=require_confirmation,
+    )
 
 
 def build_live_runtime(*, db_path: str | Path, run_id: str | None = None, config: ShortHorizonConfig | None = None, config_hash: str = "dev") -> StrategyRuntime:
@@ -83,6 +161,7 @@ async def run_live(
     max_runtime_seconds: float | None = None,
     execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
     execution_client: PolymarketExecutionClient | None = None,
+    live_submit_guard: LiveSubmitGuard | None = None,
 ) -> RunnerSummary:
     resolved_mode = ExecutionMode(str(execution_mode))
     runtime = build_live_runtime(db_path=db_path, run_id=run_id, config=config, config_hash=config_hash)
@@ -103,6 +182,7 @@ async def run_live(
             max_runtime_seconds=max_runtime_seconds,
             execution_mode=resolved_mode,
             execution_client=client,
+            live_submit_guard=live_submit_guard,
         )
     finally:
         await source.stop()
@@ -158,6 +238,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit operator acknowledgement required before --execution-mode live can touch mainnet",
     )
     parser.add_argument(
+        "--confirm-live-order",
+        action="store_true",
+        help="Print each translated live order and require an interactive 'y' before submission",
+    )
+    parser.add_argument(
+        "--max-live-orders-total",
+        type=int,
+        default=None,
+        help="Optional hard cap on total approved live order submission attempts for this run",
+    )
+    parser.add_argument(
         "--safe-mode",
         action="store_true",
         help="Operator-requested global safe mode: consume live data and reconciliation, but block new entry intents",
@@ -202,6 +293,8 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
         parser.error("--max-events must be positive when provided")
     if args.max_runtime_seconds is not None and args.max_runtime_seconds <= 0:
         parser.error("--max-runtime-seconds must be positive when provided")
+    if args.max_live_orders_total is not None and args.max_live_orders_total <= 0:
+        parser.error("--max-live-orders-total must be positive when provided")
     if args.mode == "stub" and execution_mode is ExecutionMode.LIVE:
         parser.error("--execution-mode live requires --mode live")
     if args.mode == "live" and execution_mode is ExecutionMode.LIVE and not args.allow_live_execution:
@@ -211,6 +304,11 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if args.mode == "live" and execution_mode is ExecutionMode.LIVE:
         if args.max_events is None and args.max_runtime_seconds is None:
             parser.error("--execution-mode live requires --max-events or --max-runtime-seconds")
+    if getattr(args, "confirm_live_order", False) or args.max_live_orders_total is not None:
+        if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
+            parser.error("--confirm-live-order and --max-live-orders-total require --mode live and --execution-mode live")
+    if getattr(args, "confirm_live_order", False) and not sys.stdin.isatty():
+        parser.error("--confirm-live-order requires an interactive TTY")
     return execution_mode
 
 
@@ -330,6 +428,8 @@ def main(argv: list[str] | None = None) -> None:
         input_mode=args.mode,
         execution_mode=execution_mode.value,
         safe_mode=bool(args.safe_mode),
+        confirm_live_order=bool(getattr(args, "confirm_live_order", False)),
+        max_live_orders_total=getattr(args, "max_live_orders_total", None),
         db_path=str(args.db_path),
         max_events=args.max_events,
         max_runtime_seconds=args.max_runtime_seconds,
@@ -355,6 +455,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_events=args.max_events,
                 max_runtime_seconds=args.max_runtime_seconds,
                 execution_mode=execution_mode,
+                live_submit_guard=build_live_submit_guard(args),
             )
         )
     logger = get_logger("short_horizon.live_runner", run_id=summary.run_id)

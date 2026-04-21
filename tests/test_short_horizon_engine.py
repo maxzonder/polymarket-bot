@@ -21,7 +21,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
-from short_horizon.live_runner import KillSwitchSummary, build_live_source, build_live_runtime, build_parser, execute_kill_switch, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
+from short_horizon.live_runner import KillSwitchSummary, OperatorConfirmLiveOrderGuard, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_kill_switch, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -1700,6 +1700,9 @@ class ReplayRunnerTest(unittest.TestCase):
             "--execution-mode",
             "live",
             "--allow-live-execution",
+            "--confirm-live-order",
+            "--max-live-orders-total",
+            "1",
             "--safe-mode",
             "--max-events",
             "5",
@@ -1711,6 +1714,8 @@ class ReplayRunnerTest(unittest.TestCase):
         self.assertEqual(live_args.mode, "live")
         self.assertEqual(live_args.execution_mode, "live")
         self.assertTrue(live_args.allow_live_execution)
+        self.assertTrue(live_args.confirm_live_order)
+        self.assertEqual(live_args.max_live_orders_total, 1)
         self.assertTrue(live_args.safe_mode)
         self.assertEqual(live_args.max_events, 5)
         self.assertEqual(live_args.max_runtime_seconds, 15.0)
@@ -1859,6 +1864,68 @@ class ReplayRunnerTest(unittest.TestCase):
         args = parser.parse_args(["live.sqlite3", "--max-runtime-seconds", "0"])
         with self.assertRaises(SystemExit):
             validate_cli_args(parser, args)
+
+        args = parser.parse_args(["live.sqlite3", "--max-live-orders-total", "0"])
+        with self.assertRaises(SystemExit):
+            validate_cli_args(parser, args)
+
+    def test_live_runner_cli_validation_rejects_live_confirmation_flags_outside_live_mode(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "stub",
+            "--execution-mode",
+            "dry_run",
+            "--stub-event-log-path",
+            "sample.jsonl",
+            "--confirm-live-order",
+        ])
+
+        with self.assertRaises(SystemExit):
+            validate_cli_args(parser, args)
+
+    def test_live_runner_cli_validation_requires_tty_for_confirm_live_order(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--confirm-live-order",
+            "--max-live-orders-total",
+            "1",
+            "--max-events",
+            "1",
+        ])
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True), patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, args)
+
+    def test_build_live_submit_guard_returns_operator_guard(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--confirm-live-order",
+            "--max-live-orders-total",
+            "1",
+            "--max-events",
+            "1",
+        ])
+
+        guard = build_live_submit_guard(args)
+
+        self.assertIsInstance(guard, OperatorConfirmLiveOrderGuard)
+        self.assertTrue(guard.require_confirmation)
+        self.assertEqual(guard.max_live_orders_total, 1)
 
     def test_replay_runner_is_deterministic_for_same_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

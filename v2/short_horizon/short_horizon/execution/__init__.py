@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from ..core.events import OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, OrderSide, TimerEvent
 from ..core.models import OrderIntent
@@ -90,6 +90,16 @@ class ExecutionTransitionError(RuntimeError):
 
 class ExecutionValidationError(RuntimeError):
     pass
+
+
+class LiveSubmitGuardRejected(ExecutionValidationError):
+    def __init__(self, reason: str, *, reason_code: str = "LIVE_SUBMIT_BLOCKED") -> None:
+        super().__init__(reason)
+        self.reason = str(reason)
+        self.reason_code = str(reason_code)
+
+
+LiveSubmitGuard = Callable[[OrderIntent, VenueOrderRequest, dict[str, Any]], None]
 
 
 @dataclass(frozen=True)
@@ -203,6 +213,7 @@ class ExecutionEngine:
         tick_size: float = 0.01,
         min_order_size: float = 1.0,
         translation_policy: TranslationPolicy | None = None,
+        live_submit_guard: LiveSubmitGuard | None = None,
     ):
         self.store = store
         self.client = client
@@ -210,6 +221,7 @@ class ExecutionEngine:
         self.tick_size = float(tick_size)
         self.min_order_size = float(min_order_size)
         self.translation_policy = translation_policy or TranslationPolicy()
+        self.live_submit_guard = live_submit_guard
         self.logger = get_logger("short_horizon.execution", run_id=store.current_run_id)
 
     def handle_intent(self, intent: StrategyIntent, *, event_time_ms: int | None = None):
@@ -242,6 +254,20 @@ class ExecutionEngine:
 
         if self.client is None:
             raise ExecutionValidationError("Execution client is required in live mode")
+
+        try:
+            if self.live_submit_guard is not None:
+                self.live_submit_guard(intent, order_request, order_row)
+        except LiveSubmitGuardRejected as exc:
+            return [
+                self._emit_rejected(
+                    intent=intent,
+                    order_row=order_row,
+                    send_time_ms=send_time_ms,
+                    reason=exc.reason,
+                    reason_code=exc.reason_code,
+                )
+            ]
 
         self._transition(order_row, OrderState.PENDING_SEND, event_time_ms=send_time_ms, venue_order_status="sending")
         try:
@@ -1264,6 +1290,8 @@ __all__ = [
     "ExecutionEngine",
     "ExecutionMode",
     "ExecutionStore",
+    "LiveSubmitGuard",
+    "LiveSubmitGuardRejected",
     "ExecutionTransitionError",
     "ExecutionValidationError",
     "ExecutionVenueClient",

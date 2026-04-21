@@ -8,7 +8,7 @@ from pathlib import Path
 from .core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
 from .core.models import OrderIntent
 from .core.runtime import StrategyRuntime
-from .execution import ExecutionEngine, ExecutionMode, ExecutionVenueClient
+from .execution import ExecutionEngine, ExecutionMode, ExecutionVenueClient, LiveSubmitGuard
 from .strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 from .telemetry import get_logger
 
@@ -30,10 +30,16 @@ def drive_runtime_events(
     completed_event_name: str,
     execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
     execution_client: ExecutionVenueClient | None = None,
+    live_submit_guard: LiveSubmitGuard | None = None,
 ) -> RunnerSummary:
     logger = get_logger(logger_name, run_id=runtime.store.current_run_id)
     resolved_mode = ExecutionMode(str(execution_mode))
-    execution = ExecutionEngine(store=runtime.store, mode=resolved_mode, client=execution_client)
+    execution = ExecutionEngine(
+        store=runtime.store,
+        mode=resolved_mode,
+        client=execution_client,
+        live_submit_guard=live_submit_guard,
+    )
     event_count = 0
     order_intents = 0
     synthetic_order_events = 0
@@ -71,10 +77,16 @@ async def drive_runtime_event_stream(
     max_runtime_seconds: float | None = None,
     execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
     execution_client: ExecutionVenueClient | None = None,
+    live_submit_guard: LiveSubmitGuard | None = None,
 ) -> RunnerSummary:
     logger = get_logger(logger_name, run_id=runtime.store.current_run_id)
     resolved_mode = ExecutionMode(str(execution_mode))
-    execution = ExecutionEngine(store=runtime.store, mode=resolved_mode, client=execution_client)
+    execution = ExecutionEngine(
+        store=runtime.store,
+        mode=resolved_mode,
+        client=execution_client,
+        live_submit_guard=live_submit_guard,
+    )
     event_count = 0
     order_intents = 0
     synthetic_order_events = 0

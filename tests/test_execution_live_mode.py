@@ -12,7 +12,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 
 from short_horizon.core import OrderState
 from short_horizon.events import MarketStateUpdate, OrderCanceled, OrderFilled
-from short_horizon.execution import ExecutionEngine, ExecutionMode
+from short_horizon.execution import ExecutionEngine, ExecutionMode, LiveSubmitGuardRejected
 from short_horizon.models import OrderIntent
 from short_horizon.storage import RunContext, SQLiteRuntimeStore
 from short_horizon.venue_polymarket.execution_client import VenueCancelResult, VenueOrderState, VenuePlaceResult
@@ -72,6 +72,28 @@ class _FakeExecutionClient:
     def list_open_orders(self, market_id: str | None = None):
         self.list_open_orders_calls.append(market_id)
         return list(self.open_orders_by_market.get(market_id, []))
+
+
+class _RejectLiveSubmitGuard:
+    def __call__(self, intent, order_request, order_row) -> None:
+        raise LiveSubmitGuardRejected(
+            "operator declined live order submission",
+            reason_code="OPERATOR_DECLINED",
+        )
+
+
+class _CapLiveSubmitGuard:
+    def __init__(self, max_live_orders_total: int) -> None:
+        self.max_live_orders_total = int(max_live_orders_total)
+        self.approved = 0
+
+    def __call__(self, intent, order_request, order_row) -> None:
+        if self.approved >= self.max_live_orders_total:
+            raise LiveSubmitGuardRejected(
+                f"live order cap reached for this run: {self.max_live_orders_total}",
+                reason_code="LIVE_ORDER_LIMIT_REACHED",
+            )
+        self.approved += 1
 
 
 class ExecutionLiveModeIntegrationTest(unittest.TestCase):
@@ -242,6 +264,56 @@ class ExecutionLiveModeIntegrationTest(unittest.TestCase):
         self.assertEqual(order_row["venue_order_status"], "rejected")
         self.assertEqual(order_row["last_reject_code"], "VENUE_ERROR")
         self.assertIn("insufficient balance", str(order_row["last_reject_reason"]))
+
+    def test_live_submit_guard_decline_rejects_without_sdk_call(self) -> None:
+        client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})
+        store = self._create_store("live_guard_decline_001")
+        store.upsert_market_state(self._market_state())
+        intent = self._intent()
+        store.persist_intent(intent)
+        execution = ExecutionEngine(
+            store=store,
+            client=client,
+            mode=ExecutionMode.LIVE,
+            live_submit_guard=_RejectLiveSubmitGuard(),
+        )
+
+        rejected = execution.submit(intent)
+
+        self.assertEqual(len(client.place_calls), 0)
+        self.assertEqual(len(rejected), 1)
+        order_row = self._load_order(store)
+        self.assertEqual(order_row["state"], OrderState.REJECTED.value)
+        self.assertEqual(order_row["last_reject_code"], "OPERATOR_DECLINED")
+        self.assertIn("operator declined", str(order_row["last_reject_reason"]))
+
+    def test_live_submit_guard_caps_total_live_orders_per_run(self) -> None:
+        client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})
+        store = self._create_store("live_guard_cap_001")
+        store.upsert_market_state(self._market_state())
+        first_intent = self._intent("ord_exec_001")
+        second_intent = self._intent("ord_exec_002")
+        store.persist_intent(first_intent)
+        store.persist_intent(second_intent)
+        execution = ExecutionEngine(
+            store=store,
+            client=client,
+            mode=ExecutionMode.LIVE,
+            live_submit_guard=_CapLiveSubmitGuard(max_live_orders_total=1),
+        )
+
+        accepted = execution.submit(first_intent)
+        rejected = execution.submit(second_intent)
+
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(len(client.place_calls), 1)
+        first_order = self._load_order(store, "ord_exec_001")
+        second_order = self._load_order(store, "ord_exec_002")
+        self.assertEqual(first_order["state"], OrderState.ACCEPTED.value)
+        self.assertEqual(second_order["state"], OrderState.REJECTED.value)
+        self.assertEqual(second_order["last_reject_code"], "LIVE_ORDER_LIMIT_REACHED")
+        self.assertIn("live order cap reached", str(second_order["last_reject_reason"]))
 
     def test_live_cancel_path_reaches_cancel_confirmed_via_stream_ack(self) -> None:
         client = _FakeExecutionClient(
