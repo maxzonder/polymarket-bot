@@ -23,7 +23,7 @@ class TriggerConfig:
 
 @dataclass(frozen=True)
 class ExecutionConfig:
-    target_trade_size_usdc: float = 10.0
+    target_trade_size_usdc: float = 1.0
     stale_market_data_threshold_ms: int = 2000
     hold_to_resolution: bool = True
 
