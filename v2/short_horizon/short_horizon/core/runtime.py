@@ -55,6 +55,22 @@ class StrategyRuntime:
             )
             touch_log = log.bind(level=touch.level, previous_best_ask=touch.previous_best_ask, current_best_ask=touch.current_best_ask)
             touch_log.info("touch_detected")
+            if self.store.has_unknown_order_for_market(event.market_id):
+                decision = SkipDecision(
+                    reason="market_reconciliation_blocked",
+                    market_id=event.market_id,
+                    token_id=event.token_id,
+                    level=touch.level,
+                    event_time_ms=event.event_time_ms,
+                    details="unknown_order_present",
+                )
+                touch_log.info(
+                    "touch_skipped",
+                    reason=decision.reason,
+                    details=decision.details,
+                )
+                outputs.append(decision)
+                continue
             decision = self.strategy.decide_on_touch(event=event, touch=touch)
             if isinstance(decision, OrderIntent):
                 self.store.persist_intent(decision)

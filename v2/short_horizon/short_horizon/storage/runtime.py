@@ -130,6 +130,9 @@ class RuntimeStore(Protocol):
     def load_non_terminal_orders(self) -> list[dict[str, Any]]:
         ...
 
+    def has_unknown_order_for_market(self, market_id: str) -> bool:
+        ...
+
 
 @dataclass
 class InMemoryIntentStore:
@@ -291,6 +294,12 @@ class InMemoryIntentStore:
             for row in self.orders.values()
             if row["state"] in NON_TERMINAL_ORDER_STATES
         ]
+
+    def has_unknown_order_for_market(self, market_id: str) -> bool:
+        return any(
+            row["market_id"] == market_id and row["state"] == OrderState.UNKNOWN.value
+            for row in self.orders.values()
+        )
 
     def load_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
         for row in reversed(list(self.orders.values())):
@@ -617,6 +626,13 @@ class SQLiteRuntimeStore:
             (self.run.run_id, *NON_TERMINAL_ORDER_STATES),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def has_unknown_order_for_market(self, market_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM orders WHERE run_id = ? AND market_id = ? AND state = ? LIMIT 1",
+            (self.run.run_id, market_id, OrderState.UNKNOWN.value),
+        ).fetchone()
+        return row is not None
 
     def load_order(self, order_id: str) -> dict[str, Any] | None:
         row = self.conn.execute(

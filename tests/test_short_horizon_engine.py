@@ -343,12 +343,12 @@ class ShortHorizonEngineTest(unittest.TestCase):
             fee_metadata_age_ms=1_000,
         )
 
-    def _book(self, *, event_time_ms: int, best_ask: float) -> BookUpdate:
+    def _book(self, *, event_time_ms: int, best_ask: float, token_id: str = "tok_yes") -> BookUpdate:
         return BookUpdate(
             event_time_ms=event_time_ms,
             ingest_time_ms=event_time_ms + 20,
             market_id="m1",
-            token_id="tok_yes",
+            token_id=token_id,
             best_bid=best_ask - 0.01,
             best_ask=best_ask,
         )
@@ -417,6 +417,33 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertIsInstance(outputs[0], SkipDecision)
         self.assertEqual(outputs[0].reason, "stale_fee_metadata")
+
+    def test_unknown_order_blocks_new_touches_for_same_market(self) -> None:
+        self.engine.on_market_state(self._market_state(token_id="tok_yes"))
+        self.engine.on_market_state(self._market_state(token_id="tok_no"))
+        self.store.insert_order(
+            order_id="ord_unknown_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.55,
+            size=10.0,
+            state=OrderState.UNKNOWN,
+            client_order_id="cli_unknown_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=10.0,
+            reconciliation_required=True,
+        )
+
+        self.assertEqual(self.engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54, token_id="tok_no")), [])
+        outputs = self.engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55, token_id="tok_no"))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "market_reconciliation_blocked")
+        self.assertEqual(outputs[0].details, "unknown_order_present")
+        self.assertEqual(len(self.store.intents), 0)
 
 
 class TelemetryTest(unittest.TestCase):
@@ -1985,6 +2012,107 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(order_row[1], "canceled")
             self.assertEqual(canceled_events, 1)
 
+    async def test_live_runner_blocks_market_after_startup_unknown_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_exec_unknown_block.sqlite3"
+            run_id = "live_exec_unknown_block_test_001"
+            seed_store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id=run_id,
+                    strategy_id="short_horizon_15m_touch_v1",
+                    mode="live",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                seed_store.insert_order(
+                    order_id="ord_unknown_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=10.0,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="cli_unknown_001",
+                    venue_order_id="venue-missing-1",
+                    intent_created_at_ms=210_000,
+                    last_state_change_at_ms=210_000,
+                    remaining_size=10.0,
+                    venue_order_status="live",
+                    reconciliation_required=True,
+                )
+            finally:
+                seed_store.close()
+
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_no",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_no",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_no",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                ]
+            )
+            client = _FakeLiveRunnerClient()
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id=run_id,
+                config_hash="test-config",
+                source=source,
+                max_events=3,
+                execution_mode=ExecutionMode.LIVE,
+                execution_client=client,
+            )
+
+            self.assertEqual(summary.run_id, run_id)
+            self.assertEqual(len(client.place_calls), 0)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                blocked_order = conn.execute(
+                    "SELECT state, reconciliation_required FROM orders WHERE run_id = ? AND order_id = 'ord_unknown_001'",
+                    (run_id,),
+                ).fetchone()
+                other_token_orders = conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE run_id = ? AND token_id = 'tok_no'",
+                    (run_id,),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(blocked_order[0], "unknown")
+            self.assertEqual(blocked_order[1], 1)
+            self.assertEqual(other_token_orders, 0)
+
     def test_build_live_runtime_hydrates_strategy_open_orders_from_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "live_restart.sqlite3"
@@ -2301,6 +2429,25 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(open_orders[0]["state"], "partially_filled")
                 self.assertEqual(by_client_order["order_id"], "ord_001")
                 self.assertEqual(by_venue_order["order_id"], "ord_001")
+                self.assertFalse(store.has_unknown_order_for_market("m1"))
+
+                store.insert_order(
+                    order_id="ord_unknown_001",
+                    market_id="m1",
+                    token_id="tok_no",
+                    side="BUY",
+                    price=0.55,
+                    size=5.0,
+                    state=OrderState.UNKNOWN,
+                    client_order_id="cli_unknown_001",
+                    intent_created_at_ms=225_300,
+                    last_state_change_at_ms=225_300,
+                    remaining_size=5.0,
+                    reconciliation_required=True,
+                )
+
+                self.assertTrue(store.has_unknown_order_for_market("m1"))
+                self.assertFalse(store.has_unknown_order_for_market("m2"))
 
                 conn = sqlite3.connect(db_path)
                 try:
