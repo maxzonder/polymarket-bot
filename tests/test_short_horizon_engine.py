@@ -473,6 +473,169 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(outputs[0].reason, "max_open_orders_total_reached")
         self.assertEqual(len(engine.store.intents), 0)
 
+    def test_runtime_blocks_new_intent_when_max_notional_per_strategy_would_be_exceeded(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_notional_per_strategy_usdc=9.0,
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    micro_live_total_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_notional_per_strategy_usdc_reached")
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_blocks_new_intent_when_max_open_orders_per_market_reached(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=1,
+                    micro_live_total_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_existing_market_001",
+            market_id="m1",
+            token_id="tok_no",
+            side="BUY",
+            price=0.55,
+            size=10.0,
+            state=OrderState.ACCEPTED,
+            client_order_id="cli_existing_market_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=10.0,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54, token_id="tok_yes")), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55, token_id="tok_yes"))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_open_orders_per_market_reached")
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_blocks_new_intent_when_max_daily_loss_usdc_is_already_breached(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_daily_loss_usdc=5.0,
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    micro_live_total_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_buy_loss_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.60,
+            size=10.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_buy_loss_001",
+            intent_created_at_ms=200_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+        engine.store.insert_order(
+            order_id="ord_sell_loss_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="SELL",
+            price=0.10,
+            size=10.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_sell_loss_001",
+            intent_created_at_ms=211_000,
+            last_state_change_at_ms=212_000,
+            remaining_size=0.0,
+        )
+        engine.store.insert_fill(
+            fill_id="fill_buy_loss_001",
+            order_id="ord_buy_loss_001",
+            market_id="m1",
+            token_id="tok_yes",
+            price=0.60,
+            size=10.0,
+            filled_at_ms=210_000,
+            source="test",
+            fee_paid_usdc=0.20,
+        )
+        engine.store.insert_fill(
+            fill_id="fill_sell_loss_001",
+            order_id="ord_sell_loss_001",
+            market_id="m1",
+            token_id="tok_yes",
+            price=0.10,
+            size=10.0,
+            filled_at_ms=212_000,
+            source="test",
+            fee_paid_usdc=0.10,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_daily_loss_usdc_reached")
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_blocks_new_intent_when_max_consecutive_rejects_reached(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_consecutive_rejects=3,
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    micro_live_total_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        for idx in range(3):
+            event_time_ms = 210_000 + idx
+            engine.store.insert_order(
+                order_id=f"ord_reject_{idx}",
+                market_id="m1",
+                token_id="tok_yes",
+                side="BUY",
+                price=0.55,
+                size=10.0,
+                state=OrderState.REJECTED,
+                client_order_id=f"cli_reject_{idx}",
+                intent_created_at_ms=event_time_ms,
+                last_state_change_at_ms=event_time_ms,
+                remaining_size=0.0,
+            )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_consecutive_rejects_reached")
+        self.assertEqual(len(engine.store.intents), 0)
+
     def test_runtime_blocks_new_intent_in_global_safe_mode(self) -> None:
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True, max_open_orders_total=10, micro_live_total_stake_cap_usdc=100.0)),

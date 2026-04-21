@@ -130,6 +130,12 @@ class RuntimeStore(Protocol):
     def load_non_terminal_orders(self) -> list[dict[str, Any]]:
         ...
 
+    def load_all_orders(self) -> list[dict[str, Any]]:
+        ...
+
+    def load_fills(self) -> list[dict[str, Any]]:
+        ...
+
     def has_unknown_order_for_market(self, market_id: str) -> bool:
         ...
 
@@ -294,6 +300,16 @@ class InMemoryIntentStore:
             for row in self.orders.values()
             if row["state"] in NON_TERMINAL_ORDER_STATES
         ]
+
+    def load_all_orders(self) -> list[dict[str, Any]]:
+        rows = [dict(row) for row in self.orders.values()]
+        rows.sort(key=lambda row: (str(row.get("last_state_change_at") or row.get("intent_created_at") or ""), str(row.get("order_id") or "")))
+        return rows
+
+    def load_fills(self) -> list[dict[str, Any]]:
+        rows = [dict(row) for row in self.fills.values()]
+        rows.sort(key=lambda row: (str(row.get("filled_at") or ""), str(row.get("fill_id") or "")))
+        return rows
 
     def has_unknown_order_for_market(self, market_id: str) -> bool:
         return any(
@@ -624,6 +640,28 @@ class SQLiteRuntimeStore:
             ORDER BY intent_created_at ASC, order_id ASC
             """,
             (self.run.run_id, *NON_TERMINAL_ORDER_STATES),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_all_orders(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM orders
+            WHERE run_id = ?
+            ORDER BY last_state_change_at ASC, intent_created_at ASC, order_id ASC
+            """,
+            (self.run.run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_fills(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT * FROM fills
+            WHERE run_id = ?
+            ORDER BY filled_at ASC, fill_id ASC
+            """,
+            (self.run.run_id,),
         ).fetchall()
         return [dict(row) for row in rows]
 
