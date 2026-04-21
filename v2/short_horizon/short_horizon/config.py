@@ -40,6 +40,12 @@ class MarketDiscoveryConfig:
 
 
 @dataclass(frozen=True)
+class RiskConfig:
+    max_open_orders_total: int = 10
+    micro_live_total_stake_cap_usdc: float = 100.0
+
+
+@dataclass(frozen=True)
 class ShortHorizonConfig:
     strategy_id: str = "short_horizon_15m_touch_v1"
     implementation_language: str = "python"
@@ -49,3 +55,4 @@ class ShortHorizonConfig:
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     fees: FeesConfig = field(default_factory=FeesConfig)
     market_discovery: MarketDiscoveryConfig = field(default_factory=MarketDiscoveryConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)

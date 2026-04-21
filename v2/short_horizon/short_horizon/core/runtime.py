@@ -73,6 +73,8 @@ class StrategyRuntime:
                 continue
             decision = self.strategy.decide_on_touch(event=event, touch=touch)
             if isinstance(decision, OrderIntent):
+                decision = self._apply_runtime_guards(decision)
+            if isinstance(decision, OrderIntent):
                 self.store.persist_intent(decision)
                 touch_log.info(
                     "order_intent_created",
@@ -90,3 +92,45 @@ class StrategyRuntime:
                 )
             outputs.append(decision)
         return outputs
+
+    def _apply_runtime_guards(self, decision: OrderIntent) -> OrderIntent | SkipDecision:
+        config = getattr(self.strategy, "config", None)
+        risk = getattr(config, "risk", None)
+        if risk is None:
+            return decision
+
+        open_orders = self.store.load_non_terminal_orders()
+        max_open_orders_total = int(getattr(risk, "max_open_orders_total", 0) or 0)
+        if max_open_orders_total > 0 and len(open_orders) >= max_open_orders_total:
+            return SkipDecision(
+                reason="max_open_orders_total_reached",
+                market_id=decision.market_id,
+                token_id=decision.token_id,
+                level=decision.level,
+                event_time_ms=decision.event_time_ms,
+                details=f"open_orders={len(open_orders)} cap={max_open_orders_total}",
+            )
+
+        stake_cap_usdc = float(getattr(risk, "micro_live_total_stake_cap_usdc", 0.0) or 0.0)
+        if stake_cap_usdc > 0:
+            current_open_notional = 0.0
+            for row in open_orders:
+                price = row.get("price")
+                size = row.get("remaining_size") if row.get("remaining_size") is not None else row.get("size")
+                if price is None or size is None:
+                    continue
+                current_open_notional += float(price) * float(size)
+            projected_open_notional = current_open_notional + float(decision.notional_usdc)
+            if projected_open_notional > stake_cap_usdc + 1e-9:
+                return SkipDecision(
+                    reason="micro_live_total_stake_cap_reached",
+                    market_id=decision.market_id,
+                    token_id=decision.token_id,
+                    level=decision.level,
+                    event_time_ms=decision.event_time_ms,
+                    details=(
+                        f"open_notional_usdc={current_open_notional:.6f} "
+                        f"projected_usdc={projected_open_notional:.6f} cap_usdc={stake_cap_usdc:.6f}"
+                    ),
+                )
+        return decision

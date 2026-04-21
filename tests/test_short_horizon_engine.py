@@ -16,7 +16,7 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
-from short_horizon.config import ExecutionConfig, ShortHorizonConfig
+from short_horizon.config import ExecutionConfig, RiskConfig, ShortHorizonConfig
 from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
@@ -444,6 +444,62 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(outputs[0].reason, "market_reconciliation_blocked")
         self.assertEqual(outputs[0].details, "unknown_order_present")
         self.assertEqual(len(self.store.intents), 0)
+
+    def test_runtime_blocks_new_intent_when_max_open_orders_total_reached(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=1, micro_live_total_stake_cap_usdc=100.0)),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_existing_001",
+            market_id="m2",
+            token_id="tok_other",
+            side="BUY",
+            price=0.55,
+            size=10.0,
+            state=OrderState.ACCEPTED,
+            client_order_id="cli_existing_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=10.0,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_open_orders_total_reached")
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_blocks_new_intent_when_micro_live_stake_cap_would_be_exceeded(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=10, micro_live_total_stake_cap_usdc=15.0)),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_existing_001",
+            market_id="m2",
+            token_id="tok_other",
+            side="BUY",
+            price=0.50,
+            size=20.0,
+            state=OrderState.ACCEPTED,
+            client_order_id="cli_existing_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=20.0,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "micro_live_total_stake_cap_reached")
+        self.assertEqual(len(engine.store.intents), 0)
 
 
 class TelemetryTest(unittest.TestCase):
@@ -2112,6 +2168,120 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(blocked_order[0], "unknown")
             self.assertEqual(blocked_order[1], 1)
             self.assertEqual(other_token_orders, 0)
+
+    async def test_live_runner_blocks_new_order_when_open_order_cap_is_already_reached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_exec_open_cap.sqlite3"
+            run_id = "live_exec_open_cap_test_001"
+            seed_store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id=run_id,
+                    strategy_id="short_horizon_15m_touch_v1",
+                    mode="live",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                seed_store.insert_order(
+                    order_id="ord_existing_001",
+                    market_id="m2",
+                    token_id="tok_other",
+                    side="BUY",
+                    price=0.55,
+                    size=10.0,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="cli_existing_001",
+                    venue_order_id="venue-existing-1",
+                    intent_created_at_ms=210_000,
+                    last_state_change_at_ms=210_000,
+                    remaining_size=10.0,
+                    venue_order_status="live",
+                    reconciliation_required=True,
+                )
+            finally:
+                seed_store.close()
+
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_000,
+                        ingest_time_ms=225_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
+                ]
+            )
+            client = _FakeLiveRunnerClient()
+            client.order_lookup_by_id["venue-existing-1"] = VenueOrderState(
+                order_id="venue-existing-1",
+                status="live",
+                market_id="m2",
+                token_id="tok_other",
+                side="buy",
+                price=0.55,
+                original_size=10.0,
+                remaining_size=10.0,
+                cumulative_filled_size=0.0,
+                client_order_id="cli_existing_001",
+            )
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id=run_id,
+                config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=1, micro_live_total_stake_cap_usdc=100.0)),
+                config_hash="test-config",
+                source=source,
+                max_events=3,
+                execution_mode=ExecutionMode.LIVE,
+                execution_client=client,
+            )
+
+            self.assertEqual(summary.run_id, run_id)
+            self.assertEqual(len(client.place_calls), 0)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                order_count = conn.execute(
+                    "SELECT COUNT(*) FROM orders WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+                existing_row = conn.execute(
+                    "SELECT state, venue_order_status FROM orders WHERE run_id = ? AND order_id = 'ord_existing_001'",
+                    (run_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertEqual(order_count, 1)
+            self.assertEqual(existing_row[0], "accepted")
+            self.assertEqual(existing_row[1], "live")
 
     def test_build_live_runtime_hydrates_strategy_open_orders_from_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
