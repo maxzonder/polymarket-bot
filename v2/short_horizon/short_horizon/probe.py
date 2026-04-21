@@ -105,6 +105,22 @@ def cross_validate_probe_against_collector(db_path: str | Path, *, run_id: str, 
     )
 
 
+def maybe_cross_validate_probe_against_collector(
+    db_path: str | Path,
+    *,
+    run_id: str,
+    collector_csv_path: str | Path,
+) -> CollectorCrossValidation | None:
+    path = Path(collector_csv_path)
+    if not path.exists():
+        return None
+    return cross_validate_probe_against_collector(
+        db_path,
+        run_id=run_id,
+        collector_csv_path=path,
+    )
+
+
 def assert_min_book_updates_per_minute(summary: LiveProbeSummary, *, min_rate: float) -> None:
     observed_rate = float(summary.book_updates_per_minute or 0.0)
     if observed_rate + 1e-9 >= float(min_rate):
@@ -163,5 +179,6 @@ __all__ = [
     "LiveProbeSummary",
     "assert_min_book_updates_per_minute",
     "cross_validate_probe_against_collector",
+    "maybe_cross_validate_probe_against_collector",
     "summarize_probe_db",
 ]

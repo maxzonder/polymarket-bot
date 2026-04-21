@@ -13,7 +13,7 @@ from .config import RiskConfig, ShortHorizonConfig
 from .core.runtime import StrategyRuntime
 from .execution import ExecutionEngine, ExecutionMode, LiveSubmitGuard, LiveSubmitGuardRejected
 from .market_data import LiveEventSource, MarketDataSource
-from .probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
+from .probe import assert_min_book_updates_per_minute, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_events
 from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
@@ -491,22 +491,30 @@ def main(argv: list[str] | None = None) -> None:
             min_rate=args.min_book_updates_per_minute,
         )
     if args.collector_csv:
-        validation = cross_validate_probe_against_collector(
+        validation = maybe_cross_validate_probe_against_collector(
             args.db_path,
             run_id=summary.run_id,
             collector_csv_path=args.collector_csv,
         )
-        logger.info(
-            "live_probe_cross_validation",
-            run_id=validation.run_id,
-            collector_rows=validation.collector_rows,
-            probe_markets=validation.probe_markets,
-            collector_markets=validation.collector_markets,
-            overlapping_markets=validation.overlapping_markets,
-            probe_tokens=validation.probe_tokens,
-            collector_tokens=validation.collector_tokens,
-            overlapping_tokens=validation.overlapping_tokens,
-        )
+        if validation is None:
+            logger.warning(
+                "live_probe_cross_validation_skipped",
+                run_id=summary.run_id,
+                collector_csv_path=str(args.collector_csv),
+                reason="collector_csv_missing",
+            )
+        else:
+            logger.info(
+                "live_probe_cross_validation",
+                run_id=validation.run_id,
+                collector_rows=validation.collector_rows,
+                probe_markets=validation.probe_markets,
+                collector_markets=validation.collector_markets,
+                overlapping_markets=validation.overlapping_markets,
+                probe_tokens=validation.probe_tokens,
+                collector_tokens=validation.collector_tokens,
+                overlapping_tokens=validation.overlapping_tokens,
+            )
 
 
 if __name__ == "__main__":

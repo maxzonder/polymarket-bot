@@ -22,7 +22,7 @@ from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
 from short_horizon.live_runner import KillSwitchSummary, OperatorConfirmLiveOrderGuard, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_kill_switch, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
-from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, summarize_probe_db
+from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
@@ -2922,6 +2922,54 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(validation.probe_tokens, 1)
             self.assertEqual(validation.collector_tokens, 2)
             self.assertEqual(validation.overlapping_tokens, 1)
+
+    async def test_live_runner_probe_cross_validation_missing_collector_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_probe.sqlite3"
+            source = _AsyncNormalizedSource(
+                [
+                    MarketStateUpdate(
+                        event_time_ms=200_000,
+                        ingest_time_ms=200_050,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        condition_id="c1",
+                        question="Bitcoin Up or Down?",
+                        asset_slug="bitcoin",
+                        start_time_ms=0,
+                        end_time_ms=900_000,
+                        is_active=True,
+                        metadata_is_fresh=True,
+                        fee_rate_bps=10.0,
+                        fee_fetched_at_ms=200_050,
+                        fee_metadata_age_ms=0,
+                    ),
+                    BookUpdate(
+                        event_time_ms=220_000,
+                        ingest_time_ms=220_020,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.53,
+                        best_ask=0.54,
+                    ),
+                ]
+            )
+
+            summary = await run_live(
+                db_path=db_path,
+                run_id="live_probe_missing_collector_test_001",
+                config_hash="test-config",
+                source=source,
+                max_runtime_seconds=1.0,
+            )
+
+            self.assertEqual(summary.event_count, 2)
+            validation = maybe_cross_validate_probe_against_collector(
+                db_path,
+                run_id="live_probe_missing_collector_test_001",
+                collector_csv_path=Path(tmpdir) / "missing.csv",
+            )
+            self.assertIsNone(validation)
 
     def test_sqlite_repository_api_handles_transition_fill_and_reconciliation_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
