@@ -64,6 +64,18 @@ class _FakeVenueClient:
         ]
 
 
+class _ApiCredsShape:
+    def __init__(self, *, api_key: str, api_secret: str, api_passphrase: str):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.api_passphrase = api_passphrase
+
+
+class _FakeVenueClientApiCredsObject(_FakeVenueClient):
+    def create_or_derive_api_creds(self):
+        return _ApiCredsShape(api_key="derived", api_secret="derived-secret", api_passphrase="derived-pass")
+
+
 class _FakeOrderArgs:
     def __init__(self, *, price, size, side, token_id, client_order_id=None, time_in_force=None, post_only=None):
         self.kwargs = {
@@ -103,6 +115,21 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
 
     def test_api_credentials_exposed_after_startup(self) -> None:
         fake_client = _FakeVenueClient(host="https://clob.polymarket.com", key="env-secret", chain_id=137)
+        client = PolymarketExecutionClient(
+            client_factory=lambda **kwargs: fake_client,
+            order_args_factory=_FakeOrderArgs,
+        )
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            client.startup()
+
+        self.assertEqual(
+            client.api_credentials(),
+            VenueApiCredentials(api_key="derived", secret="derived-secret", passphrase="derived-pass"),
+        )
+
+    def test_startup_accepts_prod_style_api_creds_object(self) -> None:
+        fake_client = _FakeVenueClientApiCredsObject(host="https://clob.polymarket.com", key="env-secret", chain_id=137)
         client = PolymarketExecutionClient(
             client_factory=lambda **kwargs: fake_client,
             order_args_factory=_FakeOrderArgs,

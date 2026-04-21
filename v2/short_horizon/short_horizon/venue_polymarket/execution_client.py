@@ -254,10 +254,14 @@ def _normalize_api_creds(raw: Any) -> VenueApiCredentials:
         api_key = getattr(raw, "api_key")
         secret = getattr(raw, "secret")
         passphrase = getattr(raw, "passphrase")
+    elif hasattr(raw, "api_key") and hasattr(raw, "api_secret") and hasattr(raw, "api_passphrase"):
+        api_key = getattr(raw, "api_key")
+        secret = getattr(raw, "api_secret")
+        passphrase = getattr(raw, "api_passphrase")
     elif isinstance(raw, dict):
         api_key = raw.get("api_key") or raw.get("apiKey")
-        secret = raw.get("secret")
-        passphrase = raw.get("passphrase")
+        secret = raw.get("secret") or raw.get("api_secret") or raw.get("apiSecret")
+        passphrase = raw.get("passphrase") or raw.get("api_passphrase") or raw.get("apiPassphrase")
     else:
         raise ExecutionClientConfigError("Unsupported API credentials shape returned by py-clob-client")
     if not api_key or not secret or not passphrase:
