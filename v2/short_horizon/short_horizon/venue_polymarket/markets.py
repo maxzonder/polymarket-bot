@@ -42,6 +42,7 @@ class MarketMetadata:
     fees_enabled: bool
     fee_rate_bps: float | None
     tick_size: float | None
+    min_order_size: float | None = None
     recurrence: str | None = None
     series_slug: str | None = None
     yes_outcome_name: str | None = None
@@ -192,6 +193,7 @@ def parse_market_discovery_rows(
         condition_id = str(raw.get("conditionId") or market_id)
         fees_enabled = bool(raw.get("feesEnabled"))
         tick_size = _parse_float(raw.get("orderPriceMinTickSize"))
+        min_order_size = _parse_float(raw.get("orderMinSize"))
         fee_rate_bps = _extract_fee_rate_bps(raw)
         token_yes_id, token_no_id, yes_outcome_name, no_outcome_name = _select_yes_no_tokens(token_ids, outcomes)
         markets.append(
@@ -209,6 +211,7 @@ def parse_market_discovery_rows(
                 fees_enabled=fees_enabled,
                 fee_rate_bps=fee_rate_bps,
                 tick_size=tick_size,
+                min_order_size=min_order_size,
                 recurrence=str(recurrence) if recurrence is not None else None,
                 series_slug=str(series_slug) if series_slug is not None else None,
                 yes_outcome_name=yes_outcome_name,

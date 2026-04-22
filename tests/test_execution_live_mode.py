@@ -120,39 +120,46 @@ class ExecutionLiveModeIntegrationTest(unittest.TestCase):
         return store
 
     @staticmethod
-    def _market_state() -> MarketStateUpdate:
-        return MarketStateUpdate(
-            event_time_ms=200_000,
-            ingest_time_ms=200_050,
-            market_id="m1",
-            token_id="tok_yes",
-            condition_id="c1",
-            question="Bitcoin Up or Down?",
-            asset_slug="bitcoin",
-            start_time_ms=0,
-            end_time_ms=900_000,
-            is_active=True,
-            metadata_is_fresh=True,
-            fee_rate_bps=10.0,
-            fee_metadata_age_ms=1_000,
-        )
+    def _market_state(**overrides) -> MarketStateUpdate:
+        payload = {
+            "event_time_ms": 200_000,
+            "ingest_time_ms": 200_050,
+            "market_id": "m1",
+            "token_id": "tok_yes",
+            "condition_id": "c1",
+            "question": "Bitcoin Up or Down?",
+            "asset_slug": "bitcoin",
+            "start_time_ms": 0,
+            "end_time_ms": 900_000,
+            "is_active": True,
+            "metadata_is_fresh": True,
+            "fee_rate_bps": 10.0,
+            "fee_metadata_age_ms": 1_000,
+            "token_yes_id": "tok_yes",
+            "token_no_id": "tok_no",
+            "tick_size": 0.01,
+        }
+        payload.update(overrides)
+        return MarketStateUpdate(**payload)
 
     @staticmethod
-    def _intent(intent_id: str = "ord_exec_001") -> OrderIntent:
-        return OrderIntent(
-            intent_id=intent_id,
-            strategy_id="short_horizon_15m_touch_v1",
-            market_id="m1",
-            token_id="tok_yes",
-            condition_id="c1",
-            question="Bitcoin Up or Down?",
-            asset_slug="bitcoin",
-            level=0.55,
-            entry_price=0.55,
-            notional_usdc=10.0,
-            lifecycle_fraction=0.25,
-            event_time_ms=225_000,
-        )
+    def _intent(intent_id: str = "ord_exec_001", **overrides) -> OrderIntent:
+        payload = {
+            "intent_id": intent_id,
+            "strategy_id": "short_horizon_15m_touch_v1",
+            "market_id": "m1",
+            "token_id": "tok_yes",
+            "condition_id": "c1",
+            "question": "Bitcoin Up or Down?",
+            "asset_slug": "bitcoin",
+            "level": 0.55,
+            "entry_price": 0.55,
+            "notional_usdc": 10.0,
+            "lifecycle_fraction": 0.25,
+            "event_time_ms": 225_000,
+        }
+        payload.update(overrides)
+        return OrderIntent(**payload)
 
     def _prepare_live_execution(self, *, run_id: str, client: _FakeExecutionClient):
         store = self._create_store(run_id)
@@ -344,6 +351,22 @@ class ExecutionLiveModeIntegrationTest(unittest.TestCase):
         self.assertEqual(first_order["state"], OrderState.REJECTED.value)
         self.assertEqual(first_order["last_reject_code"], "VENUE_ERROR")
         self.assertEqual(second_order["state"], OrderState.ACCEPTED.value)
+
+    def test_live_submit_scales_order_to_market_minimum_share_size(self) -> None:
+        client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})
+        store = self._create_store("live_market_min_size_001")
+        store.upsert_market_state(self._market_state(min_order_size=5.0))
+        intent = self._intent("ord_exec_001", notional_usdc=1.0)
+        store.persist_intent(intent)
+        execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE)
+
+        events = execution.submit(intent)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(client.place_calls), 1)
+        self.assertAlmostEqual(client.place_calls[0].size, 5.0)
+        order_row = self._load_order(store, "ord_exec_001")
+        self.assertAlmostEqual(order_row["size"], 5.0)
 
     def test_live_cancel_path_reaches_cancel_confirmed_via_stream_ack(self) -> None:
         client = _FakeExecutionClient(

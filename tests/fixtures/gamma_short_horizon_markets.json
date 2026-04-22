@@ -10,6 +10,7 @@
     "feesEnabled": true,
     "feeSchedule": {"rate": "0.0035"},
     "orderPriceMinTickSize": "0.01",
+    "orderMinSize": "5",
     "events": [
       {
         "startTime": "2026-04-20T14:00:00Z",
@@ -29,6 +30,7 @@
     "feesEnabled": true,
     "takerBaseFee": "8",
     "orderPriceMinTickSize": "0.01",
+    "orderMinSize": "1",
     "events": [
       {
         "startTime": "2026-04-20T14:00:00Z",

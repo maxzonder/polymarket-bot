@@ -176,6 +176,8 @@ def _to_fee_market_state_update(
         token_yes_id=market.token_yes_id,
         token_no_id=market.token_no_id,
         fee_rate_bps=market.fee_rate_bps,
+        tick_size=market.tick_size,
+        min_order_size=market.min_order_size,
         fee_fetched_at_ms=ingest_time_ms,
         fees_enabled=market.fees_enabled,
         source="polymarket.gamma.fee_refresh",

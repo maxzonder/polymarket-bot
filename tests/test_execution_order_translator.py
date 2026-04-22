@@ -77,6 +77,17 @@ class ExecutionOrderTranslatorTest(unittest.TestCase):
         self.assertAlmostEqual(request.size, 1.553847)
         self.assertGreaterEqual(request.price * request.size, 1.009999)
 
+    def test_translate_scales_buy_to_market_minimum_share_size(self) -> None:
+        request = translate_place_order(
+            self._intent(entry_price=0.55, notional_usdc=1.0),
+            self._market(),
+            VenueConstraints(tick_size=0.01, min_order_size=1.0, min_order_shares=5.0),
+        )
+
+        self.assertAlmostEqual(request.price, 0.55)
+        self.assertAlmostEqual(request.size, 5.0)
+        self.assertGreaterEqual(request.price * request.size, 2.75)
+
     def test_translate_rejects_below_minimum_size_after_rounding(self) -> None:
         with self.assertRaises(VenueTranslationError) as ctx:
             translate_place_order(

@@ -107,6 +107,8 @@ class MarketStateUpdate:
     token_yes_id: TokenId | None = None
     token_no_id: TokenId | None = None
     fee_rate_bps: float | None = None
+    tick_size: float | None = None
+    min_order_size: float | None = None
     fee_fetched_at_ms: IngestTime | None = None
     fees_enabled: bool | None = None
     is_ascending_market: bool | None = None

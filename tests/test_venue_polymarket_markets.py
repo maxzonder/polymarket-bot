@@ -72,12 +72,14 @@ class VenuePolymarketMarketsTest(unittest.TestCase):
         self.assertEqual(btc_market.token_no_id, "tok_btc_no")
         self.assertAlmostEqual(btc_market.fee_rate_bps, 35.0)
         self.assertAlmostEqual(btc_market.tick_size or 0.0, 0.01)
+        self.assertAlmostEqual(btc_market.min_order_size or 0.0, 5.0)
 
         self.assertEqual(eth_market.asset_slug, "ethereum")
         self.assertEqual(eth_market.duration_seconds, 900)
         self.assertEqual(eth_market.start_time_ms, 1_776_693_600_000)
         self.assertEqual(eth_market.end_time_ms, 1_776_694_560_000)
         self.assertAlmostEqual(eth_market.fee_rate_bps or 0.0, 8.0)
+        self.assertAlmostEqual(eth_market.min_order_size or 0.0, 1.0)
 
     def test_discover_short_horizon_markets_sync_uses_expected_gamma_query_shape(self) -> None:
         rows = self._fixture_rows()

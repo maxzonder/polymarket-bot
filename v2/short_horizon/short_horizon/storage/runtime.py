@@ -139,12 +139,16 @@ class RuntimeStore(Protocol):
     def has_unknown_order_for_market(self, market_id: str) -> bool:
         ...
 
+    def load_latest_market_state(self, market_id: str) -> MarketStateUpdate | None:
+        ...
+
 
 @dataclass
 class InMemoryIntentStore:
     intents: list[OrderIntent] = field(default_factory=list)
     events: list[NormalizedEvent] = field(default_factory=list)
     market_updates: list[MarketStateUpdate] = field(default_factory=list)
+    market_state_by_id: dict[str, MarketStateUpdate] = field(default_factory=dict)
     strategy_state: dict[tuple[str, str | None, str], dict[str, Any]] = field(default_factory=dict)
     orders: dict[str, dict[str, Any]] = field(default_factory=dict)
     fills: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -162,6 +166,7 @@ class InMemoryIntentStore:
 
     def upsert_market_state(self, event: MarketStateUpdate) -> None:
         self.market_updates.append(event)
+        self.market_state_by_id[event.market_id] = event
 
     def record_first_touch(self, *, market_id: str, token_id: str, level: float, event_time_ms: int) -> None:
         self.strategy_state[(market_id, token_id, f"first_touch_fired:{level:.2f}")] = {
@@ -317,6 +322,9 @@ class InMemoryIntentStore:
             for row in self.orders.values()
         )
 
+    def load_latest_market_state(self, market_id: str) -> MarketStateUpdate | None:
+        return self.market_state_by_id.get(market_id)
+
     def load_order_by_client_order_id(self, client_order_id: str) -> dict[str, Any] | None:
         for row in reversed(list(self.orders.values())):
             if row.get("client_order_id") == client_order_id:
@@ -338,6 +346,7 @@ class SQLiteRuntimeStore:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self._closed = False
+        self._latest_market_state_by_id: dict[str, MarketStateUpdate] = {}
         self._initialize_schema()
         self._ensure_run()
         row = self.conn.execute(
@@ -388,6 +397,7 @@ class SQLiteRuntimeStore:
         self.conn.commit()
 
     def upsert_market_state(self, event: MarketStateUpdate) -> None:
+        self._latest_market_state_by_id[event.market_id] = event
         market_status = "active" if event.is_active else "closed"
         self.conn.execute(
             """
@@ -692,6 +702,9 @@ class SQLiteRuntimeStore:
             (self.run.run_id, venue_order_id),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def load_latest_market_state(self, market_id: str) -> MarketStateUpdate | None:
+        return self._latest_market_state_by_id.get(market_id)
 
     def _initialize_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[2] / "docs" / "phase0" / "storage_schema.sql"

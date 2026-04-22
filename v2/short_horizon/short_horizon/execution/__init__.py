@@ -200,6 +200,9 @@ class ExecutionStore(Protocol):
     def load_non_terminal_orders(self) -> list[dict]:
         ...
 
+    def load_latest_market_state(self, market_id: str):
+        ...
+
 
 class ExecutionEngine:
     """Execution boundary for synthetic, dry-run, and live order placement."""
@@ -281,10 +284,15 @@ class ExecutionEngine:
         return [self._emit_live_accept(intent=intent, order_row=order_row, place_result=place_result, accepted_time_ms=send_time_ms + 1)]
 
     def _translate_order_request(self, intent: OrderIntent) -> VenueOrderRequest:
+        market_meta = self._market_meta_for_intent(intent)
         return translate_place_order(
             intent,
-            self._market_meta_for_intent(intent),
-            VenueConstraints(tick_size=self.tick_size, min_order_size=self.min_order_size),
+            market_meta,
+            VenueConstraints(
+                tick_size=market_meta.tick_size or self.tick_size,
+                min_order_size=self.min_order_size,
+                min_order_shares=market_meta.min_order_size,
+            ),
             client_order_id_seed=self.store.current_run_id,
             policy=self.translation_policy,
         )
@@ -1191,6 +1199,28 @@ class ExecutionEngine:
             )
 
     def _market_meta_for_intent(self, intent: OrderIntent) -> MarketMetadata:
+        load_latest_market_state = getattr(self.store, "load_latest_market_state", None)
+        if callable(load_latest_market_state):
+            market_state = load_latest_market_state(intent.market_id)
+            if market_state is not None:
+                token_yes_id = market_state.token_yes_id or intent.token_id
+                token_no_id = market_state.token_no_id or (f"{intent.market_id}:other" if token_yes_id == intent.token_id else intent.token_id)
+                return MarketMetadata(
+                    market_id=intent.market_id,
+                    condition_id=market_state.condition_id or intent.condition_id or intent.market_id,
+                    question=market_state.question or intent.question or "",
+                    token_yes_id=token_yes_id,
+                    token_no_id=token_no_id,
+                    start_time_ms=market_state.start_time_ms or intent.event_time_ms,
+                    end_time_ms=market_state.end_time_ms or intent.event_time_ms,
+                    asset_slug=market_state.asset_slug or intent.asset_slug,
+                    is_active=True if market_state.is_active is None else bool(market_state.is_active),
+                    duration_seconds=market_state.duration_seconds,
+                    fees_enabled=bool(market_state.fees_enabled) if market_state.fees_enabled is not None else True,
+                    fee_rate_bps=market_state.fee_rate_bps,
+                    tick_size=market_state.tick_size or self.tick_size,
+                    min_order_size=market_state.min_order_size,
+                )
         return MarketMetadata(
             market_id=intent.market_id,
             condition_id=intent.condition_id or intent.market_id,
@@ -1205,6 +1235,7 @@ class ExecutionEngine:
             fees_enabled=True,
             fee_rate_bps=None,
             tick_size=self.tick_size,
+            min_order_size=None,
         )
 
     @staticmethod
