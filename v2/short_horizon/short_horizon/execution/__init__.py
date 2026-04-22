@@ -204,6 +204,21 @@ class ExecutionStore(Protocol):
         ...
 
 
+
+
+def _emit_fill_telemetry(store, ev) -> None:
+    logger.info("live_order_filled",
+        run_id=ev.run_id,
+        order_id=ev.order_id,
+        market_id=ev.market_id,
+        token_id=ev.token_id,
+        fill_price=ev.price,
+        fill_size=ev.size,
+        venue_fill_id=ev.venue_fill_id,
+        source=ev.source,
+    )
+    store.append_event_log("OrderFilled", ev)
+
 class ExecutionEngine:
     """Execution boundary for synthetic, dry-run, and live order placement."""
 
@@ -898,6 +913,7 @@ class ExecutionEngine:
     ) -> None:
         current_cumulative = _as_float_or_none(order_row.get("cumulative_filled_size")) or 0.0
         fill_delta = max(cumulative - current_cumulative, 0.0)
+        fill_event: OrderFilled | None = None
         if fill_delta > 1e-12:
             fill_id = f"{order_row['order_id']}:reconcile:{event_time_ms}:{int(round(cumulative * 1_000_000))}"
             self.store.insert_fill(
@@ -910,6 +926,21 @@ class ExecutionEngine:
                 filled_at_ms=event_time_ms,
                 source="reconciled",
                 venue_fill_id=None,
+            )
+            fill_event = OrderFilled(
+                event_time_ms=event_time_ms,
+                ingest_time_ms=event_time_ms,
+                order_id=order_row["order_id"],
+                market_id=order_row["market_id"],
+                token_id=order_row["token_id"],
+                side=OrderSide(order_row["side"]),
+                fill_price=_as_float_or_none(venue_state.price) or _as_float_or_none(order_row.get("price")) or 0.0,
+                fill_size=fill_delta,
+                cumulative_filled_size=cumulative,
+                remaining_size=remaining,
+                source="execution.live_reconcile",
+                client_order_id=order_row.get("client_order_id"),
+                run_id=self.store.current_run_id,
             )
         self._transition(
             order_row,
@@ -921,6 +952,9 @@ class ExecutionEngine:
             remaining_size=remaining,
             reconciliation_required=False,
         )
+        if fill_event is not None:
+            self.store.append_event_log(fill_event, order_id=order_row["order_id"])
+            self._log_live_fill_event(fill_event, venue_order_id=venue_state.order_id or order_row.get("venue_order_id"))
 
     def _reconcile_terminal_fill(
         self,
@@ -932,6 +966,7 @@ class ExecutionEngine:
     ) -> None:
         current_cumulative = _as_float_or_none(order_row.get("cumulative_filled_size")) or 0.0
         fill_delta = max(cumulative - current_cumulative, 0.0)
+        fill_event: OrderFilled | None = None
         if fill_delta > 1e-12:
             fill_id = f"{order_row['order_id']}:reconcile:{event_time_ms}:{int(round(cumulative * 1_000_000))}"
             self.store.insert_fill(
@@ -945,6 +980,21 @@ class ExecutionEngine:
                 source="reconciled",
                 venue_fill_id=None,
             )
+            fill_event = OrderFilled(
+                event_time_ms=event_time_ms,
+                ingest_time_ms=event_time_ms,
+                order_id=order_row["order_id"],
+                market_id=order_row["market_id"],
+                token_id=order_row["token_id"],
+                side=OrderSide(order_row["side"]),
+                fill_price=_as_float_or_none(venue_state.price) or _as_float_or_none(order_row.get("price")) or 0.0,
+                fill_size=fill_delta,
+                cumulative_filled_size=cumulative,
+                remaining_size=0.0,
+                source="execution.live_reconcile",
+                client_order_id=order_row.get("client_order_id"),
+                run_id=self.store.current_run_id,
+            )
         self._transition(
             order_row,
             OrderState.FILLED,
@@ -955,6 +1005,9 @@ class ExecutionEngine:
             remaining_size=0.0,
             reconciliation_required=False,
         )
+        if fill_event is not None:
+            self.store.append_event_log(fill_event, order_id=order_row["order_id"])
+            self._log_live_fill_event(fill_event, venue_order_id=venue_state.order_id or order_row.get("venue_order_id"))
 
     def _resolve_order_for_event(self, event: OrderAccepted | OrderRejected | OrderFilled | OrderCanceled) -> dict | None:
         order_id = getattr(event, "order_id", None)
@@ -1046,7 +1099,24 @@ class ExecutionEngine:
             remaining_size=canonical.remaining_size,
             reconciliation_required=False,
         )
+        self._log_live_fill_event(canonical, venue_order_id=self._external_event_order_id(event, order_row=order_row))
         return canonical
+
+    def _log_live_fill_event(self, event: OrderFilled, *, venue_order_id: str | None = None) -> None:
+        self.logger.info(
+            "live_order_filled",
+            order_id=event.order_id,
+            market_id=event.market_id,
+            token_id=event.token_id,
+            client_order_id=event.client_order_id,
+            venue_order_id=venue_order_id,
+            fill_price=event.fill_price,
+            fill_size=event.fill_size,
+            cumulative_filled_size=event.cumulative_filled_size,
+            remaining_size=event.remaining_size,
+            event_time_ms=event.event_time_ms,
+            source=event.source,
+        )
 
     def _reconcile_order_canceled(self, event: OrderCanceled, *, order_row: dict) -> OrderCanceled | None:
         current_state = self._state_from_row(order_row)
