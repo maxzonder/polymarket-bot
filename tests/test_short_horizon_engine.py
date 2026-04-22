@@ -21,7 +21,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
-from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
+from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, PolygonUsdcBridgeSummary, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, execute_polygon_usdc_bridge, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -29,7 +29,7 @@ from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntime
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
-from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, VenueApiCredentials, VenueOrderState, VenuePlaceResult
+from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolygonUsdcBridgeResult, VenueApiCredentials, VenueOrderState, VenuePlaceResult
 
 
 class _AsyncNormalizedSource:
@@ -70,6 +70,7 @@ class _FakeLiveRunnerClient:
         self.place_calls = []
         self.cancel_calls = []
         self.approve_calls = 0
+        self.bridge_calls = []
         self.api_credentials_calls = 0
         self.order_lookup_by_id = {}
         self.open_orders_by_market = {}
@@ -103,6 +104,19 @@ class _FakeLiveRunnerClient:
             AllowanceApprovalResult(asset_type="collateral", spender="spender-1", tx_hash="0xabc", status="approved"),
             AllowanceApprovalResult(asset_type="conditional", spender="spender-1", tx_hash=None, status="already_approved"),
         ]
+
+    def bridge_polygon_usdc_to_usdce(self, *, amount_base_unit=None):
+        self.bridge_calls.append(amount_base_unit)
+        return PolygonUsdcBridgeResult(
+            deposit_address="0xdeposit",
+            source_amount_base_unit=amount_base_unit or 2_097_983,
+            quoted_target_amount_base_unit=2_094_000,
+            wallet_transfer_tx_hash="0xwallettransfer",
+            bridge_status="COMPLETED",
+            bridge_tx_hash="0xbridgehash",
+            initial_target_balance_base_unit=0,
+            final_target_balance_base_unit=2_094_000,
+        )
 
     def get_order(self, order_id):
         if order_id in self.order_lookup_by_id:
@@ -1744,6 +1758,22 @@ class ReplayRunnerTest(unittest.TestCase):
         ])
         self.assertTrue(approval_args.approve_allowances)
 
+        bridge_args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--bridge-polygon-usdc-to-usdce",
+            "--bridge-polygon-usdc-amount",
+            "2.05",
+            "--max-events",
+            "1",
+        ])
+        self.assertTrue(bridge_args.bridge_polygon_usdc_to_usdce)
+        self.assertEqual(bridge_args.bridge_polygon_usdc_amount, "2.05")
+
     def test_live_runner_cli_validation_requires_live_input_for_live_execution(self) -> None:
         parser = build_parser()
         args = parser.parse_args(["live.sqlite3", "--mode", "stub", "--execution-mode", "live", "--stub-event-log-path", "sample.jsonl"])
@@ -1858,6 +1888,80 @@ class ReplayRunnerTest(unittest.TestCase):
         self.assertTrue(client.started)
         self.assertEqual(client.approve_calls, 1)
 
+    def test_live_runner_cli_validation_for_polygon_usdc_bridge(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--bridge-polygon-usdc-to-usdce",
+            "--bridge-polygon-usdc-amount",
+            "2.05",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--max-events",
+            "1",
+        ])
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            self.assertEqual(validate_cli_args(parser, args), ExecutionMode.LIVE)
+
+        bad_args = parser.parse_args(["live.sqlite3", "--bridge-polygon-usdc-to-usdce"])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, bad_args)
+
+        bad_amount = parser.parse_args([
+            "live.sqlite3",
+            "--bridge-polygon-usdc-to-usdce",
+            "--bridge-polygon-usdc-amount",
+            "2.0000001",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--max-events",
+            "1",
+        ])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, bad_amount)
+
+        bad_combo = parser.parse_args([
+            "live.sqlite3",
+            "--bridge-polygon-usdc-to-usdce",
+            "--kill-switch",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+        ])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, bad_combo)
+
+    def test_execute_polygon_usdc_bridge_uses_client_and_summarizes(self) -> None:
+        client = _FakeLiveRunnerClient()
+
+        summary = execute_polygon_usdc_bridge("bridge_test_001", execution_client=client, amount_base_unit=2_050_000)
+
+        self.assertEqual(
+            summary,
+            PolygonUsdcBridgeSummary(
+                source_amount_base_unit=2_050_000,
+                deposit_address="0xdeposit",
+                wallet_transfer_tx_hash="0xwallettransfer",
+                bridge_status="COMPLETED",
+                bridge_tx_hash="0xbridgehash",
+                quoted_target_amount_base_unit=2_094_000,
+                collateral_delta_base_unit=2_094_000,
+            ),
+        )
+        self.assertEqual(client.bridge_calls, [2_050_000])
+
     def test_execute_kill_switch_cancels_all_open_orders_and_returns_summary(self) -> None:
         client = _FakeLiveRunnerClient()
         client.open_orders_by_market[None] = [
@@ -1909,6 +2013,83 @@ class ReplayRunnerTest(unittest.TestCase):
                 main(argv)
 
         self.assertEqual(ctx.exception.code, 1)
+
+    def test_main_live_mode_runs_polygon_usdc_bridge_before_allowances_and_live_loop(self) -> None:
+        argv = [
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--bridge-polygon-usdc-to-usdce",
+            "--bridge-polygon-usdc-amount",
+            "2.05",
+            "--approve-allowances",
+            "--max-events",
+            "1",
+        ]
+
+        fake_summary = type("Summary", (), {"run_id": "live_test_001", "event_count": 0, "order_intents": 0, "synthetic_order_events": 0, "db_path": "live.sqlite3"})()
+        fake_probe = type(
+            "ProbeSummary",
+            (),
+            {
+                "run_id": "live_test_001",
+                "total_events": 0,
+                "market_state_updates": 0,
+                "book_updates": 0,
+                "trade_ticks": 0,
+                "order_events": 0,
+                "distinct_markets": 0,
+                "distinct_tokens": 0,
+                "first_event_time": None,
+                "last_event_time": None,
+                "window_minutes": 0.0,
+                "book_updates_per_minute": 0.0,
+            },
+        )()
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True), patch(
+            "short_horizon.live_runner.PolymarketExecutionClient",
+            return_value=_FakeLiveRunnerClient(),
+        ) as client_ctor, patch(
+            "short_horizon.live_runner.execute_polygon_usdc_bridge",
+            return_value=PolygonUsdcBridgeSummary(
+                source_amount_base_unit=2_050_000,
+                deposit_address="0xdeposit",
+                wallet_transfer_tx_hash="0xwallettransfer",
+                bridge_status="COMPLETED",
+                bridge_tx_hash="0xbridgehash",
+                quoted_target_amount_base_unit=2_094_000,
+                collateral_delta_base_unit=2_094_000,
+            ),
+        ) as bridge_mock, patch(
+            "short_horizon.live_runner.execute_allowance_approve",
+            return_value=AllowanceApprovalSummary(total_actions=2, approved_count=1, already_approved_count=1),
+        ) as approve_mock, patch(
+            "short_horizon.live_runner.run_live",
+            return_value=fake_summary,
+        ) as run_live_mock, patch(
+            "short_horizon.live_runner.asyncio.run",
+            side_effect=lambda coro: coro.close() or fake_summary,
+        ), patch(
+            "short_horizon.live_runner.summarize_probe_db",
+            return_value=fake_probe,
+        ), patch(
+            "short_horizon.live_runner.assert_min_book_updates_per_minute",
+            return_value=None,
+        ):
+            self.assertIsNone(main(argv))
+
+        client = client_ctor.return_value
+        bridge_mock.assert_called_once_with(
+            None,
+            execution_client=client,
+            amount_base_unit=2_050_000,
+        )
+        approve_mock.assert_called_once_with(None, execution_client=client)
+        self.assertEqual(run_live_mock.call_args.kwargs["execution_client"], client)
 
     def test_live_runner_cli_validation_requires_bounded_live_probe(self) -> None:
         parser = build_parser()

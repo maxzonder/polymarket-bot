@@ -13,11 +13,13 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 
 from short_horizon.venue_polymarket import (
     MAX_UINT256,
+    POLYGON_NATIVE_USDC_TOKEN,
     POLYMARKET_CTF_TOKEN,
     POLYMARKET_SPENDER_ADDRESSES,
     POLYMARKET_USDC_TOKEN,
     ExecutionClientConfigError,
     PolymarketExecutionClient,
+    PolygonUsdcBridgeResult,
     VenueApiCredentials,
     VenueOrderRequest,
 )
@@ -276,6 +278,156 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
 
         self.assertEqual(len(results), 6)
         self.assertTrue(all(result.status == "already_approved" for result in results))
+
+    def test_bridge_polygon_usdc_to_usdce_transfers_into_polymarket_bridge_and_waits_for_completion(self) -> None:
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+
+        sent_raw = []
+        statuses = [
+            {"transactions": []},
+            {"transactions": []},
+            {
+                "transactions": [
+                    {
+                        "fromChainId": "137",
+                        "fromTokenAddress": POLYGON_NATIVE_USDC_TOKEN,
+                        "fromAmountBaseUnit": "2097983",
+                        "toChainId": "137",
+                        "toTokenAddress": POLYMARKET_USDC_TOKEN,
+                        "status": "PROCESSING",
+                        "createdTimeMs": 111,
+                    }
+                ]
+            },
+            {
+                "transactions": [
+                    {
+                        "fromChainId": "137",
+                        "fromTokenAddress": POLYGON_NATIVE_USDC_TOKEN,
+                        "fromAmountBaseUnit": "2097983",
+                        "toChainId": "137",
+                        "toTokenAddress": POLYMARKET_USDC_TOKEN,
+                        "status": "COMPLETED",
+                        "createdTimeMs": 222,
+                        "txHash": "0xbridgehash",
+                    }
+                ]
+            },
+        ]
+        balance_calls = []
+
+        def sign_transaction(tx):
+            sent_raw.append(tx)
+            return "0xsigned-bridge"
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                to = (params[0] or {}).get("to")
+                data = str((params[0] or {}).get("data") or "")
+                if to == POLYGON_NATIVE_USDC_TOKEN and data.startswith("0x70a08231"):
+                    return hex(2_097_983)
+                if to == POLYMARKET_USDC_TOKEN and data.startswith("0x70a08231"):
+                    balance_calls.append(1)
+                    return hex(0 if len(balance_calls) == 1 else 2_094_000)
+                raise AssertionError(f"unexpected eth_call payload: {params}")
+            if method == "eth_getTransactionCount":
+                return "0x0"
+            if method == "eth_gasPrice":
+                return hex(100)
+            if method == "eth_estimateGas":
+                return hex(60_000)
+            if method == "eth_sendRawTransaction":
+                return "0xwallettransfer"
+            if method == "eth_getTransactionReceipt":
+                return {"status": "0x1"}
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        def http_post(url, payload):
+            if url.endswith("/deposit"):
+                self.assertEqual(payload, {"address": "0x0000000000000000000000000000000000000abc"})
+                return {"address": {"evm": "0x0000000000000000000000000000000000000def"}}
+            if url.endswith("/quote"):
+                self.assertEqual(payload["fromTokenAddress"], POLYGON_NATIVE_USDC_TOKEN)
+                self.assertEqual(payload["toTokenAddress"], POLYMARKET_USDC_TOKEN)
+                return {"estToTokenBaseUnit": "2094000", "quoteId": "quote-1"}
+            raise AssertionError(f"unexpected POST url: {url}")
+
+        def http_get(url):
+            if url.endswith("/supported-assets"):
+                return {
+                    "supportedAssets": [
+                        {
+                            "chainId": "137",
+                            "token": {"address": POLYGON_NATIVE_USDC_TOKEN},
+                            "minCheckoutUsd": 2,
+                        }
+                    ]
+                }
+            if "/status/" in url:
+                return statuses.pop(0)
+            raise AssertionError(f"unexpected GET url: {url}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            result = client.bridge_polygon_usdc_to_usdce(
+                rpc_call=rpc_call,
+                sign_transaction=sign_transaction,
+                signer_address="0x0000000000000000000000000000000000000abc",
+                http_post=http_post,
+                http_get=http_get,
+                poll_interval_seconds=0,
+                sleep_func=lambda _: None,
+            )
+
+        self.assertEqual(
+            result,
+            PolygonUsdcBridgeResult(
+                deposit_address="0x0000000000000000000000000000000000000def",
+                source_amount_base_unit=2_097_983,
+                quoted_target_amount_base_unit=2_094_000,
+                wallet_transfer_tx_hash="0xwallettransfer",
+                bridge_status="COMPLETED",
+                bridge_tx_hash="0xbridgehash",
+                initial_target_balance_base_unit=0,
+                final_target_balance_base_unit=2_094_000,
+            ),
+        )
+        self.assertEqual(len(sent_raw), 1)
+        self.assertEqual(sent_raw[0]["to"], POLYGON_NATIVE_USDC_TOKEN)
+        self.assertTrue(str(sent_raw[0]["data"]).startswith("0xa9059cbb"))
+
+    def test_bridge_polygon_usdc_to_usdce_rejects_amount_below_bridge_minimum(self) -> None:
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return hex(2_097_983)
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        def http_get(url):
+            if url.endswith("/supported-assets"):
+                return {
+                    "supportedAssets": [
+                        {
+                            "chainId": "137",
+                            "token": {"address": POLYGON_NATIVE_USDC_TOKEN},
+                            "minCheckoutUsd": 2,
+                        }
+                    ]
+                }
+            raise AssertionError(f"unexpected GET url: {url}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            with self.assertRaises(ExecutionClientConfigError) as ctx:
+                client.bridge_polygon_usdc_to_usdce(
+                    amount_base_unit=1_500_000,
+                    rpc_call=rpc_call,
+                    signer_address="0x0000000000000000000000000000000000000abc",
+                    http_get=http_get,
+                    http_post=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not POST")),
+                    sleep_func=lambda _: None,
+                )
+
+        self.assertIn("below the documented Polymarket bridge minimum", str(ctx.exception))
 
     @unittest.skipUnless(os.getenv("POLYMARKET_RUN_VENUE_TESTS") == "1", "set POLYMARKET_RUN_VENUE_TESTS=1 to hit real venue")
     def test_startup_and_list_open_orders_against_real_venue(self) -> None:

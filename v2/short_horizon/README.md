@@ -31,10 +31,18 @@ It is **separate** from:
 For real `--execution-mode live` runs with an EOA/private key wallet, Polymarket needs one-time Polygon approvals before the first real order can succeed.
 
 - The short-horizon live runner now has a dedicated flag: `--approve-allowances`
+- For the current v1 collateral path, the live runner also supports scripted Polygon native `USDC -> USDC.e` conversion via Polymarket's bridge deposit flow:
+  - `--bridge-polygon-usdc-to-usdce`
+  - optional `--bridge-polygon-usdc-amount 2.05` to bridge a specific native USDC amount, otherwise the runner sends the wallet's full native Polygon USDC balance
 - That flag sends Polygon mainnet approvals for:
   - USDC collateral spend
   - conditional-token `setApprovalForAll`
   - all three Polymarket spender contracts used by the exchange / neg-risk path
+- The bridge flag:
+  - requests the Polymarket bridge deposit address for the wallet
+  - transfers Polygon native USDC (`0x3c499...`) to that deposit address
+  - polls bridge status until the transfer completes into Polygon `USDC.e` (`0x2791...`)
+  - is intended for the current pre-cutover v1 flow where the venue still effectively consumes `USDC.e`
 - These approvals are written on-chain on Polygon, not into the repo or SQLite probe DB:
   - USDC allowance is written on token contract `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
   - conditional-token operator approval is written on contract `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`
@@ -56,6 +64,21 @@ POLYMARKET_DATA_DIR=/home/polybot/.polybot ./.venv/bin/python v2/short_horizon/b
   --mode live \
   --execution-mode live \
   --allow-live-execution \
+  --approve-allowances \
+  --confirm-live-order \
+  --max-live-orders-total 1 \
+  --max-runtime-seconds 3600
+```
+
+Example bounded live smoke that first converts native Polygon USDC into `USDC.e`, then refreshes allowances:
+
+```bash
+POLYMARKET_DATA_DIR=/home/polybot/.polybot ./.venv/bin/python v2/short_horizon/bin/live_runner \
+  /home/polybot/.polybot/short_horizon/probes/live_probe.sqlite3 \
+  --mode live \
+  --execution-mode live \
+  --allow-live-execution \
+  --bridge-polygon-usdc-to-usdce \
   --approve-allowances \
   --confirm-live-order \
   --max-live-orders-total 1 \

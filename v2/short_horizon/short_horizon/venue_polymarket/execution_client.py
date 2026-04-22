@@ -5,13 +5,16 @@ import inspect
 import os
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable
 
 
 DEFAULT_CLOB_HOST = "https://clob.polymarket.com"
 DEFAULT_CHAIN_ID = 137
 DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
+DEFAULT_BRIDGE_HOST = "https://bridge.polymarket.com"
 PRIVATE_KEY_ENV_VAR = "POLY_PRIVATE_KEY"
+POLYGON_NATIVE_USDC_TOKEN = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 POLYMARKET_USDC_TOKEN = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 POLYMARKET_CTF_TOKEN = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 POLYMARKET_SPENDER_ADDRESSES = (
@@ -23,8 +26,10 @@ MAX_UINT256 = (1 << 256) - 1
 KNOWN_SELECTORS = {
     "allowance(address,address)": "dd62ed3e",
     "approve(address,uint256)": "095ea7b3",
+    "balanceOf(address)": "70a08231",
     "isApprovedForAll(address,address)": "e985e9c5",
     "setApprovalForAll(address,bool)": "a22cb465",
+    "transfer(address,uint256)": "a9059cbb",
 }
 
 
@@ -42,6 +47,18 @@ class AllowanceApprovalResult:
     spender: str
     tx_hash: str | None
     status: str
+
+
+@dataclass(frozen=True)
+class PolygonUsdcBridgeResult:
+    deposit_address: str
+    source_amount_base_unit: int
+    quoted_target_amount_base_unit: int | None
+    wallet_transfer_tx_hash: str
+    bridge_status: str
+    bridge_tx_hash: str | None
+    initial_target_balance_base_unit: int
+    final_target_balance_base_unit: int
 
 
 @dataclass(frozen=True)
@@ -225,6 +242,150 @@ class PolymarketExecutionClient:
                 results.append(AllowanceApprovalResult(asset_type="conditional", spender=spender, tx_hash=tx_hash, status="approved"))
         return results
 
+    def bridge_polygon_usdc_to_usdce(
+        self,
+        *,
+        amount_base_unit: int | None = None,
+        rpc_url: str = DEFAULT_POLYGON_RPC_URL,
+        bridge_host: str = DEFAULT_BRIDGE_HOST,
+        rpc_call: Callable[[str, list[Any]], Any] | None = None,
+        sign_transaction: Callable[[dict[str, Any]], str] | None = None,
+        signer_address: str | None = None,
+        http_post: Callable[[str, dict[str, Any]], Any] | None = None,
+        http_get: Callable[[str], Any] | None = None,
+        wait_timeout_seconds: float = 900.0,
+        poll_interval_seconds: float = 10.0,
+        sleep_func: Callable[[float], None] = time.sleep,
+    ) -> PolygonUsdcBridgeResult:
+        private_key = self._resolve_private_key()
+        rpc = rpc_call or _build_rpc_call(rpc_url)
+        resolved_signer_address = signer_address or _address_from_private_key(private_key)
+        resolved_sign_transaction = sign_transaction or (lambda tx: _sign_transaction(tx, private_key))
+        post_json = http_post or _build_http_post_json()
+        get_json = http_get or _build_http_get_json()
+
+        native_usdc_balance = _read_erc20_balance(
+            rpc,
+            token_address=POLYGON_NATIVE_USDC_TOKEN,
+            owner=resolved_signer_address,
+        )
+        resolved_amount = native_usdc_balance if amount_base_unit is None else int(amount_base_unit)
+        if resolved_amount <= 0:
+            raise ExecutionClientConfigError("Polygon native USDC balance is zero, nothing to bridge")
+        if resolved_amount > native_usdc_balance:
+            raise ExecutionClientConfigError(
+                f"requested Polygon native USDC bridge amount exceeds wallet balance: requested={resolved_amount} balance={native_usdc_balance}"
+            )
+
+        min_checkout_base_unit = _load_bridge_min_checkout_base_unit(
+            get_json,
+            bridge_host=bridge_host,
+            chain_id=str(self.chain_id),
+            token_address=POLYGON_NATIVE_USDC_TOKEN,
+        )
+        if min_checkout_base_unit is not None and resolved_amount < min_checkout_base_unit:
+            raise ExecutionClientConfigError(
+                "requested Polygon native USDC bridge amount is below the documented Polymarket bridge minimum: "
+                f"requested={resolved_amount} minimum={min_checkout_base_unit}"
+            )
+
+        initial_target_balance = _read_erc20_balance(
+            rpc,
+            token_address=POLYMARKET_USDC_TOKEN,
+            owner=resolved_signer_address,
+        )
+        deposit_payload = post_json(
+            f"{bridge_host.rstrip('/')}/deposit",
+            {"address": resolved_signer_address},
+        )
+        deposit_address = str(((deposit_payload or {}).get("address") or {}).get("evm") or "").strip()
+        if not deposit_address:
+            raise ExecutionClientConfigError("Polymarket bridge deposit response did not include an EVM deposit address")
+
+        quoted_target_amount: int | None = None
+        try:
+            quote_payload = post_json(
+                f"{bridge_host.rstrip('/')}/quote",
+                {
+                    "fromAmountBaseUnit": str(resolved_amount),
+                    "fromChainId": str(self.chain_id),
+                    "fromTokenAddress": POLYGON_NATIVE_USDC_TOKEN,
+                    "recipientAddress": resolved_signer_address,
+                    "toChainId": str(self.chain_id),
+                    "toTokenAddress": POLYMARKET_USDC_TOKEN,
+                },
+            )
+            raw_estimate = (quote_payload or {}).get("estToTokenBaseUnit")
+            if raw_estimate not in (None, ""):
+                quoted_target_amount = int(str(raw_estimate))
+        except Exception:
+            quoted_target_amount = None
+
+        initial_matches = _select_bridge_transactions(
+            (get_json(f"{bridge_host.rstrip('/')}/status/{deposit_address}") or {}).get("transactions"),
+            source_chain_id=str(self.chain_id),
+            source_token_address=POLYGON_NATIVE_USDC_TOKEN,
+            source_amount_base_unit=str(resolved_amount),
+        )
+
+        wallet_transfer_tx_hash = _send_contract_transaction(
+            rpc,
+            signer_address=resolved_signer_address,
+            sign_transaction=resolved_sign_transaction,
+            chain_id=self.chain_id,
+            to=POLYGON_NATIVE_USDC_TOKEN,
+            data=_encode_transfer_calldata(deposit_address, resolved_amount),
+            wait_timeout_seconds=wait_timeout_seconds,
+            sleep_func=sleep_func,
+        )
+
+        deadline = time.time() + float(wait_timeout_seconds)
+        initial_match_count = len(initial_matches)
+        last_status = "SUBMITTED"
+        bridge_tx_hash: str | None = None
+        matched = False
+        while time.time() < deadline:
+            payload = get_json(f"{bridge_host.rstrip('/')}/status/{deposit_address}") or {}
+            matches = _select_bridge_transactions(
+                payload.get("transactions"),
+                source_chain_id=str(self.chain_id),
+                source_token_address=POLYGON_NATIVE_USDC_TOKEN,
+                source_amount_base_unit=str(resolved_amount),
+            )
+            if len(matches) <= initial_match_count:
+                sleep_func(float(poll_interval_seconds))
+                continue
+            current = matches[-1]
+            matched = True
+            last_status = str(current.get("status") or "PROCESSING")
+            bridge_tx_hash = _as_optional_str(current.get("txHash"))
+            if last_status == "COMPLETED":
+                final_target_balance = _read_erc20_balance(
+                    rpc,
+                    token_address=POLYMARKET_USDC_TOKEN,
+                    owner=resolved_signer_address,
+                )
+                return PolygonUsdcBridgeResult(
+                    deposit_address=deposit_address,
+                    source_amount_base_unit=resolved_amount,
+                    quoted_target_amount_base_unit=quoted_target_amount,
+                    wallet_transfer_tx_hash=wallet_transfer_tx_hash,
+                    bridge_status=last_status,
+                    bridge_tx_hash=bridge_tx_hash,
+                    initial_target_balance_base_unit=initial_target_balance,
+                    final_target_balance_base_unit=final_target_balance,
+                )
+            if last_status == "FAILED":
+                raise ExecutionClientConfigError(
+                    "Polymarket bridge reported FAILED while converting Polygon native USDC to USDC.e"
+                )
+            sleep_func(float(poll_interval_seconds))
+
+        reason = "bridge transaction never appeared" if not matched else f"bridge remained in non-terminal status {last_status}"
+        raise ExecutionClientConfigError(
+            f"Timed out waiting for Polymarket bridge completion after Polygon USDC transfer: {reason}; tx={wallet_transfer_tx_hash}"
+        )
+
     def api_credentials(self) -> VenueApiCredentials:
         if self._api_credentials is None:
             raise ExecutionClientNotStartedError("Execution client API credentials unavailable before startup()")
@@ -374,6 +535,48 @@ def _build_rpc_call(rpc_url: str) -> Callable[[str, list[Any]], Any]:
     return _rpc
 
 
+def _build_http_post_json() -> Callable[[str, dict[str, Any]], Any]:
+    def _post(url: str, payload: dict[str, Any]) -> Any:
+        try:
+            import requests
+        except ImportError as exc:  # pragma: no cover
+            raise ExecutionClientConfigError("requests is required for Polymarket bridge operations") from exc
+        response = requests.post(
+            url,
+            json=payload,
+            headers={
+                "User-Agent": "polymarket-bot/short_horizon",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=45,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    return _post
+
+
+def _build_http_get_json() -> Callable[[str], Any]:
+    def _get(url: str) -> Any:
+        try:
+            import requests
+        except ImportError as exc:  # pragma: no cover
+            raise ExecutionClientConfigError("requests is required for Polymarket bridge operations") from exc
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": "polymarket-bot/short_horizon",
+                "Accept": "application/json",
+            },
+            timeout=45,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    return _get
+
+
 def _address_from_private_key(private_key: str) -> str:
     try:
         from eth_account import Account
@@ -421,6 +624,10 @@ def _encode_approve_calldata(spender: str, amount: int) -> str:
     return "0x" + _selector("approve(address,uint256)") + _encode_address(spender) + _encode_uint(amount)
 
 
+def _encode_transfer_calldata(recipient: str, amount: int) -> str:
+    return "0x" + _selector("transfer(address,uint256)") + _encode_address(recipient) + _encode_uint(amount)
+
+
 def _encode_set_approval_for_all_calldata(operator: str, approved: bool) -> str:
     return "0x" + _selector("setApprovalForAll(address,bool)") + _encode_address(operator) + _encode_bool(approved)
 
@@ -434,6 +641,68 @@ def _read_erc20_allowance(rpc: Callable[[str, list[Any]], Any], *, token_address
         ],
     )
     return int(str(result), 16)
+
+
+def _read_erc20_balance(rpc: Callable[[str, list[Any]], Any], *, token_address: str, owner: str) -> int:
+    result = rpc(
+        "eth_call",
+        [
+            {"to": token_address, "data": "0x" + _selector("balanceOf(address)") + _encode_address(owner)},
+            "latest",
+        ],
+    )
+    return int(str(result), 16)
+
+
+def _load_bridge_min_checkout_base_unit(
+    get_json: Callable[[str], Any],
+    *,
+    bridge_host: str,
+    chain_id: str,
+    token_address: str,
+) -> int | None:
+    payload = get_json(f"{bridge_host.rstrip('/')}/supported-assets") or {}
+    rows = payload.get("supportedAssets") or []
+    normalized_target = str(token_address).lower()
+    for row in rows:
+        if str(row.get("chainId") or "") != str(chain_id):
+            continue
+        token = row.get("token") or {}
+        if str(token.get("address") or "").lower() != normalized_target:
+            continue
+        min_checkout_usd = row.get("minCheckoutUsd")
+        if min_checkout_usd in (None, ""):
+            return None
+        scaled = (Decimal(str(min_checkout_usd)) * Decimal("1000000")).quantize(Decimal("1"), rounding=ROUND_DOWN)
+        return int(scaled)
+    return None
+
+
+def _select_bridge_transactions(
+    transactions: Any,
+    *,
+    source_chain_id: str,
+    source_token_address: str,
+    source_amount_base_unit: str,
+) -> list[dict[str, Any]]:
+    rows = transactions if isinstance(transactions, list) else []
+    target_token = str(source_token_address).lower()
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("fromChainId") or "") == str(source_chain_id)
+        and str(row.get("fromTokenAddress") or "").lower() == target_token
+        and str(row.get("fromAmountBaseUnit") or "") == str(source_amount_base_unit)
+    ]
+    return sorted(
+        matches,
+        key=lambda row: (
+            int(row.get("createdTimeMs") or 0),
+            str(row.get("txHash") or ""),
+            str(row.get("status") or ""),
+        ),
+    )
 
 
 def _read_erc1155_approval_for_all(rpc: Callable[[str, list[Any]], Any], *, token_address: str, owner: str, operator: str) -> bool:
@@ -490,14 +759,17 @@ __all__ = [
     "AllowanceApprovalResult",
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
+    "DEFAULT_BRIDGE_HOST",
     "DEFAULT_POLYGON_RPC_URL",
     "ExecutionClientConfigError",
     "ExecutionClientNotStartedError",
     "MAX_UINT256",
     "PolymarketExecutionClient",
+    "POLYGON_NATIVE_USDC_TOKEN",
     "POLYMARKET_CTF_TOKEN",
     "POLYMARKET_SPENDER_ADDRESSES",
     "POLYMARKET_USDC_TOKEN",
+    "PolygonUsdcBridgeResult",
     "PRIVATE_KEY_ENV_VAR",
     "VenueApiCredentials",
     "VenueCancelResult",

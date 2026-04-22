@@ -6,6 +6,7 @@ import os
 import sys
 import uuid
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from typing import Callable
 
@@ -19,7 +20,7 @@ from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
 from .telemetry import configure_logging, get_logger
 from .venue_polymarket import PolymarketUserStream
-from .venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolymarketExecutionClient
+from .venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolymarketExecutionClient, PolygonUsdcBridgeResult
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,17 @@ class AllowanceApprovalSummary:
     total_actions: int
     approved_count: int
     already_approved_count: int
+
+
+@dataclass(frozen=True)
+class PolygonUsdcBridgeSummary:
+    source_amount_base_unit: int
+    deposit_address: str
+    wallet_transfer_tx_hash: str
+    bridge_status: str
+    bridge_tx_hash: str | None
+    quoted_target_amount_base_unit: int | None
+    collateral_delta_base_unit: int
 
 
 @dataclass
@@ -270,6 +282,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Send Polygon approval transactions for Polymarket USDC + conditional-token spend before the live run",
     )
+    parser.add_argument(
+        "--bridge-polygon-usdc-to-usdce",
+        action="store_true",
+        help="Use the Polymarket bridge deposit flow to convert Polygon native USDC into Polygon USDC.e before the live run",
+    )
+    parser.add_argument(
+        "--bridge-polygon-usdc-amount",
+        default=None,
+        help="Optional Polygon native USDC amount to bridge, in decimal token units; defaults to the wallet's full native USDC balance",
+    )
     parser.add_argument("--stub-event-log-path", default=None, help="Path to a JSONL file of normalized stub events for --mode stub")
     parser.add_argument("--run-id", default=None, help="Optional explicit run_id; defaults to a fresh live_<suffix>")
     parser.add_argument("--config-hash", default="dev", help="Config hash label stored in runs table")
@@ -289,12 +311,30 @@ def generate_run_id() -> str:
     return f"live_{uuid.uuid4().hex[:12]}"
 
 
+def _parse_usdc_amount_to_base_units(parser: argparse.ArgumentParser, flag_name: str, raw_value: str) -> int:
+    try:
+        amount = Decimal(str(raw_value).strip())
+    except (InvalidOperation, ValueError):
+        parser.error(f"{flag_name} must be a positive decimal amount")
+    if amount <= 0:
+        parser.error(f"{flag_name} must be positive")
+    scaled = (amount * Decimal("1000000")).quantize(Decimal("1"), rounding=ROUND_DOWN)
+    if scaled <= 0:
+        parser.error(f"{flag_name} is too small after 6-decimal USDC rounding")
+    normalized = scaled / Decimal("1000000")
+    if normalized != amount:
+        parser.error(f"{flag_name} must use at most 6 decimal places")
+    return int(scaled)
+
+
 def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> ExecutionMode:
     execution_mode = ExecutionMode(str(args.execution_mode))
     kill_switch = getattr(args, "kill_switch", False)
     if kill_switch:
         if getattr(args, "approve_allowances", False):
             parser.error("--approve-allowances cannot be combined with --kill-switch")
+        if getattr(args, "bridge_polygon_usdc_to_usdce", False):
+            parser.error("--bridge-polygon-usdc-to-usdce cannot be combined with --kill-switch")
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
             parser.error("--kill-switch requires --mode live and --execution-mode live")
         if not args.allow_live_execution:
@@ -324,6 +364,15 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if getattr(args, "approve_allowances", False):
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
             parser.error("--approve-allowances requires --mode live and --execution-mode live")
+    bridge_requested = bool(getattr(args, "bridge_polygon_usdc_to_usdce", False))
+    bridge_amount = getattr(args, "bridge_polygon_usdc_amount", None)
+    if bridge_requested:
+        if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
+            parser.error("--bridge-polygon-usdc-to-usdce requires --mode live and --execution-mode live")
+        if bridge_amount is not None:
+            _parse_usdc_amount_to_base_units(parser, "--bridge-polygon-usdc-amount", bridge_amount)
+    elif bridge_amount is not None:
+        parser.error("--bridge-polygon-usdc-amount requires --bridge-polygon-usdc-to-usdce")
     if getattr(args, "confirm_live_order", False) and not sys.stdin.isatty():
         parser.error("--confirm-live-order requires an interactive TTY")
     return execution_mode
@@ -461,6 +510,38 @@ def execute_allowance_approve(
     return summary
 
 
+def execute_polygon_usdc_bridge(
+    run_id: str | None = None,
+    *,
+    execution_client: PolymarketExecutionClient | None = None,
+    amount_base_unit: int | None = None,
+) -> PolygonUsdcBridgeSummary:
+    logger = get_logger("short_horizon.live_runner", run_id=run_id or "bridge_polygon_usdc")
+    client = execution_client or PolymarketExecutionClient()
+    result: PolygonUsdcBridgeResult = client.bridge_polygon_usdc_to_usdce(amount_base_unit=amount_base_unit)
+    collateral_delta = result.final_target_balance_base_unit - result.initial_target_balance_base_unit
+    summary = PolygonUsdcBridgeSummary(
+        source_amount_base_unit=result.source_amount_base_unit,
+        deposit_address=result.deposit_address,
+        wallet_transfer_tx_hash=result.wallet_transfer_tx_hash,
+        bridge_status=result.bridge_status,
+        bridge_tx_hash=result.bridge_tx_hash,
+        quoted_target_amount_base_unit=result.quoted_target_amount_base_unit,
+        collateral_delta_base_unit=collateral_delta,
+    )
+    logger.info(
+        "live_bridge_completed",
+        source_amount_base_unit=summary.source_amount_base_unit,
+        deposit_address=summary.deposit_address,
+        wallet_transfer_tx_hash=summary.wallet_transfer_tx_hash,
+        bridge_status=summary.bridge_status,
+        bridge_tx_hash=summary.bridge_tx_hash,
+        quoted_target_amount_base_unit=summary.quoted_target_amount_base_unit,
+        collateral_delta_base_unit=summary.collateral_delta_base_unit,
+    )
+    return summary
+
+
 def _client_is_started(client: object) -> bool:
     if getattr(client, "started", False):
         return True
@@ -490,6 +571,8 @@ def main(argv: list[str] | None = None) -> None:
         execution_mode=execution_mode.value,
         safe_mode=bool(args.safe_mode),
         approve_allowances=bool(getattr(args, "approve_allowances", False)),
+        bridge_polygon_usdc_to_usdce=bool(getattr(args, "bridge_polygon_usdc_to_usdce", False)),
+        bridge_polygon_usdc_amount=getattr(args, "bridge_polygon_usdc_amount", None),
         confirm_live_order=bool(getattr(args, "confirm_live_order", False)),
         max_live_orders_total=getattr(args, "max_live_orders_total", None),
         db_path=str(args.db_path),
@@ -509,8 +592,24 @@ def main(argv: list[str] | None = None) -> None:
         )
     else:
         execution_client = None
-        if execution_mode is ExecutionMode.LIVE and getattr(args, "approve_allowances", False):
+        if execution_mode is ExecutionMode.LIVE and (
+            getattr(args, "approve_allowances", False) or getattr(args, "bridge_polygon_usdc_to_usdce", False)
+        ):
             execution_client = PolymarketExecutionClient()
+        if execution_mode is ExecutionMode.LIVE and getattr(args, "bridge_polygon_usdc_to_usdce", False):
+            amount_base_unit = None
+            if getattr(args, "bridge_polygon_usdc_amount", None) is not None:
+                amount_base_unit = _parse_usdc_amount_to_base_units(
+                    parser,
+                    "--bridge-polygon-usdc-amount",
+                    str(args.bridge_polygon_usdc_amount),
+                )
+            execute_polygon_usdc_bridge(
+                args.run_id,
+                execution_client=execution_client,
+                amount_base_unit=amount_base_unit,
+            )
+        if execution_mode is ExecutionMode.LIVE and getattr(args, "approve_allowances", False):
             execute_allowance_approve(args.run_id, execution_client=execution_client)
         summary = asyncio.run(
             run_live(
