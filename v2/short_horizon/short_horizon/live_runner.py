@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 import uuid
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -46,6 +47,36 @@ class PolygonUsdcBridgeSummary:
     bridge_tx_hash: str | None
     quoted_target_amount_base_unit: int | None
     collateral_delta_base_unit: int
+
+
+@dataclass(frozen=True)
+class ResolvedRedeemSummary:
+    total_actions: int
+    redeemed_count: int
+    skipped_negative_risk_count: int
+    skipped_proxy_wallet_count: int
+    error_count: int
+
+
+class PeriodicResolvedRedeemSweeper:
+    def __init__(
+        self,
+        *,
+        interval_seconds: float,
+        run_id: str | None,
+        execution_client: PolymarketExecutionClient,
+    ) -> None:
+        self.interval_seconds = float(interval_seconds)
+        self.run_id = run_id
+        self.execution_client = execution_client
+        self._next_run_monotonic = 0.0
+
+    def maybe_run(self) -> ResolvedRedeemSummary | None:
+        now = time.monotonic()
+        if now < self._next_run_monotonic:
+            return None
+        self._next_run_monotonic = now + self.interval_seconds
+        return execute_resolved_redeem(self.run_id, execution_client=self.execution_client)
 
 
 @dataclass
@@ -182,6 +213,7 @@ async def run_live(
     execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
     execution_client: PolymarketExecutionClient | None = None,
     live_submit_guard: LiveSubmitGuard | None = None,
+    resolved_redeem_interval_seconds: float | None = None,
 ) -> RunnerSummary:
     resolved_mode = ExecutionMode(str(execution_mode))
     runtime = build_live_runtime(db_path=db_path, run_id=run_id, config=config, config_hash=config_hash)
@@ -191,8 +223,19 @@ async def run_live(
         client.startup()
         reconcile_runtime_orders(runtime=runtime, execution_client=client, execution_mode=resolved_mode)
     source = source or build_live_source(execution_mode=resolved_mode, execution_client=client)
+    redeem_sweeper = None
+    if resolved_mode is ExecutionMode.LIVE and resolved_redeem_interval_seconds is not None:
+        if client is None:
+            raise ValueError("execution_client is required for periodic redeem sweeps")
+        redeem_sweeper = PeriodicResolvedRedeemSweeper(
+            interval_seconds=resolved_redeem_interval_seconds,
+            run_id=runtime.store.current_run_id,
+            execution_client=client,
+        )
     try:
         await source.start()
+        if redeem_sweeper is not None:
+            redeem_sweeper.maybe_run()
         return await drive_runtime_event_stream(
             events=source.events,
             runtime=runtime,
@@ -203,6 +246,7 @@ async def run_live(
             execution_mode=resolved_mode,
             execution_client=client,
             live_submit_guard=live_submit_guard,
+            after_event_callback=(None if redeem_sweeper is None else lambda _event: redeem_sweeper.maybe_run()),
         )
     finally:
         await source.stop()
@@ -284,6 +328,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Send Polygon approval transactions for Polymarket USDC + conditional-token spend before the live run",
     )
     parser.add_argument(
+        "--redeem-resolved",
+        action="store_true",
+        help="Sweep regular resolved Polymarket positions via the wallet positions API and redeem them before the live run",
+    )
+    parser.add_argument(
+        "--redeem-resolved-interval-seconds",
+        type=float,
+        default=None,
+        help="Optional periodic cadence for resolved-position redeem sweeps during a live run; requires --redeem-resolved",
+    )
+    parser.add_argument(
         "--bridge-polygon-usdc-to-usdce",
         action="store_true",
         help="Use the Polymarket bridge deposit flow to convert Polygon native USDC into Polygon USDC.e before the live run",
@@ -334,6 +389,10 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if kill_switch:
         if getattr(args, "approve_allowances", False):
             parser.error("--approve-allowances cannot be combined with --kill-switch")
+        if getattr(args, "redeem_resolved", False):
+            parser.error("--redeem-resolved cannot be combined with --kill-switch")
+        if getattr(args, "redeem_resolved_interval_seconds", None) is not None:
+            parser.error("--redeem-resolved-interval-seconds cannot be combined with --kill-switch")
         if getattr(args, "bridge_polygon_usdc_to_usdce", False):
             parser.error("--bridge-polygon-usdc-to-usdce cannot be combined with --kill-switch")
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
@@ -365,6 +424,15 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if getattr(args, "approve_allowances", False):
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
             parser.error("--approve-allowances requires --mode live and --execution-mode live")
+    redeem_requested = bool(getattr(args, "redeem_resolved", False))
+    redeem_interval = getattr(args, "redeem_resolved_interval_seconds", None)
+    if redeem_requested:
+        if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
+            parser.error("--redeem-resolved requires --mode live and --execution-mode live")
+    elif redeem_interval is not None:
+        parser.error("--redeem-resolved-interval-seconds requires --redeem-resolved")
+    if redeem_interval is not None and redeem_interval <= 0:
+        parser.error("--redeem-resolved-interval-seconds must be positive when provided")
     bridge_requested = bool(getattr(args, "bridge_polygon_usdc_to_usdce", False))
     bridge_amount = getattr(args, "bridge_polygon_usdc_amount", None)
     if bridge_requested:
@@ -543,6 +611,54 @@ def execute_polygon_usdc_bridge(
     return summary
 
 
+def execute_resolved_redeem(
+    run_id: str | None = None,
+    *,
+    execution_client: PolymarketExecutionClient | None = None,
+) -> ResolvedRedeemSummary:
+    logger = get_logger("short_horizon.live_runner", run_id=run_id or "redeem_resolved")
+    client = execution_client or PolymarketExecutionClient()
+    results = client.redeem_resolved_positions()
+    redeemed_count = 0
+    skipped_negative_risk_count = 0
+    skipped_proxy_wallet_count = 0
+    error_count = 0
+    for result in results:
+        if result.status == "redeemed":
+            redeemed_count += 1
+        elif result.status == "skipped_negative_risk":
+            skipped_negative_risk_count += 1
+        elif result.status == "skipped_proxy_wallet":
+            skipped_proxy_wallet_count += 1
+        elif result.status == "error":
+            error_count += 1
+        logger.info(
+            "live_redeem_status",
+            condition_id=result.condition_id,
+            status=result.status,
+            tx_hash=result.tx_hash,
+            position_count=result.position_count,
+            proxy_wallet=result.proxy_wallet,
+            reason=result.reason,
+        )
+    summary = ResolvedRedeemSummary(
+        total_actions=len(results),
+        redeemed_count=redeemed_count,
+        skipped_negative_risk_count=skipped_negative_risk_count,
+        skipped_proxy_wallet_count=skipped_proxy_wallet_count,
+        error_count=error_count,
+    )
+    logger.info(
+        "live_redeem_completed",
+        total_actions=summary.total_actions,
+        redeemed_count=summary.redeemed_count,
+        skipped_negative_risk_count=summary.skipped_negative_risk_count,
+        skipped_proxy_wallet_count=summary.skipped_proxy_wallet_count,
+        error_count=summary.error_count,
+    )
+    return summary
+
+
 def _client_is_started(client: object) -> bool:
     if getattr(client, "started", False):
         return True
@@ -571,6 +687,8 @@ def main(argv: list[str] | None = None) -> None:
         input_mode=args.mode,
         execution_mode=execution_mode.value,
         safe_mode=bool(args.safe_mode),
+        redeem_resolved=bool(getattr(args, "redeem_resolved", False)),
+        redeem_resolved_interval_seconds=getattr(args, "redeem_resolved_interval_seconds", None),
         approve_allowances=bool(getattr(args, "approve_allowances", False)),
         bridge_polygon_usdc_to_usdce=bool(getattr(args, "bridge_polygon_usdc_to_usdce", False)),
         bridge_polygon_usdc_amount=getattr(args, "bridge_polygon_usdc_amount", None),
@@ -594,9 +712,13 @@ def main(argv: list[str] | None = None) -> None:
     else:
         execution_client = None
         if execution_mode is ExecutionMode.LIVE and (
-            getattr(args, "approve_allowances", False) or getattr(args, "bridge_polygon_usdc_to_usdce", False)
+            getattr(args, "redeem_resolved", False)
+            or getattr(args, "approve_allowances", False)
+            or getattr(args, "bridge_polygon_usdc_to_usdce", False)
         ):
             execution_client = PolymarketExecutionClient()
+        if execution_mode is ExecutionMode.LIVE and getattr(args, "redeem_resolved", False):
+            execute_resolved_redeem(args.run_id, execution_client=execution_client)
         if execution_mode is ExecutionMode.LIVE and getattr(args, "bridge_polygon_usdc_to_usdce", False):
             amount_base_unit = None
             if getattr(args, "bridge_polygon_usdc_amount", None) is not None:
@@ -623,6 +745,7 @@ def main(argv: list[str] | None = None) -> None:
                 execution_mode=execution_mode,
                 execution_client=execution_client,
                 live_submit_guard=build_live_submit_guard(args),
+                resolved_redeem_interval_seconds=getattr(args, "redeem_resolved_interval_seconds", None),
             )
         )
     logger = get_logger("short_horizon.live_runner", run_id=summary.run_id)

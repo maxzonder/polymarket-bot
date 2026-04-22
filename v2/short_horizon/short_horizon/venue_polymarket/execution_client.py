@@ -7,12 +7,14 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable
+from urllib.parse import urlencode
 
 
 DEFAULT_CLOB_HOST = "https://clob.polymarket.com"
 DEFAULT_CHAIN_ID = 137
 DEFAULT_POLYGON_RPC_URL = "https://polygon-bor-rpc.publicnode.com"
 DEFAULT_BRIDGE_HOST = "https://bridge.polymarket.com"
+DEFAULT_DATA_API_HOST = "https://data-api.polymarket.com"
 PRIVATE_KEY_ENV_VAR = "POLY_PRIVATE_KEY"
 POLYGON_NATIVE_USDC_TOKEN = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 POLYMARKET_USDC_TOKEN = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -28,9 +30,11 @@ KNOWN_SELECTORS = {
     "approve(address,uint256)": "095ea7b3",
     "balanceOf(address)": "70a08231",
     "isApprovedForAll(address,address)": "e985e9c5",
+    "redeemPositions(address,bytes32,bytes32,uint256[])": "01b7037c",
     "setApprovalForAll(address,bool)": "a22cb465",
     "transfer(address,uint256)": "a9059cbb",
 }
+ZERO_BYTES32 = "0x" + ("00" * 32)
 
 
 class ExecutionClientConfigError(RuntimeError):
@@ -59,6 +63,29 @@ class PolygonUsdcBridgeResult:
     bridge_tx_hash: str | None
     initial_target_balance_base_unit: int
     final_target_balance_base_unit: int
+
+
+@dataclass(frozen=True)
+class ResolvedPosition:
+    condition_id: str
+    size: float
+    redeemable: bool
+    mergeable: bool
+    negative_risk: bool
+    proxy_wallet: str | None = None
+    outcome: str | None = None
+    outcome_index: int | None = None
+    title: str | None = None
+
+
+@dataclass(frozen=True)
+class RedeemResult:
+    condition_id: str
+    status: str
+    tx_hash: str | None = None
+    position_count: int = 0
+    proxy_wallet: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -386,6 +413,171 @@ class PolymarketExecutionClient:
             f"Timed out waiting for Polymarket bridge completion after Polygon USDC transfer: {reason}; tx={wallet_transfer_tx_hash}"
         )
 
+    def signer_address(self) -> str:
+        private_key = self._resolve_private_key()
+        return _address_from_private_key(private_key)
+
+    def list_resolved_positions(
+        self,
+        *,
+        data_api_host: str = DEFAULT_DATA_API_HOST,
+        http_get: Callable[[str], Any] | None = None,
+        user_address: str | None = None,
+    ) -> list[ResolvedPosition]:
+        get_json = http_get or _build_http_get_json()
+        resolved_user = str(user_address or self.signer_address()).strip()
+        query = urlencode({"user": resolved_user, "sizeThreshold": "0"})
+        payload = get_json(f"{data_api_host.rstrip('/')}/positions?{query}")
+        rows = payload if isinstance(payload, list) else []
+
+        positions: list[ResolvedPosition] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                size = float(row.get("size") or 0.0)
+            except (TypeError, ValueError):
+                size = 0.0
+            positions.append(
+                ResolvedPosition(
+                    condition_id=str(row.get("conditionId") or "").strip(),
+                    size=size,
+                    redeemable=bool(row.get("redeemable") or row.get("settled")),
+                    mergeable=bool(row.get("mergeable")),
+                    negative_risk=bool(row.get("negativeRisk")),
+                    proxy_wallet=_as_optional_str(row.get("proxyWallet")),
+                    outcome=_as_optional_str(row.get("outcome")),
+                    outcome_index=_as_optional_int(row.get("outcomeIndex")),
+                    title=_as_optional_str(row.get("title")),
+                )
+            )
+        return positions
+
+    def redeem_positions(
+        self,
+        *,
+        condition_id: str,
+        index_sets: tuple[int, ...] = (1, 2),
+        collateral_token: str = POLYMARKET_USDC_TOKEN,
+        parent_collection_id: str = ZERO_BYTES32,
+        rpc_url: str = DEFAULT_POLYGON_RPC_URL,
+        rpc_call: Callable[[str, list[Any]], Any] | None = None,
+        sign_transaction: Callable[[dict[str, Any]], str] | None = None,
+        signer_address: str | None = None,
+        wait_timeout_seconds: float = 300.0,
+        sleep_func: Callable[[float], None] = time.sleep,
+    ) -> str:
+        private_key = self._resolve_private_key()
+        rpc = rpc_call or _build_rpc_call(rpc_url)
+        resolved_signer_address = signer_address or _address_from_private_key(private_key)
+        resolved_sign_transaction = sign_transaction or (lambda tx: _sign_transaction(tx, private_key))
+        normalized_condition_id = _normalize_bytes32(condition_id, field_name="condition_id")
+        normalized_parent_collection_id = _normalize_bytes32(parent_collection_id, field_name="parent_collection_id")
+        if not index_sets:
+            raise ExecutionClientConfigError("redeemPositions requires at least one index set")
+        return _send_contract_transaction(
+            rpc,
+            signer_address=resolved_signer_address,
+            sign_transaction=resolved_sign_transaction,
+            chain_id=self.chain_id,
+            to=POLYMARKET_CTF_TOKEN,
+            data=_encode_redeem_positions_calldata(
+                collateral_token=collateral_token,
+                parent_collection_id=normalized_parent_collection_id,
+                condition_id=normalized_condition_id,
+                index_sets=index_sets,
+            ),
+            wait_timeout_seconds=wait_timeout_seconds,
+            sleep_func=sleep_func,
+        )
+
+    def redeem_resolved_positions(
+        self,
+        *,
+        data_api_host: str = DEFAULT_DATA_API_HOST,
+        http_get: Callable[[str], Any] | None = None,
+        rpc_url: str = DEFAULT_POLYGON_RPC_URL,
+        rpc_call: Callable[[str, list[Any]], Any] | None = None,
+        sign_transaction: Callable[[dict[str, Any]], str] | None = None,
+        signer_address: str | None = None,
+        wait_timeout_seconds: float = 300.0,
+        sleep_func: Callable[[float], None] = time.sleep,
+    ) -> list[RedeemResult]:
+        resolved_signer_address = str(signer_address or self.signer_address()).strip().lower()
+        positions = self.list_resolved_positions(
+            data_api_host=data_api_host,
+            http_get=http_get,
+            user_address=resolved_signer_address,
+        )
+
+        grouped: dict[str, list[ResolvedPosition]] = {}
+        for position in positions:
+            if not position.condition_id or position.size <= 0:
+                continue
+            grouped.setdefault(position.condition_id.lower(), []).append(position)
+
+        results: list[RedeemResult] = []
+        for condition_key, rows in sorted(grouped.items()):
+            redeemable_rows = [row for row in rows if row.redeemable]
+            if not redeemable_rows:
+                continue
+            if any(row.negative_risk for row in redeemable_rows):
+                results.append(
+                    RedeemResult(
+                        condition_id=condition_key,
+                        status="skipped_negative_risk",
+                        position_count=len(redeemable_rows),
+                        reason="negative-risk redeem path is not implemented in this client",
+                    )
+                )
+                continue
+            proxy_wallets = {
+                str(row.proxy_wallet).strip().lower()
+                for row in redeemable_rows
+                if str(row.proxy_wallet or "").strip()
+            }
+            if proxy_wallets and proxy_wallets != {resolved_signer_address}:
+                proxy_wallet = sorted(proxy_wallets)[0]
+                results.append(
+                    RedeemResult(
+                        condition_id=condition_key,
+                        status="skipped_proxy_wallet",
+                        position_count=len(redeemable_rows),
+                        proxy_wallet=proxy_wallet,
+                        reason="redeemable position is held by a different proxy wallet",
+                    )
+                )
+                continue
+            try:
+                tx_hash = self.redeem_positions(
+                    condition_id=condition_key,
+                    rpc_url=rpc_url,
+                    rpc_call=rpc_call,
+                    sign_transaction=sign_transaction,
+                    signer_address=resolved_signer_address,
+                    wait_timeout_seconds=wait_timeout_seconds,
+                    sleep_func=sleep_func,
+                )
+            except Exception as exc:
+                results.append(
+                    RedeemResult(
+                        condition_id=condition_key,
+                        status="error",
+                        position_count=len(redeemable_rows),
+                        reason=str(exc),
+                    )
+                )
+                continue
+            results.append(
+                RedeemResult(
+                    condition_id=condition_key,
+                    status="redeemed",
+                    tx_hash=tx_hash,
+                    position_count=len(redeemable_rows),
+                )
+            )
+        return results
+
     def api_credentials(self) -> VenueApiCredentials:
         if self._api_credentials is None:
             raise ExecutionClientNotStartedError("Execution client API credentials unavailable before startup()")
@@ -620,6 +812,15 @@ def _encode_bool(value: bool) -> str:
     return ("1" if value else "0").rjust(64, "0")
 
 
+def _encode_bytes32(value: str) -> str:
+    return _normalize_bytes32(value, field_name="bytes32").replace("0x", "")
+
+
+def _encode_uint_array(values: tuple[int, ...] | list[int]) -> str:
+    normalized = tuple(int(value) for value in values)
+    return _encode_uint(len(normalized)) + "".join(_encode_uint(value) for value in normalized)
+
+
 def _encode_approve_calldata(spender: str, amount: int) -> str:
     return "0x" + _selector("approve(address,uint256)") + _encode_address(spender) + _encode_uint(amount)
 
@@ -630,6 +831,23 @@ def _encode_transfer_calldata(recipient: str, amount: int) -> str:
 
 def _encode_set_approval_for_all_calldata(operator: str, approved: bool) -> str:
     return "0x" + _selector("setApprovalForAll(address,bool)") + _encode_address(operator) + _encode_bool(approved)
+
+
+def _encode_redeem_positions_calldata(
+    *,
+    collateral_token: str,
+    parent_collection_id: str,
+    condition_id: str,
+    index_sets: tuple[int, ...] | list[int],
+) -> str:
+    head = (
+        _encode_address(collateral_token)
+        + _encode_bytes32(parent_collection_id)
+        + _encode_bytes32(condition_id)
+        + _encode_uint(32 * 4)
+    )
+    tail = _encode_uint_array(index_sets)
+    return "0x" + _selector("redeemPositions(address,bytes32,bytes32,uint256[])") + head + tail
 
 
 def _read_erc20_allowance(rpc: Callable[[str, list[Any]], Any], *, token_address: str, owner: str, spender: str) -> int:
@@ -755,11 +973,32 @@ def _send_contract_transaction(
     raise ExecutionClientConfigError(f"Timed out waiting for Polygon approval receipt: {tx_hash}")
 
 
+def _normalize_bytes32(value: str, *, field_name: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized.startswith("0x"):
+        normalized = normalized[2:]
+    if len(normalized) > 64:
+        raise ExecutionClientConfigError(f"{field_name} must fit in bytes32")
+    if any(ch not in "0123456789abcdef" for ch in normalized):
+        raise ExecutionClientConfigError(f"{field_name} must be hex")
+    return "0x" + normalized.rjust(64, "0")
+
+
+def _as_optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 __all__ = [
     "AllowanceApprovalResult",
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
     "DEFAULT_BRIDGE_HOST",
+    "DEFAULT_DATA_API_HOST",
     "DEFAULT_POLYGON_RPC_URL",
     "ExecutionClientConfigError",
     "ExecutionClientNotStartedError",
@@ -771,9 +1010,12 @@ __all__ = [
     "POLYMARKET_USDC_TOKEN",
     "PolygonUsdcBridgeResult",
     "PRIVATE_KEY_ENV_VAR",
+    "RedeemResult",
+    "ResolvedPosition",
     "VenueApiCredentials",
     "VenueCancelResult",
     "VenueOrderRequest",
     "VenueOrderState",
     "VenuePlaceResult",
+    "ZERO_BYTES32",
 ]

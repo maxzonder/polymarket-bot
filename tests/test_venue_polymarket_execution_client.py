@@ -13,6 +13,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 
 from short_horizon.venue_polymarket import (
     MAX_UINT256,
+    DEFAULT_DATA_API_HOST,
     POLYGON_NATIVE_USDC_TOKEN,
     POLYMARKET_CTF_TOKEN,
     POLYMARKET_SPENDER_ADDRESSES,
@@ -20,6 +21,7 @@ from short_horizon.venue_polymarket import (
     ExecutionClientConfigError,
     PolymarketExecutionClient,
     PolygonUsdcBridgeResult,
+    ZERO_BYTES32,
     VenueApiCredentials,
     VenueOrderRequest,
 )
@@ -428,6 +430,122 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
                 )
 
         self.assertIn("below the documented Polymarket bridge minimum", str(ctx.exception))
+
+    def test_redeem_positions_encodes_ctf_call_and_waits_for_receipt(self) -> None:
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+
+        sent_raw = []
+
+        def sign_transaction(tx):
+            sent_raw.append(tx)
+            return "0xsigned-redeem"
+
+        def rpc_call(method, params):
+            if method == "eth_getTransactionCount":
+                return "0x0"
+            if method == "eth_gasPrice":
+                return hex(100)
+            if method == "eth_estimateGas":
+                return hex(90_000)
+            if method == "eth_sendRawTransaction":
+                return "0xredeemhash"
+            if method == "eth_getTransactionReceipt":
+                return {"status": "0x1"}
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            tx_hash = client.redeem_positions(
+                condition_id="0xdd22472e552920b8438158ea7238bfadfa4f736aa4cee91a6b86c39ead110917",
+                rpc_call=rpc_call,
+                sign_transaction=sign_transaction,
+                signer_address="0x0000000000000000000000000000000000000abc",
+                sleep_func=lambda _: None,
+            )
+
+        self.assertEqual(tx_hash, "0xredeemhash")
+        self.assertEqual(len(sent_raw), 1)
+        self.assertEqual(sent_raw[0]["to"], POLYMARKET_CTF_TOKEN)
+        self.assertTrue(str(sent_raw[0]["data"]).startswith("0x01b7037c"))
+        self.assertIn(POLYMARKET_USDC_TOKEN.lower().replace("0x", ""), str(sent_raw[0]["data"]).lower())
+        self.assertIn(ZERO_BYTES32.replace("0x", ""), str(sent_raw[0]["data"]).lower())
+
+    def test_redeem_resolved_positions_groups_conditions_and_skips_unsupported_wallet_shapes(self) -> None:
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+
+        sent_raw = []
+
+        def sign_transaction(tx):
+            sent_raw.append(tx)
+            return "0xsigned-redeem"
+
+        def rpc_call(method, params):
+            if method == "eth_getTransactionCount":
+                return hex(len(sent_raw))
+            if method == "eth_gasPrice":
+                return hex(100)
+            if method == "eth_estimateGas":
+                return hex(90_000)
+            if method == "eth_sendRawTransaction":
+                return f"0xredeemhash{len(sent_raw)}"
+            if method == "eth_getTransactionReceipt":
+                return {"status": "0x1"}
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        def http_get(url):
+            self.assertEqual(
+                url,
+                f"{DEFAULT_DATA_API_HOST}/positions?user=0x0000000000000000000000000000000000000abc&sizeThreshold=0",
+            )
+            return [
+                {
+                    "conditionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                    "size": 1.2,
+                    "redeemable": True,
+                    "negativeRisk": False,
+                    "proxyWallet": "0x0000000000000000000000000000000000000abc",
+                    "outcome": "Yes",
+                    "outcomeIndex": 0,
+                },
+                {
+                    "conditionId": "0x1111111111111111111111111111111111111111111111111111111111111111",
+                    "size": 0.4,
+                    "redeemable": True,
+                    "negativeRisk": False,
+                    "proxyWallet": "0x0000000000000000000000000000000000000abc",
+                    "outcome": "No",
+                    "outcomeIndex": 1,
+                },
+                {
+                    "conditionId": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                    "size": 0.8,
+                    "redeemable": True,
+                    "negativeRisk": True,
+                },
+                {
+                    "conditionId": "0x3333333333333333333333333333333333333333333333333333333333333333",
+                    "size": 0.6,
+                    "redeemable": True,
+                    "negativeRisk": False,
+                    "proxyWallet": "0x0000000000000000000000000000000000000def",
+                },
+            ]
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            results = client.redeem_resolved_positions(
+                http_get=http_get,
+                rpc_call=rpc_call,
+                sign_transaction=sign_transaction,
+                signer_address="0x0000000000000000000000000000000000000abc",
+                sleep_func=lambda _: None,
+            )
+
+        self.assertEqual([result.status for result in results], ["redeemed", "skipped_negative_risk", "skipped_proxy_wallet"])
+        self.assertEqual(results[0].condition_id, "0x1111111111111111111111111111111111111111111111111111111111111111")
+        self.assertEqual(results[0].position_count, 2)
+        self.assertEqual(results[0].tx_hash, "0xredeemhash1")
+        self.assertEqual(results[1].condition_id, "0x2222222222222222222222222222222222222222222222222222222222222222")
+        self.assertEqual(results[2].proxy_wallet, "0x0000000000000000000000000000000000000def")
+        self.assertEqual(len(sent_raw), 1)
 
     @unittest.skipUnless(os.getenv("POLYMARKET_RUN_VENUE_TESTS") == "1", "set POLYMARKET_RUN_VENUE_TESTS=1 to hit real venue")
     def test_startup_and_list_open_orders_against_real_venue(self) -> None:

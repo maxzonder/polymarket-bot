@@ -78,6 +78,7 @@ async def drive_runtime_event_stream(
     execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
     execution_client: ExecutionVenueClient | None = None,
     live_submit_guard: LiveSubmitGuard | None = None,
+    after_event_callback=None,
 ) -> RunnerSummary:
     logger = get_logger(logger_name, run_id=runtime.store.current_run_id)
     resolved_mode = ExecutionMode(str(execution_mode))
@@ -110,6 +111,8 @@ async def drive_runtime_event_stream(
         intent_count, synthetic_count = _handle_runtime_event(event=event, runtime=runtime, execution=execution)
         order_intents += intent_count
         synthetic_order_events += synthetic_count
+        if after_event_callback is not None:
+            after_event_callback(event)
         if max_events is not None and event_count >= max_events:
             break
 

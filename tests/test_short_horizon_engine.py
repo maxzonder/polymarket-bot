@@ -21,7 +21,7 @@ from short_horizon.core import EventType, OrderState
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
-from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, PolygonUsdcBridgeSummary, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, execute_polygon_usdc_bridge, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
+from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, PolygonUsdcBridgeSummary, ResolvedRedeemSummary, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, execute_polygon_usdc_bridge, execute_resolved_redeem, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay_runner import replay_file
@@ -30,6 +30,7 @@ from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
 from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolygonUsdcBridgeResult, VenueApiCredentials, VenueOrderState, VenuePlaceResult
+from short_horizon.venue_polymarket import RedeemResult
 
 
 class _AsyncNormalizedSource:
@@ -71,6 +72,7 @@ class _FakeLiveRunnerClient:
         self.cancel_calls = []
         self.approve_calls = 0
         self.bridge_calls = []
+        self.redeem_calls = 0
         self.api_credentials_calls = 0
         self.order_lookup_by_id = {}
         self.open_orders_by_market = {}
@@ -117,6 +119,14 @@ class _FakeLiveRunnerClient:
             initial_target_balance_base_unit=0,
             final_target_balance_base_unit=2_094_000,
         )
+
+    def redeem_resolved_positions(self):
+        self.redeem_calls += 1
+        return [
+            RedeemResult(condition_id="0xcond1", status="redeemed", tx_hash="0xredeem1", position_count=2),
+            RedeemResult(condition_id="0xcond2", status="skipped_negative_risk", position_count=1, reason="unsupported"),
+            RedeemResult(condition_id="0xcond3", status="skipped_proxy_wallet", position_count=1, proxy_wallet="0xproxy"),
+        ]
 
     def get_order(self, order_id):
         if order_id in self.order_lookup_by_id:
@@ -1758,6 +1768,22 @@ class ReplayRunnerTest(unittest.TestCase):
         ])
         self.assertTrue(approval_args.approve_allowances)
 
+        redeem_args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--redeem-resolved",
+            "--redeem-resolved-interval-seconds",
+            "60",
+            "--max-events",
+            "1",
+        ])
+        self.assertTrue(redeem_args.redeem_resolved)
+        self.assertEqual(redeem_args.redeem_resolved_interval_seconds, 60.0)
+
         bridge_args = parser.parse_args([
             "live.sqlite3",
             "--mode",
@@ -1887,6 +1913,64 @@ class ReplayRunnerTest(unittest.TestCase):
         )
         self.assertTrue(client.started)
         self.assertEqual(client.approve_calls, 1)
+
+    def test_live_runner_cli_validation_for_redeem_resolved(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args([
+            "live.sqlite3",
+            "--redeem-resolved",
+            "--redeem-resolved-interval-seconds",
+            "60",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--max-events",
+            "1",
+        ])
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            self.assertEqual(validate_cli_args(parser, args), ExecutionMode.LIVE)
+
+        bad_args = parser.parse_args(["live.sqlite3", "--redeem-resolved-interval-seconds", "60"])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, bad_args)
+
+        bad_interval = parser.parse_args([
+            "live.sqlite3",
+            "--redeem-resolved",
+            "--redeem-resolved-interval-seconds",
+            "0",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--max-events",
+            "1",
+        ])
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True):
+            with self.assertRaises(SystemExit):
+                validate_cli_args(parser, bad_interval)
+
+    def test_execute_resolved_redeem_uses_client_and_summarizes(self) -> None:
+        client = _FakeLiveRunnerClient()
+
+        summary = execute_resolved_redeem("redeem_test_001", execution_client=client)
+
+        self.assertEqual(
+            summary,
+            ResolvedRedeemSummary(
+                total_actions=3,
+                redeemed_count=1,
+                skipped_negative_risk_count=1,
+                skipped_proxy_wallet_count=1,
+                error_count=0,
+            ),
+        )
+        self.assertEqual(client.redeem_calls, 1)
 
     def test_live_runner_cli_validation_for_polygon_usdc_bridge(self) -> None:
         parser = build_parser()
@@ -2022,6 +2106,9 @@ class ReplayRunnerTest(unittest.TestCase):
             "--execution-mode",
             "live",
             "--allow-live-execution",
+            "--redeem-resolved",
+            "--redeem-resolved-interval-seconds",
+            "60",
             "--bridge-polygon-usdc-to-usdce",
             "--bridge-polygon-usdc-amount",
             "2.05",
@@ -2054,6 +2141,15 @@ class ReplayRunnerTest(unittest.TestCase):
             "short_horizon.live_runner.PolymarketExecutionClient",
             return_value=_FakeLiveRunnerClient(),
         ) as client_ctor, patch(
+            "short_horizon.live_runner.execute_resolved_redeem",
+            return_value=ResolvedRedeemSummary(
+                total_actions=1,
+                redeemed_count=1,
+                skipped_negative_risk_count=0,
+                skipped_proxy_wallet_count=0,
+                error_count=0,
+            ),
+        ) as redeem_mock, patch(
             "short_horizon.live_runner.execute_polygon_usdc_bridge",
             return_value=PolygonUsdcBridgeSummary(
                 source_amount_base_unit=2_050_000,
@@ -2083,6 +2179,7 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertIsNone(main(argv))
 
         client = client_ctor.return_value
+        redeem_mock.assert_called_once_with(None, execution_client=client)
         bridge_mock.assert_called_once_with(
             None,
             execution_client=client,
@@ -2090,6 +2187,7 @@ class ReplayRunnerTest(unittest.TestCase):
         )
         approve_mock.assert_called_once_with(None, execution_client=client)
         self.assertEqual(run_live_mock.call_args.kwargs["execution_client"], client)
+        self.assertEqual(run_live_mock.call_args.kwargs["resolved_redeem_interval_seconds"], 60.0)
 
     def test_live_runner_cli_validation_requires_bounded_live_probe(self) -> None:
         parser = build_parser()
