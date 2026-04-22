@@ -18,6 +18,7 @@ class VenueConstraints:
     tick_size: float
     min_order_size: float
     size_decimals: int = 6
+    min_notional_buffer: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -44,11 +45,14 @@ def translate_place_order(
         tick_size=venue_constraints.tick_size,
         direction=policy.buy_price_rounding,
     )
-    raw_size = intent.notional_usdc / intent.entry_price
-    rounded_size = _round_size(raw_size, decimals=venue_constraints.size_decimals)
-    if rounded_size < venue_constraints.min_order_size - 1e-12:
+    target_notional = _target_buy_notional(intent=intent, venue_constraints=venue_constraints)
+    raw_size = target_notional / rounded_price
+    rounded_size = _round_size(raw_size, decimals=venue_constraints.size_decimals, direction="up")
+    effective_notional = rounded_price * rounded_size
+    minimum_notional = venue_constraints.min_order_size
+    if effective_notional + 1e-12 < minimum_notional:
         raise VenueTranslationError(
-            f"Intent {intent.intent_id} rounds to size {rounded_size} below venue minimum {venue_constraints.min_order_size}"
+            f"Intent {intent.intent_id} rounds to effective notional {effective_notional:.6f} below venue minimum {minimum_notional}"
         )
 
     client_order_id = _client_order_id(intent=intent, seed=client_order_id_seed)
@@ -86,9 +90,18 @@ def _round_price(*, price: float, tick_size: float, direction: str) -> float:
     return float(rounded_units * tick_decimal)
 
 
-def _round_size(size: float, *, decimals: int) -> float:
+def _round_size(size: float, *, decimals: int, direction: str = "down") -> float:
     quantum = Decimal("1").scaleb(-int(decimals))
-    return float(Decimal(str(size)).quantize(quantum, rounding=ROUND_DOWN))
+    rounding = ROUND_DOWN if direction == "down" else ROUND_CEILING
+    return float(Decimal(str(size)).quantize(quantum, rounding=rounding))
+
+
+def _target_buy_notional(*, intent: OrderIntent, venue_constraints: VenueConstraints) -> float:
+    minimum_notional = max(float(venue_constraints.min_order_size), 0.0)
+    if intent.notional_usdc >= minimum_notional - 1e-12:
+        buffered_minimum = minimum_notional + max(float(venue_constraints.min_notional_buffer), 0.0)
+        return max(float(intent.notional_usdc), buffered_minimum)
+    return float(intent.notional_usdc)
 
 
 def _client_order_id(*, intent: OrderIntent, seed: str | None) -> str:

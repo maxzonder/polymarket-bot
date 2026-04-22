@@ -61,10 +61,21 @@ class ExecutionOrderTranslatorTest(unittest.TestCase):
         self.assertEqual(request.token_id, "tok_yes")
         self.assertEqual(request.side, "BUY")
         self.assertAlmostEqual(request.price, 0.55)
-        self.assertAlmostEqual(request.size, 18.148820)
+        self.assertAlmostEqual(request.size, 18.181819)
         self.assertEqual(request.time_in_force, "GTC")
         self.assertFalse(request.post_only)
         self.assertIsNotNone(request.client_order_id)
+
+    def test_translate_bumps_one_dollar_buy_above_minimum_notional_floor(self) -> None:
+        request = translate_place_order(
+            self._intent(entry_price=0.65, notional_usdc=1.0),
+            self._market(),
+            VenueConstraints(tick_size=0.01, min_order_size=1.0),
+        )
+
+        self.assertAlmostEqual(request.price, 0.65)
+        self.assertAlmostEqual(request.size, 1.553847)
+        self.assertGreaterEqual(request.price * request.size, 1.009999)
 
     def test_translate_rejects_below_minimum_size_after_rounding(self) -> None:
         with self.assertRaises(VenueTranslationError) as ctx:

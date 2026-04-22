@@ -56,16 +56,16 @@ class OperatorConfirmLiveOrderGuard:
     output_func: Callable[[str], None] = print
 
     def __post_init__(self) -> None:
-        self._approved_attempts = 0
+        self._successful_submits = 0
 
     def __call__(self, intent, order_request, order_row) -> None:
-        if self.max_live_orders_total is not None and self._approved_attempts >= self.max_live_orders_total:
+        if self.max_live_orders_total is not None and self._successful_submits >= self.max_live_orders_total:
             raise LiveSubmitGuardRejected(
                 f"live order cap reached for this run: {self.max_live_orders_total}",
                 reason_code="LIVE_ORDER_LIMIT_REACHED",
             )
 
-        attempt_number = self._approved_attempts + 1
+        attempt_number = self._successful_submits + 1
         if self.require_confirmation:
             self.output_func(
                 format_live_order_confirmation(
@@ -83,7 +83,8 @@ class OperatorConfirmLiveOrderGuard:
                     reason_code="OPERATOR_DECLINED",
                 )
 
-        self._approved_attempts += 1
+    def record_submit_success(self, intent, order_request, order_row, place_result) -> None:
+        self._successful_submits += 1
 
 
 def format_live_order_confirmation(

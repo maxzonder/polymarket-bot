@@ -274,6 +274,10 @@ class ExecutionEngine:
             place_result = self.client.place_order(order_request)
         except Exception as exc:
             return [self._emit_rejected(intent=intent, order_row=order_row, send_time_ms=send_time_ms + 1, reason=str(exc), reason_code="VENUE_ERROR")]
+        if self.live_submit_guard is not None:
+            record_submit_success = getattr(self.live_submit_guard, "record_submit_success", None)
+            if callable(record_submit_success):
+                record_submit_success(intent, order_request, order_row, place_result)
         return [self._emit_live_accept(intent=intent, order_row=order_row, place_result=place_result, accepted_time_ms=send_time_ms + 1)]
 
     def _translate_order_request(self, intent: OrderIntent) -> VenueOrderRequest:
