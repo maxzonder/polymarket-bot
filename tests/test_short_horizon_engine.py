@@ -511,7 +511,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(
                 risk=RiskConfig(
-                    max_notional_per_strategy_usdc=9.0,
+                    max_notional_per_strategy_usdc=0.5,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
                     micro_live_total_stake_cap_usdc=100.0,
@@ -688,7 +688,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
 
     def test_runtime_blocks_new_intent_when_micro_live_stake_cap_would_be_exceeded(self) -> None:
         engine = ShortHorizonEngine(
-            config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=10, micro_live_total_stake_cap_usdc=15.0)),
+            config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=10, micro_live_total_stake_cap_usdc=10.0)),
             intent_store=InMemoryIntentStore(),
         )
         engine.on_market_state(self._market_state(token_id="tok_yes"))
@@ -814,7 +814,7 @@ class ExecutionEngineTest(unittest.TestCase):
             asset_slug="bitcoin",
             level=0.55,
             entry_price=0.55,
-            notional_usdc=10.0,
+            notional_usdc=1.0,
             lifecycle_fraction=0.25,
             event_time_ms=225_000,
         )
@@ -841,7 +841,7 @@ class ExecutionEngineTest(unittest.TestCase):
 
                 fill_event = execution.apply_fill(SyntheticFillRequest(order_id="ord_exec_001", event_time_ms=225_100))
                 self.assertEqual(fill_event.order_id, "ord_exec_001")
-                self.assertAlmostEqual(fill_event.fill_size, 10.0 / 0.55)
+                self.assertAlmostEqual(fill_event.fill_size, 1.0 / 0.55)
                 self.assertAlmostEqual(fill_event.remaining_size, 0.0)
 
                 conn = sqlite3.connect(db_path)
@@ -861,7 +861,7 @@ class ExecutionEngineTest(unittest.TestCase):
 
                 self.assertEqual(order_row[0], "filled")
                 self.assertEqual(order_row[1], "filled")
-                self.assertAlmostEqual(order_row[2], 10.0 / 0.55)
+                self.assertAlmostEqual(order_row[2], 1.0 / 0.55)
                 self.assertAlmostEqual(order_row[3], 0.0)
                 self.assertEqual(fill_count, 1)
                 self.assertIn("OrderAccepted", event_types)
@@ -1186,8 +1186,8 @@ class ExecutionEngineTest(unittest.TestCase):
                         source="polymarket_clob_user_ws",
                         client_order_id="ord_exec_001",
                         fill_price=0.55,
-                        fill_size=10.0 / 0.55,
-                        cumulative_filled_size=10.0 / 0.55,
+                        fill_size=1.0 / 0.55,
+                        cumulative_filled_size=1.0 / 0.55,
                         remaining_size=0.0,
                     )
                 )
@@ -1206,7 +1206,7 @@ class ExecutionEngineTest(unittest.TestCase):
                 self.assertEqual(order_row[0], "filled")
                 self.assertEqual(order_row[1], "venue-123")
                 self.assertEqual(order_row[2], "filled")
-                self.assertAlmostEqual(order_row[3], 10.0 / 0.55)
+                self.assertAlmostEqual(order_row[3], 1.0 / 0.55)
                 self.assertAlmostEqual(order_row[4], 0.0)
                 self.assertEqual(fill_count, 1)
             finally:
@@ -1395,7 +1395,7 @@ class SQLiteRuntimeStoreTest(unittest.TestCase):
                 self.assertEqual(market_row[2], "Bitcoin Up or Down?")
                 self.assertEqual(order_row[0], "intent")
                 self.assertAlmostEqual(order_row[1], 0.55)
-                self.assertAlmostEqual(order_row[2], 10.0 / 0.55)
+                self.assertAlmostEqual(order_row[2], 1.0 / 0.55)
                 self.assertEqual(event_count, 3)
                 self.assertEqual(state_row[0], "first_touch_fired:0.55")
                 self.assertIn('"level": 0.55', state_row[1])
@@ -2614,7 +2614,7 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                         client_order_id="m1:tok_yes:0.55:225000",
                         cancel_reason="user_canceled",
                         cumulative_filled_size=0.0,
-                        remaining_size=10.0 / 0.55,
+                        remaining_size=1.0 / 0.55,
                     ),
                 ]
             )

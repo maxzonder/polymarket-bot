@@ -313,6 +313,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional hard cap on total approved live order submission attempts for this run",
     )
     parser.add_argument(
+        "--target-trade-size-usdc",
+        type=float,
+        default=1.0,
+        help="Target stake per trade in USDC (default: 1.0)",
+    )
+    parser.add_argument(
         "--safe-mode",
         action="store_true",
         help="Operator-requested global safe mode: consume live data and reconciliation, but block new entry intents",
