@@ -29,101 +29,9 @@ class ReplayCaptureWriter:
         self.logger = get_logger("short_horizon.replay.capture")
 
     def wrap_execution_client(self, client: Any) -> Any:
-        if client is None or getattr(client, "_replay_capture_wrapped", False):
+        if client is None or isinstance(client, _CapturedExecutionClientProxy):
             return client
-
-        original_place_order = getattr(client, "place_order")
-        original_cancel_order = getattr(client, "cancel_order")
-        original_get_order = getattr(client, "get_order")
-        original_list_open_orders = getattr(client, "list_open_orders")
-
-        def place_order(order_request):
-            request_payload = _json_ready(order_request)
-            key = {"client_order_id": getattr(order_request, "client_order_id", None)}
-            try:
-                result = original_place_order(order_request)
-            except Exception as exc:
-                self._safe_record(
-                    kind="place_order",
-                    key=key,
-                    request=request_payload,
-                    error={"type": type(exc).__name__, "message": str(exc)},
-                )
-                raise
-            self._safe_record(
-                kind="place_order",
-                key=key,
-                request=request_payload,
-                response=_json_ready(result),
-            )
-            return result
-
-        def cancel_order(order_id: str):
-            key = {"venue_order_id": order_id}
-            try:
-                result = original_cancel_order(order_id)
-            except Exception as exc:
-                self._safe_record(
-                    kind="cancel_order",
-                    key=key,
-                    request={"venue_order_id": order_id},
-                    error={"type": type(exc).__name__, "message": str(exc)},
-                )
-                raise
-            self._safe_record(
-                kind="cancel_order",
-                key=key,
-                request={"venue_order_id": order_id},
-                response=_json_ready(result),
-            )
-            return result
-
-        def get_order(order_id: str):
-            key = {"venue_order_id": order_id}
-            try:
-                result = original_get_order(order_id)
-            except Exception as exc:
-                self._safe_record(
-                    kind="get_order",
-                    key=key,
-                    request={"venue_order_id": order_id},
-                    error={"type": type(exc).__name__, "message": str(exc)},
-                )
-                raise
-            self._safe_record(
-                kind="get_order",
-                key=key,
-                request={"venue_order_id": order_id},
-                response=_json_ready(result),
-            )
-            return result
-
-        def list_open_orders(market_id: str | None = None):
-            key = {"market_id": market_id}
-            try:
-                result = original_list_open_orders(market_id)
-            except Exception as exc:
-                self._safe_record(
-                    kind="list_open_orders",
-                    key=key,
-                    request={"market_id": market_id},
-                    error={"type": type(exc).__name__, "message": str(exc)},
-                )
-                raise
-            self._safe_record(
-                kind="list_open_orders",
-                key=key,
-                request={"market_id": market_id},
-                response=_json_ready(result),
-            )
-            return result
-
-        setattr(client, "place_order", place_order)
-        setattr(client, "cancel_order", cancel_order)
-        setattr(client, "get_order", get_order)
-        setattr(client, "list_open_orders", list_open_orders)
-        setattr(client, "_replay_capture_wrapped", True)
-        return client
+        return _CapturedExecutionClientProxy(client=client, writer=self)
 
     def captured_venue_records(self) -> list[dict[str, Any]]:
         return list(self._venue_records)
@@ -200,6 +108,96 @@ class ReplayCaptureWriter:
             "error": _json_ready(error),
         }
         self._venue_records.append(record)
+
+
+class _CapturedExecutionClientProxy:
+    def __init__(self, *, client: Any, writer: ReplayCaptureWriter):
+        self._client = client
+        self._writer = writer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    def place_order(self, order_request):
+        request_payload = _json_ready(order_request)
+        key = {"client_order_id": getattr(order_request, "client_order_id", None)}
+        try:
+            result = self._client.place_order(order_request)
+        except Exception as exc:
+            self._writer._safe_record(
+                kind="place_order",
+                key=key,
+                request=request_payload,
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
+        self._writer._safe_record(
+            kind="place_order",
+            key=key,
+            request=request_payload,
+            response=_json_ready(result),
+        )
+        return result
+
+    def cancel_order(self, order_id: str):
+        key = {"venue_order_id": order_id}
+        try:
+            result = self._client.cancel_order(order_id)
+        except Exception as exc:
+            self._writer._safe_record(
+                kind="cancel_order",
+                key=key,
+                request={"venue_order_id": order_id},
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
+        self._writer._safe_record(
+            kind="cancel_order",
+            key=key,
+            request={"venue_order_id": order_id},
+            response=_json_ready(result),
+        )
+        return result
+
+    def get_order(self, order_id: str):
+        key = {"venue_order_id": order_id}
+        try:
+            result = self._client.get_order(order_id)
+        except Exception as exc:
+            self._writer._safe_record(
+                kind="get_order",
+                key=key,
+                request={"venue_order_id": order_id},
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
+        self._writer._safe_record(
+            kind="get_order",
+            key=key,
+            request={"venue_order_id": order_id},
+            response=_json_ready(result),
+        )
+        return result
+
+    def list_open_orders(self, market_id: str | None = None):
+        key = {"market_id": market_id}
+        try:
+            result = self._client.list_open_orders(market_id)
+        except Exception as exc:
+            self._writer._safe_record(
+                kind="list_open_orders",
+                key=key,
+                request={"market_id": market_id},
+                error={"type": type(exc).__name__, "message": str(exc)},
+            )
+            raise
+        self._writer._safe_record(
+            kind="list_open_orders",
+            key=key,
+            request={"market_id": market_id},
+            response=_json_ready(result),
+        )
+        return result
 
 
 def _load_bundle_rows(*, db_path: Path, run_id: str) -> dict[str, Any]:

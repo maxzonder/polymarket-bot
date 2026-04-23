@@ -142,8 +142,8 @@ class ReplayCaptureWriterTest(unittest.TestCase):
     def test_records_place_and_cancel_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             writer = ReplayCaptureWriter(Path(tmpdir) / "capture")
-            client = _FakeLiveRunnerClient()
-            writer.wrap_execution_client(client)
+            raw_client = _FakeLiveRunnerClient()
+            client = writer.wrap_execution_client(raw_client)
 
             place_result = client.place_order(
                 VenueOrderRequest(
@@ -164,12 +164,13 @@ class ReplayCaptureWriterTest(unittest.TestCase):
             self.assertEqual(records[1]["kind"], "cancel_order")
             self.assertEqual(records[1]["key"]["venue_order_id"], place_result.order_id)
             self.assertTrue(cancel_result.success)
+            self.assertEqual(raw_client.cancel_calls, ["venue-live-1"])
 
     def test_capture_record_error_does_not_propagate_to_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             writer = ReplayCaptureWriter(Path(tmpdir) / "capture")
-            client = _FakeLiveRunnerClient()
-            writer.wrap_execution_client(client)
+            raw_client = _FakeLiveRunnerClient()
+            client = writer.wrap_execution_client(raw_client)
 
             with patch.object(writer, "_record_venue_response", side_effect=RuntimeError("boom")):
                 result = client.place_order(
@@ -184,6 +185,18 @@ class ReplayCaptureWriterTest(unittest.TestCase):
 
             self.assertEqual(result.order_id, "venue-live-1")
             self.assertEqual(writer.captured_venue_records(), [])
+            self.assertEqual(len(raw_client.place_calls), 1)
+
+    def test_wrap_execution_client_returns_proxy_without_mutating_original_client(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = ReplayCaptureWriter(Path(tmpdir) / "capture")
+            raw_client = _FakeLiveRunnerClient()
+            original_method = raw_client.place_order.__func__
+
+            proxy = writer.wrap_execution_client(raw_client)
+
+            self.assertIsNot(proxy, raw_client)
+            self.assertIs(raw_client.place_order.__func__, original_method)
 
     def test_run_stub_live_with_capture_dir_materializes_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

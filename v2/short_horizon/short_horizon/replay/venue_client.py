@@ -13,15 +13,13 @@ class CapturedResponseExecutionClient:
     """Offline execution client backed entirely by captured venue request/response records."""
 
     def __init__(self, venue_responses: list[dict[str, Any]]):
-        self._records_by_kind: dict[str, list[dict[str, Any]]] = {}
-        self._cursor_by_kind: dict[str, int] = {}
+        self._records: list[dict[str, Any]] = []
+        self._cursor = 0
         for record in venue_responses:
             kind = str(record.get("kind") or "").strip()
             if not kind:
                 raise ValueError("Captured venue response is missing kind")
-            self._records_by_kind.setdefault(kind, []).append(record)
-        for kind in self._records_by_kind:
-            self._cursor_by_kind[kind] = 0
+            self._records.append(record)
 
     def place_order(self, order_request: VenueOrderRequest) -> VenuePlaceResult:
         record = self._match_record(
@@ -82,17 +80,25 @@ class CapturedResponseExecutionClient:
         return [_parse_venue_order_state(item) for item in response]
 
     def _match_record(self, kind: str, predicate: Callable[[dict[str, Any]], bool], *, describe_expected: Callable[[], str]) -> dict[str, Any]:
-        records = self._records_by_kind.get(kind, [])
-        start = self._cursor_by_kind.get(kind, 0)
-        for index in range(start, len(records)):
-            record = records[index]
-            if predicate(record):
-                self._cursor_by_kind[kind] = index + 1
-                return record
-        raise ReplayFidelityError(
-            f"Replay fidelity mismatch for {kind}: no captured record matched ({describe_expected()}); "
-            f"searched {len(records) - start} remaining record(s)"
-        )
+        if self._cursor >= len(self._records):
+            raise ReplayFidelityError(
+                f"Replay fidelity mismatch for {kind}: no captured record remained ({describe_expected()}); "
+                "captured trace already exhausted"
+            )
+        record = self._records[self._cursor]
+        captured_kind = str(record.get("kind") or "")
+        if captured_kind != kind:
+            raise ReplayFidelityError(
+                f"Replay fidelity mismatch for {kind}: expected next captured call to be {kind}, "
+                f"but next record was {captured_kind or '<missing>'} ({_describe_record(record)})"
+            )
+        if not predicate(record):
+            raise ReplayFidelityError(
+                f"Replay fidelity mismatch for {kind}: next captured record did not match "
+                f"({describe_expected()}); captured=({_describe_record(record)})"
+            )
+        self._cursor += 1
+        return record
 
 
 def _match_place_order_request(request_payload: Any, order_request: VenueOrderRequest) -> bool:
@@ -102,6 +108,8 @@ def _match_place_order_request(request_payload: Any, order_request: VenueOrderRe
     request_client_order_id = _optional_str(getattr(order_request, "client_order_id", None))
     if payload_client_order_id is not None and request_client_order_id is not None:
         return payload_client_order_id == request_client_order_id
+    if (payload_client_order_id is None) != (request_client_order_id is None):
+        return False
     return (
         str(request_payload.get("token_id")) == str(getattr(order_request, "token_id", None))
         and str(request_payload.get("side")) == str(getattr(order_request, "side", None))
@@ -119,7 +127,17 @@ def _match_named_value(record: dict[str, Any], *, expected: Any, key_name: str) 
     key = record.get("key")
     if isinstance(key, dict) and key_name in key:
         return _optional_str(key.get(key_name)) == _optional_str(expected)
-    return expected is None
+    return False
+
+
+def _describe_record(record: dict[str, Any]) -> str:
+    request = record.get("request")
+    key = record.get("key")
+    if isinstance(request, dict) and request:
+        return f"request={request!r}"
+    if isinstance(key, dict) and key:
+        return f"key={key!r}"
+    return repr(record)
 
 
 def _raise_captured_error_if_present(kind: str, record: dict[str, Any]) -> None:
