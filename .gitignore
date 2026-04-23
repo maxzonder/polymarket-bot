@@ -211,6 +211,7 @@ logs/
 v2/*.db
 v2/*.db-shm
 v2/*.db-wal
+v2/short_horizon/artifacts/
 
 # SQLite databases (runtime data, not source)
 *.db
