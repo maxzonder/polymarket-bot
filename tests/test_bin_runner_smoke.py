@@ -29,7 +29,7 @@ class BinRunnerSmokeTest(unittest.TestCase):
         result = self._run_help("v2/short_horizon/bin/replay_runner")
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("replay", result.stdout.lower())
-        self.assertIn("event_log_path", result.stdout)
+        self.assertIn("bundle_dir", result.stdout)
 
 
 if __name__ == "__main__":

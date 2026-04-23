@@ -25,7 +25,7 @@ from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummar
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay import ReplayCaptureWriter
-from short_horizon.replay_runner import replay_file
+from short_horizon.replay_runner import replay_bundle, replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
@@ -1846,6 +1846,72 @@ class ReplayRunnerTest(unittest.TestCase):
             best_ask=best_ask,
         )
 
+    def _write_bundle(self, bundle_dir: Path, *, include_execution_accept_event: bool = False) -> None:
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        event_rows = self._sample_replay_rows()
+        if include_execution_accept_event:
+            event_rows.append(
+                {
+                    "event_type": "OrderAccepted",
+                    "event_time": 225001,
+                    "ingest_time": 225001,
+                    "order_id": "m1:tok_yes:0.55:225000",
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "side": "BUY",
+                    "price": 0.55,
+                    "size": 1.836364,
+                    "source": "execution.live_accept",
+                    "client_order_id": "captured-client-id",
+                    "venue_status": "live",
+                    "run_id": "bundle_live_001",
+                }
+            )
+
+        market_state_rows = [row for row in event_rows if row.get("event_type") == "MarketStateUpdate"]
+        venue_rows = [
+            {
+                "seq": 1,
+                "kind": "place_order",
+                "key": {"client_order_id": "captured-client-id"},
+                "request": {
+                    "token_id": "tok_yes",
+                    "side": "BUY",
+                    "price": 0.55,
+                    "size": 1.836364,
+                    "client_order_id": "captured-client-id",
+                    "time_in_force": "GTC",
+                    "post_only": False,
+                },
+                "response": {
+                    "order_id": "venue-live-1",
+                    "status": "live",
+                    "client_order_id": "captured-client-id",
+                    "raw": {"order_id": "venue-live-1", "status": "live"},
+                },
+                "error": None,
+            }
+        ]
+        manifest = {
+            "run_id": "bundle_live_001",
+            "strategy_id": "short_horizon_15m_touch_v1",
+            "config_hash": "test-config",
+            "files": {
+                "events_log": {"path": "events_log.jsonl", "count": len(event_rows)},
+                "market_state_snapshots": {"path": "market_state_snapshots.jsonl", "count": len(market_state_rows)},
+                "venue_responses": {"path": "venue_responses.jsonl", "count": len(venue_rows)},
+                "orders_final": {"path": "orders_final.jsonl", "count": 0},
+                "fills_final": {"path": "fills_final.jsonl", "count": 0},
+            },
+        }
+
+        (bundle_dir / "events_log.jsonl").write_text("\n".join(json.dumps(row) for row in event_rows) + "\n", encoding="utf-8")
+        (bundle_dir / "market_state_snapshots.jsonl").write_text("\n".join(json.dumps(row) for row in market_state_rows) + "\n", encoding="utf-8")
+        (bundle_dir / "venue_responses.jsonl").write_text("\n".join(json.dumps(row) for row in venue_rows) + "\n", encoding="utf-8")
+        (bundle_dir / "orders_final.jsonl").write_text("", encoding="utf-8")
+        (bundle_dir / "fills_final.jsonl").write_text("", encoding="utf-8")
+        (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
     def test_replay_runner_replays_jsonl_into_fresh_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -1886,6 +1952,75 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(event_count, 11)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
+
+    def test_replay_runner_replays_bundle_into_fresh_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_bundle(bundle_dir)
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+            )
+
+            self.assertEqual(summary.run_id, "bundle_live_001")
+            self.assertEqual(summary.event_count, 10)
+            self.assertEqual(summary.order_intents, 1)
+            self.assertEqual(summary.synthetic_order_events, 1)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                run_row = conn.execute(
+                    "SELECT run_id, mode, strategy_id, config_hash, finished_at FROM runs WHERE run_id = 'bundle_live_001'"
+                ).fetchone()
+                event_count = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'bundle_live_001'"
+                ).fetchone()[0]
+                order_row = conn.execute(
+                    "SELECT state, venue_order_id, venue_order_status FROM orders WHERE run_id = 'bundle_live_001' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()
+            finally:
+                conn.close()
+
+            self.assertEqual(run_row[0], "bundle_live_001")
+            self.assertEqual(run_row[1], "replay")
+            self.assertEqual(run_row[2], "short_horizon_15m_touch_v1")
+            self.assertEqual(run_row[3], "test-config")
+            self.assertIsNotNone(run_row[4])
+            self.assertEqual(event_count, 11)
+            self.assertEqual(order_row[0], "accepted")
+            self.assertEqual(order_row[1], "venue-live-1")
+            self.assertEqual(order_row[2], "live")
+
+    def test_replay_runner_bundle_filters_execution_generated_order_events_from_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_bundle(bundle_dir, include_execution_accept_event=True)
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+            )
+
+            self.assertEqual(summary.event_count, 10)
+
+            conn = sqlite3.connect(db_path)
+            try:
+                event_count = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'bundle_live_001'"
+                ).fetchone()[0]
+                accepted_count = conn.execute(
+                    "SELECT COUNT(*) FROM events_log WHERE run_id = 'bundle_live_001' AND event_type = 'OrderAccepted'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(event_count, 11)
+            self.assertEqual(accepted_count, 1)
 
     def test_live_runner_shell_uses_same_stub_event_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
