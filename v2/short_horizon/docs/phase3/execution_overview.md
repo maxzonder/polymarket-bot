@@ -270,3 +270,7 @@ If someone starts from Phase 4, the important truths to keep in mind are:
 - the current prod collateral reality is still v1-flavored `USDC.e`, with an explicit bridge helper for native Polygon `USDC`
 - resolved-position settlement is intentionally outside strategy logic
 - operational launch hygiene matters as much as pure code correctness for prod reproducibility
+
+## 11. Replay execution hooks (Phase 4 addition)
+
+As of Phase 4, the execution client is wrapped by `ReplayCaptureWriter` during live runs if `--capture-dir` is provided. This wrapper records all request/response payloads at the boundary. During replay, the live SDK is entirely replaced by `CapturedResponseExecutionClient`, which serves those recorded responses deterministically. The core execution engine (`v2/short_horizon/short_horizon/execution/engine.py`) requires no changes to support replay — it simply receives the captured-response client instead of the real one.
