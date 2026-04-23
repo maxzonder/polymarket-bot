@@ -36,7 +36,7 @@ class ReplayCaptureWriter:
     def captured_venue_records(self) -> list[dict[str, Any]]:
         return list(self._venue_records)
 
-    def write_bundle(self, *, db_path: str | Path, run_id: str) -> dict[str, Any]:
+    def write_bundle(self, *, db_path: str | Path, run_id: str, execution_mode: str | None = None) -> dict[str, Any]:
         db_path = Path(db_path)
         bundle = _load_bundle_rows(db_path=db_path, run_id=run_id)
 
@@ -57,6 +57,7 @@ class ReplayCaptureWriter:
             "run_id": bundle["run"]["run_id"],
             "strategy_id": bundle["run"].get("strategy_id"),
             "config_hash": bundle["run"].get("config_hash"),
+            "execution_mode": execution_mode,
             "wall_clock_started_at": bundle["run"].get("started_at"),
             "wall_clock_finished_at": bundle["run"].get("finished_at"),
             "source_db_path": str(db_path),

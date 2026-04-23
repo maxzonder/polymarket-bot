@@ -11,6 +11,7 @@ from typing import Any
 
 from ..core.events import OrderCanceled, OrderIntentEvent, SkipDecisionEvent
 from ..telemetry import configure_logging, get_logger
+from .capture import TERMINAL_ORDER_STATES
 from ..replay_runner import load_replay_bundle
 
 
@@ -364,6 +365,8 @@ def _extract_cancel_intents(*, events: list[Any], orders: list[dict[str, Any]]) 
 def _extract_terminal_outcomes(orders: list[dict[str, Any]]) -> dict[str, tuple[str, ...]]:
     outcomes: dict[str, tuple[str, ...]] = {}
     for row in sorted(orders, key=lambda item: (str(item.get("last_state_change_at") or ""), str(item.get("order_id") or ""))):
+        if _optional_str(row.get("state")) not in TERMINAL_ORDER_STATES:
+            continue
         outcomes[_stable_order_identity(row)] = (
             f"state={_optional_str(row.get('state'))}",
             f"filled_qty={_fmt_float(_optional_float(row.get('cumulative_filled_size')))}",
@@ -456,12 +459,12 @@ def _bucketize_records(records: list[_TimedRecord]) -> list[tuple[str, tuple[str
 
 
 def _stable_order_identity(row: dict[str, Any]) -> str:
-    client_order_id = _optional_str(row.get("client_order_id"))
-    if client_order_id:
-        return client_order_id
     order_id = _optional_str(row.get("order_id"))
     if order_id:
         return order_id
+    client_order_id = _optional_str(row.get("client_order_id"))
+    if client_order_id:
+        return client_order_id
     return "<unknown-order>"
 
 

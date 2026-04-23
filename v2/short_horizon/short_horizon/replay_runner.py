@@ -114,6 +114,7 @@ def replay_bundle(
     bundle = load_replay_bundle(bundle_dir)
     effective_run_id = run_id or _optional_str(bundle.manifest.get("run_id")) or generate_run_id()
     effective_config_hash = config_hash or _optional_str(bundle.manifest.get("config_hash")) or "dev"
+    effective_execution_mode = _optional_str(bundle.manifest.get("execution_mode")) or "live"
     runtime = build_replay_runtime(
         db_path=db_path,
         run_id=effective_run_id,
@@ -127,7 +128,7 @@ def replay_bundle(
             runtime=runtime,
             logger_name="short_horizon.replay_runner",
             completed_event_name="replay_run_completed",
-            execution_mode="live",
+            execution_mode=effective_execution_mode,
             execution_client=execution_client,
         )
         execution_client.assert_all_records_consumed()

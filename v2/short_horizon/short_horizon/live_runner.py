@@ -205,7 +205,12 @@ def run_stub_live(
         close = getattr(store, "close", None)
         if callable(close):
             close()
-        _write_capture_bundle_best_effort(capture_writer=capture_writer, db_path=getattr(store, "path", None), run_id=runtime.store.current_run_id)
+        _write_capture_bundle_best_effort(
+            capture_writer=capture_writer,
+            db_path=getattr(store, "path", None),
+            run_id=runtime.store.current_run_id,
+            execution_mode=resolved_mode,
+        )
 
 
 async def run_live(
@@ -265,7 +270,12 @@ async def run_live(
         close = getattr(store, "close", None)
         if callable(close):
             close()
-        _write_capture_bundle_best_effort(capture_writer=capture_writer, db_path=getattr(store, "path", None), run_id=runtime.store.current_run_id)
+        _write_capture_bundle_best_effort(
+            capture_writer=capture_writer,
+            db_path=getattr(store, "path", None),
+            run_id=runtime.store.current_run_id,
+            execution_mode=resolved_mode,
+        )
 
 
 def build_live_source(
@@ -684,11 +694,15 @@ def _client_is_started(client: object) -> bool:
     return getattr(client, "_client", None) is not None
 
 
-def _write_capture_bundle_best_effort(*, capture_writer: ReplayCaptureWriter | None, db_path: str | Path | None, run_id: str | None) -> None:
+def _write_capture_bundle_best_effort(*, capture_writer: ReplayCaptureWriter | None, db_path: str | Path | None, run_id: str | None, execution_mode: ExecutionMode | str | None = None) -> None:
     if capture_writer is None or db_path is None or run_id is None:
         return
     try:
-        manifest = capture_writer.write_bundle(db_path=db_path, run_id=run_id)
+        manifest = capture_writer.write_bundle(
+            db_path=db_path,
+            run_id=run_id,
+            execution_mode=str(ExecutionMode(str(execution_mode))) if execution_mode is not None else None,
+        )
     except Exception as exc:
         capture_writer.logger.warning(
             "replay_capture_bundle_write_failed",

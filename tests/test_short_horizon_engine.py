@@ -243,6 +243,7 @@ class ReplayCaptureWriterTest(unittest.TestCase):
             self.assertEqual(manifest["run_id"], "live_capture_test_001")
             self.assertEqual(manifest["strategy_id"], "short_horizon_15m_touch_v1")
             self.assertEqual(manifest["config_hash"], "test-config")
+            self.assertEqual(manifest["execution_mode"], "synthetic")
 
     @staticmethod
     def _sample_replay_rows() -> list[dict[str, object]]:
@@ -2332,6 +2333,34 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertTrue(report.matched)
             self.assertEqual(report.diff_count, 0)
 
+    def test_compare_terminal_outcomes_matches_on_order_id_ignoring_client_order_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_bundle(bundle_dir, include_terminal_cancel_event=True)
+
+            orders_rows = [
+                json.loads(line)
+                for line in (bundle_dir / "orders_final.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            orders_rows[0]["client_order_id"] = "live-side-client-order-id"
+            (bundle_dir / "orders_final.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in orders_rows) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = replay_bundle(bundle_dir=bundle_dir, db_path=db_path)
+            report = compare_bundle_to_replay(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                replay_run_id=summary.run_id,
+            )
+
+            self.assertTrue(report.matched)
+            self.assertEqual(report.terminal_outcomes.matched[0].key, orders_rows[0]["order_id"])
+
     def test_replay_main_compare_exits_nonzero_on_decision_diff(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2420,7 +2449,7 @@ class ReplayRunnerTest(unittest.TestCase):
                 for line in (bundle_dir / "orders_final.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            orders_rows[0]["state"] = "accepted"
+            orders_rows[0]["state"] = "rejected"
             orders_rows[0]["cumulative_filled_size"] = 0.0
             (bundle_dir / "orders_final.jsonl").write_text(
                 "\n".join(json.dumps(row) for row in orders_rows) + "\n",
@@ -2436,8 +2465,8 @@ class ReplayRunnerTest(unittest.TestCase):
 
             self.assertFalse(report.matched)
             self.assertIn("Terminal outcomes: 1 diff(s)", rendered)
-            self.assertIn("mismatch order=45bfb309-fdd9-563e-9f2c-9c9ace42edda", rendered)
-            self.assertIn("live[state=accepted, filled_qty=0.000000]", rendered)
+            self.assertIn("mismatch order=m1:tok_yes:0.55:225000", rendered)
+            self.assertIn("live[state=rejected, filled_qty=0.000000]", rendered)
             self.assertIn("replay[state=cancel_confirmed, filled_qty=0.000000]", rendered)
 
     def test_live_runner_shell_uses_same_stub_event_path(self) -> None:
