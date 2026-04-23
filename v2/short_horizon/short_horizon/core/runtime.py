@@ -10,6 +10,10 @@ from ..strategy_api import StrategyIntent, TouchStrategy
 from ..telemetry import event_log_fields, get_logger
 
 
+DEFAULT_VENUE_MIN_NOTIONAL_USDC = 1.0
+DEFAULT_VENUE_TICK_SIZE = 0.01
+
+
 class StrategyRuntime:
     """Shared event-path shell for replay and live runners.
 
@@ -19,10 +23,19 @@ class StrategyRuntime:
     - persist first-touch state and order intents
     """
 
-    def __init__(self, *, strategy: TouchStrategy, intent_store: RuntimeStore):
+    def __init__(
+        self,
+        *,
+        strategy: TouchStrategy,
+        intent_store: RuntimeStore,
+        venue_min_notional_usdc: float = DEFAULT_VENUE_MIN_NOTIONAL_USDC,
+        venue_default_tick_size: float = DEFAULT_VENUE_TICK_SIZE,
+    ):
         self.strategy = strategy
         self.store = intent_store
         self.logger = get_logger("short_horizon.runtime", run_id=intent_store.current_run_id)
+        self.venue_min_notional_usdc = float(venue_min_notional_usdc)
+        self.venue_default_tick_size = float(venue_default_tick_size)
 
     def on_market_state(self, event: MarketStateUpdate) -> list[StrategyIntent]:
         log = self.logger.bind(**event_log_fields(event))
@@ -84,6 +97,7 @@ class StrategyRuntime:
                     order_id=decision.intent_id,
                     entry_price=decision.entry_price,
                     notional_usdc=decision.notional_usdc,
+                    effective_notional_usdc=self._effective_notional_usdc(decision),
                     lifecycle_fraction=decision.lifecycle_fraction,
                     strategy_id=decision.strategy_id,
                 )
@@ -116,11 +130,12 @@ class StrategyRuntime:
             )
 
         open_orders = [row for row in all_orders if str(row.get("state")) in _NON_TERMINAL_ORDER_STATES]
+        effective_notional = self._effective_notional_usdc(decision)
 
         max_notional_per_strategy_usdc = float(getattr(risk, "max_notional_per_strategy_usdc", 0.0) or 0.0)
         if max_notional_per_strategy_usdc > 0:
             current_strategy_notional = _sum_open_notional_usdc(open_orders)
-            projected_strategy_notional = current_strategy_notional + float(decision.notional_usdc)
+            projected_strategy_notional = current_strategy_notional + effective_notional
             if projected_strategy_notional > max_notional_per_strategy_usdc + 1e-9:
                 return SkipDecision(
                     reason="max_notional_per_strategy_usdc_reached",
@@ -202,7 +217,7 @@ class StrategyRuntime:
         stake_cap_usdc = float(getattr(risk, "micro_live_total_stake_cap_usdc", 0.0) or 0.0)
         if stake_cap_usdc > 0:
             current_open_notional = _sum_open_notional_usdc(open_orders)
-            projected_open_notional = current_open_notional + float(decision.notional_usdc)
+            projected_open_notional = current_open_notional + effective_notional
             if projected_open_notional > stake_cap_usdc + 1e-9:
                 return SkipDecision(
                     reason="micro_live_total_stake_cap_reached",
@@ -216,6 +231,37 @@ class StrategyRuntime:
                     ),
                 )
         return decision
+
+    def _effective_notional_usdc(self, decision: OrderIntent) -> float:
+        """Expected submitted notional after translator upscales for venue minimums.
+
+        Falls back to the raw intent notional when market metadata is missing so
+        absence of data never silently inflates cap projections.
+        """
+        tick_size = self.venue_default_tick_size
+        min_order_shares: float | None = None
+        load_latest_market_state = getattr(self.store, "load_latest_market_state", None)
+        if callable(load_latest_market_state):
+            market_state = load_latest_market_state(decision.market_id)
+            if market_state is not None:
+                if market_state.tick_size is not None:
+                    tick_size = float(market_state.tick_size)
+                if market_state.min_order_size is not None:
+                    min_order_shares = float(market_state.min_order_size)
+        if tick_size <= 0:
+            return float(decision.notional_usdc)
+        from ..execution.order_translator import VenueConstraints, estimate_effective_buy_notional
+
+        constraints = VenueConstraints(
+            tick_size=tick_size,
+            min_order_size=self.venue_min_notional_usdc,
+            min_order_shares=min_order_shares,
+        )
+        return estimate_effective_buy_notional(
+            notional_usdc=decision.notional_usdc,
+            entry_price=decision.entry_price,
+            venue_constraints=constraints,
+        )
 
 
 _NON_TERMINAL_ORDER_STATES = {

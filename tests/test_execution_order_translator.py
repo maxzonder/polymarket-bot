@@ -10,7 +10,12 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.core.models import OrderIntent
-from short_horizon.execution import VenueConstraints, VenueTranslationError, translate_place_order
+from short_horizon.execution import (
+    VenueConstraints,
+    VenueTranslationError,
+    estimate_effective_buy_notional,
+    translate_place_order,
+)
 from short_horizon.venue_polymarket.markets import MarketMetadata
 
 
@@ -123,6 +128,36 @@ class ExecutionOrderTranslatorTest(unittest.TestCase):
         )
 
         self.assertEqual(request_a.client_order_id, request_b.client_order_id)
+
+
+class EstimateEffectiveBuyNotionalTest(unittest.TestCase):
+    def test_matches_translator_output_for_plain_one_dollar_intent(self) -> None:
+        constraints = VenueConstraints(tick_size=0.01, min_order_size=1.0)
+        notional = estimate_effective_buy_notional(
+            notional_usdc=1.0,
+            entry_price=0.65,
+            venue_constraints=constraints,
+        )
+        self.assertGreaterEqual(notional, 1.009999)
+        self.assertLess(notional, 1.02)
+
+    def test_matches_translator_upscale_when_min_shares_binds(self) -> None:
+        constraints = VenueConstraints(tick_size=0.01, min_order_size=1.0, min_order_shares=5.0)
+        notional = estimate_effective_buy_notional(
+            notional_usdc=1.0,
+            entry_price=0.55,
+            venue_constraints=constraints,
+        )
+        self.assertAlmostEqual(notional, 2.75, places=6)
+
+    def test_falls_back_to_intent_on_non_positive_price(self) -> None:
+        constraints = VenueConstraints(tick_size=0.01, min_order_size=1.0)
+        notional = estimate_effective_buy_notional(
+            notional_usdc=1.0,
+            entry_price=0.0,
+            venue_constraints=constraints,
+        )
+        self.assertEqual(notional, 1.0)
 
 
 if __name__ == "__main__":

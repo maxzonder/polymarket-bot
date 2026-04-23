@@ -46,7 +46,11 @@ def translate_place_order(
         tick_size=venue_constraints.tick_size,
         direction=policy.buy_price_rounding,
     )
-    target_notional = _target_buy_notional(intent=intent, venue_constraints=venue_constraints, rounded_price=rounded_price)
+    target_notional = _target_buy_notional_from_values(
+        notional_usdc=intent.notional_usdc,
+        venue_constraints=venue_constraints,
+        rounded_price=rounded_price,
+    )
     raw_size = target_notional / rounded_price
     rounded_size = _round_size(raw_size, decimals=venue_constraints.size_decimals, direction="up")
     effective_notional = rounded_price * rounded_size
@@ -102,16 +106,57 @@ def _round_size(size: float, *, decimals: int, direction: str = "down") -> float
     return float(Decimal(str(size)).quantize(quantum, rounding=rounding))
 
 
-def _target_buy_notional(*, intent: OrderIntent, venue_constraints: VenueConstraints, rounded_price: float) -> float:
+def _target_buy_notional_from_values(
+    *,
+    notional_usdc: float,
+    venue_constraints: VenueConstraints,
+    rounded_price: float,
+) -> float:
     minimum_notional = max(float(venue_constraints.min_order_size), 0.0)
     minimum_shares = venue_constraints.min_order_shares
     minimum_shares_notional = 0.0
     if minimum_shares is not None and rounded_price > 0:
         minimum_shares_notional = max(float(minimum_shares), 0.0) * float(rounded_price)
     buffered_minimum = 0.0
-    if intent.notional_usdc >= minimum_notional - 1e-12:
+    if float(notional_usdc) >= minimum_notional - 1e-12:
         buffered_minimum = minimum_notional + max(float(venue_constraints.min_notional_buffer), 0.0)
-    return max(float(intent.notional_usdc), buffered_minimum, minimum_shares_notional)
+    return max(float(notional_usdc), buffered_minimum, minimum_shares_notional)
+
+
+def estimate_effective_buy_notional(
+    *,
+    notional_usdc: float,
+    entry_price: float,
+    venue_constraints: VenueConstraints,
+    policy: TranslationPolicy | None = None,
+) -> float:
+    """Simulate the BUY translation sizing to get expected submitted notional.
+
+    Pre-submit risk guards use this so their projections match the notional
+    the translator will actually push to venue after min-notional / min-shares
+    upscaling, rather than the raw intent target.
+    """
+    policy = policy or TranslationPolicy()
+    if entry_price <= 0:
+        return float(notional_usdc)
+    try:
+        rounded_price = _round_price(
+            price=entry_price,
+            tick_size=venue_constraints.tick_size,
+            direction=policy.buy_price_rounding,
+        )
+    except ValueError:
+        return float(notional_usdc)
+    if rounded_price <= 0:
+        return float(notional_usdc)
+    target_notional = _target_buy_notional_from_values(
+        notional_usdc=notional_usdc,
+        venue_constraints=venue_constraints,
+        rounded_price=rounded_price,
+    )
+    raw_size = target_notional / rounded_price
+    rounded_size = _round_size(raw_size, decimals=venue_constraints.size_decimals, direction="up")
+    return float(rounded_price * rounded_size)
 
 
 def _client_order_id(*, intent: OrderIntent, seed: str | None) -> str:
@@ -123,5 +168,6 @@ __all__ = [
     "TranslationPolicy",
     "VenueConstraints",
     "VenueTranslationError",
+    "estimate_effective_buy_notional",
     "translate_place_order",
 ]
