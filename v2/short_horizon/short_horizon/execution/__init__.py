@@ -7,6 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Callable, Protocol
 
+from ..core.clock import Clock, SystemClock
 from ..core.events import OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, OrderSide, TimerEvent
 from ..core.models import OrderIntent
 from ..core.order_state import OrderState
@@ -238,6 +239,7 @@ class ExecutionEngine:
         min_order_size: float = 1.0,
         translation_policy: TranslationPolicy | None = None,
         live_submit_guard: LiveSubmitGuard | None = None,
+        clock: Clock | None = None,
     ):
         self.store = store
         self.client = client
@@ -246,6 +248,7 @@ class ExecutionEngine:
         self.min_order_size = float(min_order_size)
         self.translation_policy = translation_policy or TranslationPolicy()
         self.live_submit_guard = live_submit_guard
+        self.clock = clock or SystemClock()
         self.logger = get_logger("short_horizon.execution", run_id=store.current_run_id)
 
     def handle_intent(self, intent: StrategyIntent, *, event_time_ms: int | None = None):
@@ -259,7 +262,7 @@ class ExecutionEngine:
         raise TypeError(f"Unsupported strategy intent: {type(intent)!r}")
 
     def submit(self, intent: OrderIntent, *, event_time_ms: int | None = None) -> list[OrderAccepted | OrderRejected]:
-        send_time_ms = int(event_time_ms if event_time_ms is not None else intent.event_time_ms)
+        send_time_ms = int(event_time_ms if event_time_ms is not None else self.clock.now_ms())
         order_row = self._ensure_order_row(intent)
 
         if self.mode is ExecutionMode.SYNTHETIC:
@@ -572,7 +575,7 @@ class ExecutionEngine:
         order_row = self._find_open_order(market_id=market_id, token_id=token_id)
         if order_row is None:
             return None
-        cancel_time_ms = int(event_time_ms if event_time_ms is not None else self._event_time_ms_from_order(order_row))
+        cancel_time_ms = int(event_time_ms if event_time_ms is not None else self.clock.now_ms())
         if self.mode is ExecutionMode.LIVE:
             return self._cancel_live(order_row=order_row, cancel_time_ms=cancel_time_ms, reason=reason)
         self._transition(order_row, OrderState.CANCEL_REQUESTED, event_time_ms=cancel_time_ms, venue_order_status="cancel_requested")
@@ -626,7 +629,7 @@ class ExecutionEngine:
         for order_row in self.store.load_non_terminal_orders():
             venue_state = self._lookup_venue_order_state(order_row, open_orders_by_market=open_orders_by_market)
             effective_event_time_ms = int(
-                event_time_ms if event_time_ms is not None else self._event_time_ms_from_order(order_row)
+                event_time_ms if event_time_ms is not None else self.clock.now_ms()
             )
             if venue_state is None:
                 self._reconcile_not_found_order(order_row, event_time_ms=effective_event_time_ms)

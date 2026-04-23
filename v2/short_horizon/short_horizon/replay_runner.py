@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 from .config import ShortHorizonConfig
+from .core.clock import ReplayClock
 from .core.runtime import StrategyRuntime
 from .replay import ReplayEventSource
 from .runner import RunnerSummary, drive_runtime_events
@@ -22,8 +23,9 @@ def build_replay_runtime(*, db_path: str | Path, run_id: str | None = None, conf
         config_hash=config_hash,
     )
     store = SQLiteRuntimeStore(db_path, run=run_context)
-    strategy = ShortHorizon15mTouchStrategy(config=config)
-    return StrategyRuntime(strategy=strategy, intent_store=store)
+    clock = ReplayClock()
+    strategy = ShortHorizon15mTouchStrategy(config=config, clock=clock)
+    return StrategyRuntime(strategy=strategy, intent_store=store, clock=clock)
 
 
 def replay_file(*, event_log_path: str | Path, db_path: str | Path, run_id: str | None = None, config: ShortHorizonConfig | None = None, config_hash: str = "dev") -> RunnerSummary:

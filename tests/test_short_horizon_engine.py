@@ -17,7 +17,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.config import ExecutionConfig, RiskConfig, ShortHorizonConfig
-from short_horizon.core import EventType, OrderState
+from short_horizon.core import EventType, OrderState, ReplayClock
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
@@ -204,6 +204,45 @@ class StrategyApiContractTest(unittest.TestCase):
         outputs = strategy.on_timer(TimerEvent(event_time_ms=1, ingest_time_ms=1, timer_kind="decision_tick"))
         self.assertEqual(outputs, [])
         self.assertEqual([Noop(reason="x")][0].reason, "x")
+
+    def test_touch_strategy_with_replay_clock_is_deterministic_across_identical_runs(self) -> None:
+        def run_once() -> tuple[list[PlaceOrder | Noop], int]:
+            clock = ReplayClock()
+            strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig(), clock=clock)
+            events = [
+                MarketStateUpdate(
+                    event_time_ms=200_000,
+                    ingest_time_ms=200_050,
+                    market_id="m1",
+                    token_id="tok_yes",
+                    condition_id="c1",
+                    question="Bitcoin Up or Down?",
+                    asset_slug="bitcoin",
+                    start_time_ms=0,
+                    end_time_ms=900_000,
+                    is_active=True,
+                    metadata_is_fresh=True,
+                    fee_rate_bps=10.0,
+                    fee_metadata_age_ms=1_000,
+                ),
+                BookUpdate(event_time_ms=220_000, ingest_time_ms=220_020, market_id="m1", token_id="tok_yes", best_bid=0.53, best_ask=0.54),
+                BookUpdate(event_time_ms=225_000, ingest_time_ms=225_020, market_id="m1", token_id="tok_yes", best_bid=0.54, best_ask=0.55),
+            ]
+            outputs: list[PlaceOrder | Noop] = []
+            for event in events:
+                clock.advance_to(event.event_time_ms)
+                outputs.extend(strategy.on_market_event(event))
+            return outputs, clock.now_ms()
+
+        first_outputs, first_now = run_once()
+        second_outputs, second_now = run_once()
+
+        self.assertEqual(first_outputs, second_outputs)
+        self.assertEqual(first_now, 225_000)
+        self.assertEqual(second_now, 225_000)
+        self.assertEqual(len(first_outputs), 1)
+        self.assertIsInstance(first_outputs[0], PlaceOrder)
+        self.assertIsInstance(first_outputs[0].intent, OrderIntent)
 
     def test_touch_strategy_skips_when_open_order_is_hydrated(self) -> None:
         strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig())

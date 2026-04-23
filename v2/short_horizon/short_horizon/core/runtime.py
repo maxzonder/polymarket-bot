@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from ..core.clock import Clock, SystemClock
 from ..core.events import BookUpdate, MarketStateUpdate
 from ..core.models import OrderIntent, SkipDecision
 from ..core.order_state import OrderState
@@ -30,9 +31,13 @@ class StrategyRuntime:
         intent_store: RuntimeStore,
         venue_min_notional_usdc: float = DEFAULT_VENUE_MIN_NOTIONAL_USDC,
         venue_default_tick_size: float = DEFAULT_VENUE_TICK_SIZE,
+        clock: Clock | None = None,
     ):
         self.strategy = strategy
         self.store = intent_store
+        self.clock = clock or getattr(strategy, "clock", None) or SystemClock()
+        if getattr(self.strategy, "clock", None) is not self.clock:
+            setattr(self.strategy, "clock", self.clock)
         self.logger = get_logger("short_horizon.runtime", run_id=intent_store.current_run_id)
         self.venue_min_notional_usdc = float(venue_min_notional_usdc)
         self.venue_default_tick_size = float(venue_default_tick_size)

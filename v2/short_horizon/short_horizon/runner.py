@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from .core.clock import advance_clock
 from .core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
 from .core.models import OrderIntent
 from .core.runtime import StrategyRuntime
@@ -39,6 +40,7 @@ def drive_runtime_events(
         mode=resolved_mode,
         client=execution_client,
         live_submit_guard=live_submit_guard,
+        clock=runtime.clock,
     )
     event_count = 0
     order_intents = 0
@@ -87,6 +89,7 @@ async def drive_runtime_event_stream(
         mode=resolved_mode,
         client=execution_client,
         live_submit_guard=live_submit_guard,
+        clock=runtime.clock,
     )
     event_count = 0
     order_intents = 0
@@ -134,6 +137,10 @@ async def drive_runtime_event_stream(
 
 
 def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution: ExecutionEngine) -> tuple[int, int]:
+    event_time_ms = getattr(event, "event_time_ms", None)
+    if event_time_ms is not None:
+        advance_clock(runtime.clock, int(event_time_ms))
+
     if isinstance(event, MarketStateUpdate):
         outputs = runtime.on_market_state(event)
         return 0, apply_strategy_intents(

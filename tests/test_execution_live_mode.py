@@ -10,7 +10,7 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
-from short_horizon.core import OrderState
+from short_horizon.core import OrderState, ReplayClock
 from short_horizon.events import MarketStateUpdate, OrderCanceled, OrderFilled
 from short_horizon.execution import ExecutionEngine, ExecutionMode, LiveSubmitGuardRejected
 from short_horizon.live_runner import OperatorConfirmLiveOrderGuard
@@ -185,6 +185,17 @@ class ExecutionLiveModeIntegrationTest(unittest.TestCase):
                 (store.current_run_id, order_id),
             ).fetchone()[0]
         )
+
+    def test_submit_without_explicit_event_time_uses_injected_clock(self) -> None:
+        store = self._create_store("clock_submit_001")
+        client = _FakeExecutionClient()
+        clock = ReplayClock(current_time_ms=225_321)
+        execution = ExecutionEngine(store=store, client=client, mode=ExecutionMode.LIVE, clock=clock)
+
+        events = execution.submit(self._intent())
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_time_ms, 225_322)
 
     def test_live_submit_binds_venue_order_id_on_accept(self) -> None:
         client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})

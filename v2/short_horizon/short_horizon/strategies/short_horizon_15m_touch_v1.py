@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from ..config import ShortHorizonConfig
+from ..core.clock import Clock, SystemClock
 from ..core.order_state import OrderState
 from ..core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
 from ..core.lifecycle import compute_lifecycle_fraction
@@ -55,8 +56,9 @@ class FirstTouchTracker:
 
 
 class ShortHorizon15mTouchStrategy:
-    def __init__(self, *, config: ShortHorizonConfig):
+    def __init__(self, *, config: ShortHorizonConfig, clock: Clock | None = None):
         self.config = config
+        self.clock = clock or SystemClock()
         self.touch_tracker = FirstTouchTracker(config.triggers.price_levels)
         self.market_state_by_token: dict[str, MarketState] = {}
         self.active_order_ids_by_market_token: dict[tuple[str, str], str] = {}

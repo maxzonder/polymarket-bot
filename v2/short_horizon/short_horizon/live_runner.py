@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import RiskConfig, ShortHorizonConfig
+from .core.clock import SystemClock
 from .core.runtime import StrategyRuntime
 from .execution import ExecutionEngine, ExecutionMode, LiveSubmitGuard, LiveSubmitGuardRejected
 from .market_data import LiveEventSource, MarketDataSource
@@ -166,11 +167,12 @@ def build_live_runtime(*, db_path: str | Path, run_id: str | None = None, config
         config_hash=config_hash,
     )
     store = SQLiteRuntimeStore(db_path, run=run_context)
-    strategy = ShortHorizon15mTouchStrategy(config=config)
+    clock = SystemClock()
+    strategy = ShortHorizon15mTouchStrategy(config=config, clock=clock)
     hydrate_open_orders = getattr(strategy, "hydrate_open_orders", None)
     if callable(hydrate_open_orders):
         hydrate_open_orders(store.load_non_terminal_orders())
-    return StrategyRuntime(strategy=strategy, intent_store=store)
+    return StrategyRuntime(strategy=strategy, intent_store=store, clock=clock)
 
 
 def run_stub_live(
@@ -280,7 +282,7 @@ def reconcile_runtime_orders(
     execution_mode: ExecutionMode | str,
 ) -> int:
     resolved_mode = ExecutionMode(str(execution_mode))
-    reconciled = ExecutionEngine(store=runtime.store, client=execution_client, mode=resolved_mode).reconcile_persisted_orders()
+    reconciled = ExecutionEngine(store=runtime.store, client=execution_client, mode=resolved_mode, clock=runtime.clock).reconcile_persisted_orders()
     hydrate_open_orders = getattr(runtime.strategy, "hydrate_open_orders", None)
     if callable(hydrate_open_orders):
         hydrate_open_orders(runtime.store.load_non_terminal_orders())
