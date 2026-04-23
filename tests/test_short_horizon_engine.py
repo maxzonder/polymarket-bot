@@ -589,7 +589,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(len(self.store.intents), 1)
         self.assertEqual(self.store.intents[0].entry_price, 0.55)
         self.assertEqual(self.store.intents[0].level, 0.55)
-        self.assertEqual(len(self.store.events), 3)
+        self.assertEqual(len(self.store.events), 4)
         self.assertIn(("m1", "tok_yes", "first_touch_fired:0.55"), self.store.strategy_state)
 
     def test_non_btc_eth_touch_is_skipped(self) -> None:
@@ -1614,7 +1614,7 @@ class SQLiteRuntimeStoreTest(unittest.TestCase):
                 self.assertEqual(order_row[0], "intent")
                 self.assertAlmostEqual(order_row[1], 0.55)
                 self.assertAlmostEqual(order_row[2], 1.0 / 0.55)
-                self.assertEqual(event_count, 3)
+                self.assertEqual(event_count, 4)
                 self.assertEqual(state_row[0], "first_touch_fired:0.55")
                 self.assertIn('"level": 0.55', state_row[1])
             finally:
@@ -3188,7 +3188,7 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(run_row[0], "live_real_test_001")
             self.assertEqual(run_row[1], "live")
-            self.assertEqual(event_count, 4)
+            self.assertEqual(event_count, 5)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
 
@@ -3790,7 +3790,7 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                 conn.close()
 
             self.assertEqual(order_count, 0)
-            self.assertEqual(total_events, 3)
+            self.assertEqual(total_events, 4)
 
     def test_build_live_runtime_hydrates_strategy_open_orders_from_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
