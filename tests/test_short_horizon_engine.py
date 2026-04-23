@@ -26,7 +26,7 @@ from short_horizon.probe import assert_min_book_updates_per_minute, cross_valida
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay import ReplayCaptureWriter
 from short_horizon.replay.comparator import main as replay_comparator_main
-from short_horizon.replay_runner import compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file
+from short_horizon.replay_runner import compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file, render_comparison_report
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
@@ -2275,6 +2275,43 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertTrue(report_path.exists())
             self.assertIn("Result: MATCH", stdout.getvalue())
             self.assertIn("Skip decisions: ok", report_path.read_text(encoding="utf-8"))
+
+    def test_render_comparison_report_uses_domain_terms_for_terminal_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_bundle(bundle_dir, include_terminal_cancel_event=True)
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+            )
+
+            orders_rows = [
+                json.loads(line)
+                for line in (bundle_dir / "orders_final.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            orders_rows[0]["state"] = "accepted"
+            orders_rows[0]["cumulative_filled_size"] = 0.0
+            (bundle_dir / "orders_final.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in orders_rows) + "\n",
+                encoding="utf-8",
+            )
+
+            report = compare_bundle_to_replay(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                replay_run_id=summary.run_id,
+            )
+            rendered = render_comparison_report(report)
+
+            self.assertFalse(report.matched)
+            self.assertIn("Terminal outcomes: 1 diff(s)", rendered)
+            self.assertIn("mismatch order=45bfb309-fdd9-563e-9f2c-9c9ace42edda", rendered)
+            self.assertIn("live[state=accepted, filled_qty=0.000000]", rendered)
+            self.assertIn("replay[state=cancel_confirmed, filled_qty=0.000000]", rendered)
 
     def test_live_runner_shell_uses_same_stub_event_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -128,25 +128,35 @@ def render_comparison_report(report: ReplayComparisonReport) -> str:
         f"Result: {'MATCH' if report.matched else 'DIFF'}",
     ]
     sections = (
-        ("Order intents", report.order_intents),
-        ("Skip decisions", report.skip_decisions),
-        ("Cancel intents", report.cancel_intents),
-        ("Terminal outcomes", report.terminal_outcomes),
+        ("Order intents", report.order_intents, "event_time"),
+        ("Skip decisions", report.skip_decisions, "event_time"),
+        ("Cancel intents", report.cancel_intents, "event_time"),
+        ("Terminal outcomes", report.terminal_outcomes, "order"),
     )
-    for title, section in sections:
-        lines.append(f"{title}: {'ok' if section.diff_count == 0 else f'{section.diff_count} diff(s)'}")
+    for title, section, key_label in sections:
+        lines.append(
+            f"{title}: {'ok' if section.diff_count == 0 else f'{section.diff_count} diff(s)'} "
+            f"(matched={len(section.matched)} mismatched={len(section.mismatched)} "
+            f"live_only={len(section.live_only)} replay_only={len(section.replay_only)})"
+        )
         if section.mismatched:
-            lines.append(f"  mismatched={len(section.mismatched)}")
             for item in section.mismatched:
-                lines.append(f"    - key={item.key} live={item.live} replay={item.replay}")
+                lines.append(
+                    f"  - mismatch {key_label}={_format_report_key(item.key, key_label)}"
+                    f": live[{_format_report_values(item.live)}] replay[{_format_report_values(item.replay)}]"
+                )
         if section.live_only:
-            lines.append(f"  live_only={len(section.live_only)}")
             for item in section.live_only:
-                lines.append(f"    - key={item.key} values={item.values}")
+                lines.append(
+                    f"  - live-only {key_label}={_format_report_key(item.key, key_label)}"
+                    f": {_format_report_values(item.values)}"
+                )
         if section.replay_only:
-            lines.append(f"  replay_only={len(section.replay_only)}")
             for item in section.replay_only:
-                lines.append(f"    - key={item.key} values={item.values}")
+                lines.append(
+                    f"  - replay-only {key_label}={_format_report_key(item.key, key_label)}"
+                    f": {_format_report_values(item.values)}"
+                )
     return "\n".join(lines)
 
 
@@ -524,6 +534,29 @@ def _fmt_float(value: float | None) -> str:
     if value is None:
         return "None"
     return f"{float(value):.6f}"
+
+
+def _format_report_values(values: tuple[str, ...]) -> str:
+    return ", ".join(values)
+
+
+def _format_report_key(key: str, key_label: str) -> str:
+    if key_label != "event_time":
+        return key
+    iso_value = _timestamp_ms_to_iso(key)
+    if iso_value is None:
+        return key
+    return f"{key} ({iso_value})"
+
+
+def _timestamp_ms_to_iso(value: str) -> str | None:
+    text = str(value).strip()
+    if not text or not text.isdigit():
+        return None
+    try:
+        return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, ValueError):
+        return None
 
 
 if __name__ == "__main__":
