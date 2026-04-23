@@ -265,6 +265,42 @@ class CapturedResponseExecutionClientTest(unittest.TestCase):
 
         self.assertIn("Captured cancel_order error VenueError", str(ctx.exception))
 
+    def test_assert_all_records_consumed_raises_when_trace_has_remaining_calls(self) -> None:
+        client = CapturedResponseExecutionClient(
+            [
+                self._record(
+                    "place_order",
+                    key={"client_order_id": "cid-1"},
+                    request={
+                        "token_id": "tok_yes",
+                        "side": "BUY",
+                        "price": 0.55,
+                        "size": 1.836364,
+                        "client_order_id": "cid-1",
+                        "time_in_force": "GTC",
+                        "post_only": False,
+                    },
+                    response={"order_id": "venue-1", "status": "live", "client_order_id": "cid-1"},
+                    seq=1,
+                ),
+                self._record(
+                    "cancel_order",
+                    key={"venue_order_id": "venue-1"},
+                    request={"venue_order_id": "venue-1"},
+                    response={"order_id": "venue-1", "success": True, "status": "canceled"},
+                    seq=2,
+                ),
+            ]
+        )
+
+        client.place_order(self._place_request())
+
+        with self.assertRaises(ReplayFidelityError) as ctx:
+            client.assert_all_records_consumed()
+
+        self.assertIn("full captured execution trace", str(ctx.exception))
+        self.assertIn("cancel_order", str(ctx.exception))
+
     def test_client_serves_records_loaded_from_bundle_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_dir = Path(tmpdir) / "bundle"

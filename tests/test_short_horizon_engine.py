@@ -24,7 +24,7 @@ from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, O
 from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, PolygonUsdcBridgeSummary, ResolvedRedeemSummary, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, execute_polygon_usdc_bridge, execute_resolved_redeem, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
-from short_horizon.replay import ReplayCaptureWriter
+from short_horizon.replay import ReplayCaptureWriter, ReplayFidelityError
 from short_horizon.replay.comparator import main as replay_comparator_main
 from short_horizon.replay_runner import compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file, render_comparison_report
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
@@ -2160,6 +2160,45 @@ class ReplayRunnerTest(unittest.TestCase):
 
             self.assertEqual(event_count, 12)
             self.assertEqual(accepted_count, 1)
+
+    def test_replay_bundle_fails_when_captured_execution_trace_has_unconsumed_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_bundle(bundle_dir)
+
+            venue_rows = [
+                json.loads(line)
+                for line in (bundle_dir / "venue_responses.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            venue_rows.append(
+                {
+                    "seq": 2,
+                    "kind": "cancel_order",
+                    "key": {"venue_order_id": "venue-live-unused"},
+                    "request": {"venue_order_id": "venue-live-unused"},
+                    "response": {"order_id": "venue-live-unused", "success": True, "status": "canceled"},
+                    "error": None,
+                }
+            )
+            (bundle_dir / "venue_responses.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in venue_rows) + "\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+            manifest["files"]["venue_responses"]["count"] = len(venue_rows)
+            (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            with self.assertRaises(ReplayFidelityError) as ctx:
+                replay_bundle(
+                    bundle_dir=bundle_dir,
+                    db_path=db_path,
+                )
+
+            self.assertIn("full captured execution trace", str(ctx.exception))
+            self.assertIn("cancel_order", str(ctx.exception))
 
     def test_compare_bundle_to_replay_matches_skip_decision_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

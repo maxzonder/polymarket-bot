@@ -120,15 +120,18 @@ def replay_bundle(
         config=config,
         config_hash=effective_config_hash,
     )
+    execution_client = CapturedResponseExecutionClient(bundle.venue_responses)
     try:
-        return drive_runtime_events(
+        summary = drive_runtime_events(
             events=bundle.input_events,
             runtime=runtime,
             logger_name="short_horizon.replay_runner",
             completed_event_name="replay_run_completed",
             execution_mode="live",
-            execution_client=CapturedResponseExecutionClient(bundle.venue_responses),
+            execution_client=execution_client,
         )
+        execution_client.assert_all_records_consumed()
+        return summary
     finally:
         store = runtime.store
         close = getattr(store, "close", None)

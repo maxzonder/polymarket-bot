@@ -79,6 +79,17 @@ class CapturedResponseExecutionClient:
             raise ValueError(f"Captured list_open_orders response must be a list, got {type(response)!r}")
         return [_parse_venue_order_state(item) for item in response]
 
+    def assert_all_records_consumed(self) -> None:
+        if self._cursor >= len(self._records):
+            return
+        remaining = len(self._records) - self._cursor
+        next_record = self._records[self._cursor]
+        next_kind = str(next_record.get("kind") or "<missing>")
+        raise ReplayFidelityError(
+            "Replay fidelity mismatch: replay finished before consuming the full captured execution trace "
+            f"({remaining} record(s) remained, next={next_kind}: {_describe_record(next_record)})"
+        )
+
     def _match_record(self, kind: str, predicate: Callable[[dict[str, Any]], bool], *, describe_expected: Callable[[], str]) -> dict[str, Any]:
         if self._cursor >= len(self._records):
             raise ReplayFidelityError(
