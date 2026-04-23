@@ -173,6 +173,81 @@ class CapturedResponseExecutionClientTest(unittest.TestCase):
         self.assertIn("Replay fidelity mismatch for place_order", str(ctx.exception))
         self.assertIn("cid-replay-only", str(ctx.exception))
 
+    def test_place_order_does_not_fallback_when_only_one_side_has_client_order_id(self) -> None:
+        client = CapturedResponseExecutionClient(
+            [
+                self._record(
+                    "place_order",
+                    key={"client_order_id": None},
+                    request={
+                        "token_id": "tok_yes",
+                        "side": "BUY",
+                        "price": 0.55,
+                        "size": 1.836364,
+                        "time_in_force": "GTC",
+                        "post_only": False,
+                    },
+                    response={"order_id": "venue-1", "status": "live"},
+                )
+            ]
+        )
+
+        with self.assertRaises(ReplayFidelityError) as ctx:
+            client.place_order(self._place_request(client_order_id="cid-present"))
+
+        self.assertIn("did not match", str(ctx.exception))
+
+    def test_replay_detects_out_of_order_execution_calls(self) -> None:
+        client = CapturedResponseExecutionClient(
+            [
+                self._record(
+                    "place_order",
+                    key={"client_order_id": "cid-1"},
+                    request={
+                        "token_id": "tok_yes",
+                        "side": "BUY",
+                        "price": 0.55,
+                        "size": 1.836364,
+                        "client_order_id": "cid-1",
+                        "time_in_force": "GTC",
+                        "post_only": False,
+                    },
+                    response={"order_id": "venue-1", "status": "live", "client_order_id": "cid-1"},
+                    seq=1,
+                ),
+                self._record(
+                    "cancel_order",
+                    key={"venue_order_id": "venue-1"},
+                    request={"venue_order_id": "venue-1"},
+                    response={"order_id": "venue-1", "success": True, "status": "canceled"},
+                    seq=2,
+                ),
+            ]
+        )
+
+        with self.assertRaises(ReplayFidelityError) as ctx:
+            client.cancel_order("venue-1")
+
+        self.assertIn("expected next captured call to be cancel_order", str(ctx.exception))
+        self.assertIn("place_order", str(ctx.exception))
+
+    def test_list_open_orders_with_none_requires_explicit_none_capture_key(self) -> None:
+        client = CapturedResponseExecutionClient(
+            [
+                self._record(
+                    "list_open_orders",
+                    key={},
+                    request={},
+                    response=[],
+                )
+            ]
+        )
+
+        with self.assertRaises(ReplayFidelityError) as ctx:
+            client.list_open_orders(None)
+
+        self.assertIn("did not match", str(ctx.exception))
+
     def test_captured_error_raises_replay_fidelity_error(self) -> None:
         client = CapturedResponseExecutionClient(
             [
