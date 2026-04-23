@@ -30,6 +30,7 @@ class BinRunnerSmokeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn("replay", result.stdout.lower())
         self.assertIn("bundle_dir", result.stdout)
+        self.assertIn("--compare", result.stdout)
 
 
 if __name__ == "__main__":

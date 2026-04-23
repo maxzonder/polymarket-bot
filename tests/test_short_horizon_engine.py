@@ -25,7 +25,7 @@ from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummar
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay import ReplayCaptureWriter
-from short_horizon.replay_runner import replay_bundle, replay_file
+from short_horizon.replay_runner import compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
@@ -1859,7 +1859,13 @@ class ReplayRunnerTest(unittest.TestCase):
             best_ask=best_ask,
         )
 
-    def _write_bundle(self, bundle_dir: Path, *, include_execution_accept_event: bool = False) -> None:
+    def _write_bundle(
+        self,
+        bundle_dir: Path,
+        *,
+        include_execution_accept_event: bool = False,
+        include_terminal_cancel_event: bool = False,
+    ) -> None:
         bundle_dir.mkdir(parents=True, exist_ok=True)
         event_rows = self._sample_replay_rows()
         if include_execution_accept_event:
@@ -1878,6 +1884,23 @@ class ReplayRunnerTest(unittest.TestCase):
                     "client_order_id": "45bfb309-fdd9-563e-9f2c-9c9ace42edda",
                     "venue_status": "live",
                     "run_id": "bundle_live_001",
+                }
+            )
+
+        if include_terminal_cancel_event:
+            event_rows.append(
+                {
+                    "event_type": "OrderCanceled",
+                    "event_time": 225100,
+                    "ingest_time": 225100,
+                    "order_id": "m1:tok_yes:0.55:225000",
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "source": "sample.user_stream",
+                    "client_order_id": "45bfb309-fdd9-563e-9f2c-9c9ace42edda",
+                    "cancel_reason": "market_closed",
+                    "cumulative_filled_size": 0.0,
+                    "remaining_size": 1.836364,
                 }
             )
 
@@ -1905,6 +1928,31 @@ class ReplayRunnerTest(unittest.TestCase):
                 "error": None,
             }
         ]
+        orders_final_rows = []
+        if include_terminal_cancel_event:
+            orders_final_rows.append(
+                {
+                    "order_id": "m1:tok_yes:0.55:225000",
+                    "run_id": "bundle_live_001",
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "side": "BUY",
+                    "price": 0.55,
+                    "size": 1.836364,
+                    "state": "cancel_confirmed",
+                    "client_order_id": "45bfb309-fdd9-563e-9f2c-9c9ace42edda",
+                    "venue_order_id": "venue-live-1",
+                    "parent_order_id": None,
+                    "intent_created_at": "1970-01-01T00:03:45.000Z",
+                    "last_state_change_at": "1970-01-01T00:03:45.100Z",
+                    "venue_order_status": "canceled",
+                    "cumulative_filled_size": 0.0,
+                    "remaining_size": 1.836364,
+                    "reconciliation_required": 0,
+                    "last_reject_code": None,
+                    "last_reject_reason": None,
+                }
+            )
         manifest = {
             "run_id": "bundle_live_001",
             "strategy_id": "short_horizon_15m_touch_v1",
@@ -1913,7 +1961,7 @@ class ReplayRunnerTest(unittest.TestCase):
                 "events_log": {"path": "events_log.jsonl", "count": len(event_rows)},
                 "market_state_snapshots": {"path": "market_state_snapshots.jsonl", "count": len(market_state_rows)},
                 "venue_responses": {"path": "venue_responses.jsonl", "count": len(venue_rows)},
-                "orders_final": {"path": "orders_final.jsonl", "count": 0},
+                "orders_final": {"path": "orders_final.jsonl", "count": len(orders_final_rows)},
                 "fills_final": {"path": "fills_final.jsonl", "count": 0},
             },
         }
@@ -1921,7 +1969,10 @@ class ReplayRunnerTest(unittest.TestCase):
         (bundle_dir / "events_log.jsonl").write_text("\n".join(json.dumps(row) for row in event_rows) + "\n", encoding="utf-8")
         (bundle_dir / "market_state_snapshots.jsonl").write_text("\n".join(json.dumps(row) for row in market_state_rows) + "\n", encoding="utf-8")
         (bundle_dir / "venue_responses.jsonl").write_text("\n".join(json.dumps(row) for row in venue_rows) + "\n", encoding="utf-8")
-        (bundle_dir / "orders_final.jsonl").write_text("", encoding="utf-8")
+        (bundle_dir / "orders_final.jsonl").write_text(
+            ("\n".join(json.dumps(row) for row in orders_final_rows) + "\n") if orders_final_rows else "",
+            encoding="utf-8",
+        )
         (bundle_dir / "fills_final.jsonl").write_text("", encoding="utf-8")
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -2034,6 +2085,66 @@ class ReplayRunnerTest(unittest.TestCase):
 
             self.assertEqual(event_count, 11)
             self.assertEqual(accepted_count, 1)
+
+    def test_compare_bundle_to_replay_matches_terminal_cancel_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_bundle(bundle_dir, include_terminal_cancel_event=True)
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+            )
+            report = compare_bundle_to_replay(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                replay_run_id=summary.run_id,
+            )
+
+            self.assertTrue(report.matched)
+            self.assertEqual(report.diff_count, 0)
+
+    def test_replay_main_compare_exits_nonzero_on_decision_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            report_path = tmp_path / "comparison.txt"
+            self._write_bundle(bundle_dir, include_terminal_cancel_event=True)
+
+            event_rows = [
+                json.loads(line)
+                for line in (bundle_dir / "events_log.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            event_rows = [row for row in event_rows if row.get("event_type") != "OrderCanceled"]
+            (bundle_dir / "events_log.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in event_rows) + "\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+            manifest["files"]["events_log"]["count"] = len(event_rows)
+            (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                with self.assertRaises(SystemExit) as ctx:
+                    replay_main(
+                        [
+                            str(bundle_dir),
+                            str(db_path),
+                            "--compare",
+                            "--comparison-report-path",
+                            str(report_path),
+                        ]
+                    )
+
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertTrue(report_path.exists())
+            self.assertIn("Result: DIFF", stdout.getvalue())
+            self.assertIn("Terminal outcomes: 1 diff(s)", report_path.read_text(encoding="utf-8"))
 
     def test_live_runner_shell_uses_same_stub_event_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
