@@ -1862,7 +1862,7 @@ class ReplayRunnerTest(unittest.TestCase):
                     "price": 0.55,
                     "size": 1.836364,
                     "source": "execution.live_accept",
-                    "client_order_id": "captured-client-id",
+                    "client_order_id": "45bfb309-fdd9-563e-9f2c-9c9ace42edda",
                     "venue_status": "live",
                     "run_id": "bundle_live_001",
                 }
@@ -1873,20 +1873,20 @@ class ReplayRunnerTest(unittest.TestCase):
             {
                 "seq": 1,
                 "kind": "place_order",
-                "key": {"client_order_id": "captured-client-id"},
+                "key": {"client_order_id": "45bfb309-fdd9-563e-9f2c-9c9ace42edda"},
                 "request": {
                     "token_id": "tok_yes",
                     "side": "BUY",
                     "price": 0.55,
                     "size": 1.836364,
-                    "client_order_id": "captured-client-id",
+                    "client_order_id": "45bfb309-fdd9-563e-9f2c-9c9ace42edda",
                     "time_in_force": "GTC",
                     "post_only": False,
                 },
                 "response": {
                     "order_id": "venue-live-1",
                     "status": "live",
-                    "client_order_id": "captured-client-id",
+                    "client_order_id": "45bfb309-fdd9-563e-9f2c-9c9ace42edda",
                     "raw": {"order_id": "venue-live-1", "status": "live"},
                 },
                 "error": None,

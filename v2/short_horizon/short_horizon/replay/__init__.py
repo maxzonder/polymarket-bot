@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .capture import ReplayCaptureWriter
+from .venue_client import CapturedResponseExecutionClient, ReplayFidelityError
 from ..core.events import (
     AggressorSide,
     BookLevel,
@@ -273,4 +274,10 @@ def _parse_optional_bool(value: Any) -> bool | None:
     return bool(value)
 
 
-__all__ = ["ReplayCaptureWriter", "ReplayEventSource", "parse_event_record"]
+__all__ = [
+    "CapturedResponseExecutionClient",
+    "ReplayCaptureWriter",
+    "ReplayEventSource",
+    "ReplayFidelityError",
+    "parse_event_record",
+]
