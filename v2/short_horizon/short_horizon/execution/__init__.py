@@ -14,7 +14,13 @@ from ..strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 from ..telemetry import get_logger
 from ..venue_polymarket.execution_client import VenueOrderRequest, VenueOrderState, VenuePlaceResult
 from ..venue_polymarket.markets import MarketMetadata
-from .order_translator import TranslationPolicy, VenueConstraints, VenueTranslationError, translate_place_order
+from .order_translator import (
+    TranslationPolicy,
+    VenueConstraints,
+    VenueTranslationError,
+    estimate_effective_buy_notional,
+    translate_place_order,
+)
 
 
 TERMINAL_ORDER_STATES = {
@@ -1405,6 +1411,7 @@ __all__ = [
     "TranslationPolicy",
     "VenueConstraints",
     "VenueTranslationError",
+    "estimate_effective_buy_notional",
     "estimate_fee_usdc",
     "is_valid_tick_size",
     "translate_place_order",

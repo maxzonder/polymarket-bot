@@ -136,7 +136,8 @@ def format_live_order_confirmation(
         f"side={order_request.side}",
         f"price={order_request.price}",
         f"size={order_request.size}",
-        f"notional_usdc={intent.notional_usdc}",
+        f"intent_notional_usdc={intent.notional_usdc}",
+        f"effective_notional_usdc={float(order_request.price) * float(order_request.size):.6f}",
         f"client_order_id={order_request.client_order_id}",
     ]
     if max_live_orders_total is not None:

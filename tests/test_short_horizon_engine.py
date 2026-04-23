@@ -529,6 +529,33 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(outputs[0].reason, "max_notional_per_strategy_usdc_reached")
         self.assertEqual(len(engine.store.intents), 0)
 
+    def test_runtime_cap_fires_on_effective_notional_after_min_shares_upscale(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_notional_per_strategy_usdc=2.0,
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    micro_live_total_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        market_state = self._market_state(token_id="tok_yes")
+        market_state = MarketStateUpdate(
+            **{**market_state.__dict__, "tick_size": 0.01, "min_order_size": 5.0}
+        )
+        engine.on_market_state(market_state)
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_notional_per_strategy_usdc_reached")
+        self.assertIn("projected_usdc=2.7", outputs[0].details)
+        self.assertEqual(len(engine.store.intents), 0)
+
     def test_runtime_blocks_new_intent_when_max_open_orders_per_market_reached(self) -> None:
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(
