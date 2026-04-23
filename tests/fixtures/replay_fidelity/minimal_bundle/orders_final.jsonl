@@ -1,0 +1,1 @@
+{"order_id": "m1:tok_yes:0.55:240000", "market_id": "m1", "token_id": "tok_yes", "side": "BUY", "level": 0.55, "price": 0.56, "size": 1.803572, "client_order_id": "a364f104-3ce7-59c2-b5fa-90814a637eed", "state": "cancel_confirmed", "venue_order_id": "venue_123", "filled_qty": 0.0, "cumulative_filled_size": 0.0, "fee_paid": 0.0, "last_state_change_at": "1970-01-01T00:20:00Z"}

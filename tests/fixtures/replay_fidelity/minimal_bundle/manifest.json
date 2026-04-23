@@ -1,0 +1,30 @@
+{
+  "config_hash": "fixture-config",
+  "files": {
+    "events_log": {
+      "count": 7,
+      "path": "events_log.jsonl"
+    },
+    "fills_final": {
+      "count": 0,
+      "path": "fills_final.jsonl"
+    },
+    "market_state_snapshots": {
+      "count": 1,
+      "path": "market_state_snapshots.jsonl"
+    },
+    "orders_final": {
+      "count": 1,
+      "path": "orders_final.jsonl"
+    },
+    "venue_responses": {
+      "count": 2,
+      "path": "venue_responses.jsonl"
+    }
+  },
+  "run_id": "fixture_run_001",
+  "source_db_path": "/tmp/tmpd_9mji67/live.sqlite3",
+  "strategy_id": "short_horizon_15m_touch_v1",
+  "wall_clock_finished_at": "2026-04-23T23:43:02.225Z",
+  "wall_clock_started_at": "2026-04-23T23:43:02.215Z"
+}
