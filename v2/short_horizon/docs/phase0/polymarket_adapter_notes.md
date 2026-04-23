@@ -197,33 +197,110 @@ The strategy layer should **not** know:
 
 ---
 
-## 7. Known open questions
+## 7. Phase 3 close-out answers to the earlier open questions
 
-These are not blockers for Phase 0 docs, but they should be treated as concrete follow-up checks during implementation.
+The Phase 3 implementation now answers the questions that were still open during the original adapter research pass.
 
-1. **Exact websocket endpoints and subscription payloads**
-   - need current Polymarket/CLOB docs confirmation
-   - especially for book deltas vs full snapshots and user fills/order updates
+### 7.1 Exact websocket endpoints and subscription payloads
 
-2. **Fee metadata retrieval path outside SDK**
-   - if Python-first with `py-clob-client`, SDK may hide most of this
-   - if replay/live tooling needs explicit fee snapshots in storage, need to identify the exact endpoint/field path cleanly
+This is now implemented, not speculative.
 
-3. **Open-order / closed-order lookup semantics**
-   - current wrapper uses `get_orders(...)`
-   - need to confirm whether historical/recent closed orders are queryable in a way good enough for restart reconciliation
+- Public market-data websocket remains the primary live source for book/trade updates.
+- Authenticated user-stream endpoint is:
+  - `wss://ws-subscriptions-clob.polymarket.com/ws/user`
+- User-stream subscription payload shape is:
 
-4. **Minimum order size and price tick constraints**
-   - must be captured precisely before execution code is written
-   - current docs/code imply they exist, but the exact authoritative source still needs to be pinned
+```json
+{
+  "auth": {
+    "apiKey": "<derived by py-clob-client>",
+    "secret": "<derived by py-clob-client>",
+    "passphrase": "<derived by py-clob-client>"
+  },
+  "markets": ["<market_id>", "..."],
+  "type": "user"
+}
+```
 
-5. **Whether websocket user stream alone is sufficient for reconciliation-sensitive fills**
-   - or whether REST backfill is still needed after reconnect/restart
+- The short-horizon runner resubscribes the current market set after reconnect.
+- Raw user frames are normalized into canonical `OrderAccepted`, `OrderFilled`, `OrderRejected`, and `OrderCanceled` events.
 
-6. **Market discovery source for 15m exact live filtering**
-   - Gamma appears sufficient for now, but this should be confirmed against real currently active short-duration markets
+### 7.2 Fee metadata retrieval path
 
-## 8. Phase 2 implementation status after the lift-first pass
+The short-horizon path does **not** currently fetch `feeRateBps` from an authenticated SDK execution call.
+
+What is implemented today:
+- market discovery / refresh parses fee metadata from Gamma market rows
+- authoritative fields currently parsed are:
+  - `feeSchedule.rate` → converted to basis points
+  - fallback `takerBaseFee`
+- fee metadata is emitted into canonical `MarketStateUpdate`
+- fee snapshots are refreshed by `FeeMetadataRefreshLoop`
+
+Operational cadence currently implemented:
+- `FeesConfig.fee_metadata_ttl_seconds = 60`
+- fee refresh loop runs every `min(discovery_refresh_interval, fee_metadata_ttl_seconds)`
+- with current defaults that means every `30s`
+
+Important boundary:
+- the SDK remains the signing/posting boundary and is still trusted to inject venue fee fields into signed orders
+- but the strategy/runtime-side fee freshness check is driven by Gamma-derived metadata snapshots, not by a separate SDK fee query
+
+### 7.3 Open-order / closed-order lookup semantics for reconciliation
+
+Restart reconciliation is now implemented with this lookup order:
+
+1. prefer direct `get_order(venue_order_id)` if we already know the venue id
+2. otherwise load `list_open_orders(market_id=...)`
+3. match by `client_order_id` first
+4. fall back to `(token_id, price, original_size)` when needed
+
+Current consequence:
+- open/live venue orders are recoverable enough for startup reconciliation
+- orders missing from venue lookup are not silently forgotten; they move to local `unknown` or `rejected` depending on local state
+- this is why `venue_order_id` is a first-class nullable column while internal `order_id` stays immutable
+
+### 7.4 Minimum order size and tick constraints
+
+This is now captured concretely in code.
+
+- tick rounding for BUY uses venue tick size and rounds price down
+- venue dollar minimum is enforced in the translator
+- market-specific `orderMinSize` is parsed from Gamma market metadata and propagated into live translation
+- final translated order notional is the max of:
+  - strategy target notional
+  - venue dollar minimum plus buffer when relevant
+  - market-specific minimum shares translated into notional
+
+Practical implication:
+- a tiny target like `0.10 USDC` is valid as an intent target
+- but the live translated order may still be scaled above that target to satisfy venue constraints
+
+### 7.5 Whether websocket user stream alone is sufficient
+
+Answer: **no, not by itself for restart safety**.
+
+What is implemented now:
+- user websocket is the primary path for live accept/fill/cancel/reject updates during a healthy run
+- startup reconciliation still consults venue REST truth via `get_order(...)` / `get_orders(...)`
+- if a process dies between send / fill / cancel transitions, reconciliation uses venue truth to repair local state on restart
+
+So the current architecture is:
+- websocket-first for live updates
+- REST-assisted for restart reconciliation and ambiguity recovery
+
+### 7.6 Market discovery source for live 15m exact filtering
+
+This is now confirmed operationally.
+
+- Gamma is still the discovery / refresh source for the short-horizon universe
+- it is sufficient for attaching active 15m exact markets on production
+- shared discovery + refresh supervision were added after the `P3-9` prod dry-run failure mode where refresh loops could die on unhandled Gamma `429`
+
+Remaining nuance:
+- Gamma remains good enough for the MVP universe, but it is also a rate-limited dependency, so refresh loops must keep retry/backoff and loud failure propagation
+
+## 8. Phase 2 and Phase 3 implementation status after the lift-first pass
 
 The short-horizon adapter boundary is now materially implemented through `P2-9`.
 
@@ -245,22 +322,30 @@ Important locked-in policies from the implementation:
 - out-of-order book frames are dropped by older `timestamp` per token to preserve deterministic replay
 - fee freshness is tracked from attach / refresh snapshots and enforced at decision time before any entry
 
-What is still intentionally open after `P2-9`:
+What was intentionally open after `P2-9`, and is now materially closed by Phase 3:
 - authenticated user-stream normalization for real fills / order updates
 - restart reconciliation semantics against exchange truth
-- final authoritative minimum-size / tick-constraint capture for real venue sends
-- whether websocket user stream alone is sufficient, or REST backfill remains necessary after reconnect/restart
+- authoritative minimum-size / tick-constraint capture for real venue sends
+- the websocket-vs-REST split: websocket for live updates, REST for restart reconciliation
+
+Additional Phase 3 truths that were only discovered during real prod smokes:
+- current v1 collateral path still effectively consumes `USDC.e`, not native Polygon `USDC`
+- the runner now has an explicit bridge step for native `USDC -> USDC.e`
+- resolved-position settlement is handled as a wallet-level maintenance sweep (`--redeem-resolved`), not as strategy logic
+- missing fill telemetry on the normal live stream path needed an explicit fix so `OrderFilled` is appended to `events_log` for both stream-driven and reconciliation-driven fills
 
 ---
 
-## 9. Recommended immediate Phase 1/2 stance
+## 9. Recommended working stance after Phase 3
 
-Until P0-A / P0-B say otherwise:
-- assume Python-first integration is the default implementation path
-- use existing repo knowledge and `py-clob-client` as the execution baseline
-- keep the adapter boundary clean so a later Rust port remains possible if measurements justify it
+Until a later architecture review says otherwise:
+- keep Python + `py-clob-client` as the only authenticated execution/signing boundary
+- keep internal `order_id` immutable and store venue identity separately via `venue_order_id`
+- keep websocket-first live ingestion, but do **not** remove REST-assisted reconciliation
+- keep fee freshness, market metadata, tick-size, and `orderMinSize` attached to canonical `MarketStateUpdate`
+- keep wallet maintenance actions (`approve-allowances`, bridge, redeem sweeps) outside strategy decision logic
 
-That gives the team the fastest path to real replay/live parity without forcing a premature rewrite of the execution stack.
+That gives the team the cleanest path into Phase 4 without re-discovering execution-boundary facts that are now already known.
 
 ---
 
