@@ -2185,6 +2185,94 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(len(report.skip_decisions.live_only), 0)
             self.assertEqual(len(report.skip_decisions.replay_only), 0)
 
+    def test_compare_bundle_to_replay_ignores_non_contract_order_intent_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_bundle(bundle_dir, include_terminal_cancel_event=True)
+
+            event_rows = [
+                json.loads(line)
+                for line in (bundle_dir / "events_log.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            event_rows.append(
+                {
+                    "event_type": "OrderIntent",
+                    "event_time": 225000,
+                    "ingest_time": 225000,
+                    "order_id": "m1:tok_yes:0.55:225000",
+                    "strategy_id": "short_horizon_15m_touch_v1",
+                    "market_id": "m1",
+                    "token_id": "tok_yes",
+                    "level": 0.55,
+                    "entry_price": 0.55,
+                    "notional_usdc": 1.0,
+                    "lifecycle_fraction": 0.99,
+                    "reason": "manually_edited_reason",
+                    "source": "runtime.order_intent",
+                    "run_id": "bundle_live_001",
+                }
+            )
+            (bundle_dir / "events_log.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in event_rows) + "\n",
+                encoding="utf-8",
+            )
+            manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
+            manifest["files"]["events_log"]["count"] = len(event_rows)
+            (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+            )
+            report = compare_bundle_to_replay(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                replay_run_id=summary.run_id,
+            )
+
+            self.assertTrue(report.matched)
+            self.assertEqual(report.diff_count, 0)
+
+    def test_compare_bundle_to_replay_ignores_non_contract_skip_decision_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_skip_decision_bundle(bundle_dir)
+
+            event_rows = [
+                json.loads(line)
+                for line in (bundle_dir / "events_log.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            for row in event_rows:
+                if row.get("event_type") == "SkipDecision":
+                    row["details"] = "edited_but_out_of_contract"
+                    row["level"] = 0.123
+                    row["market_id"] = "edited_market"
+                    row["token_id"] = "edited_token"
+            (bundle_dir / "events_log.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in event_rows) + "\n",
+                encoding="utf-8",
+            )
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True)),
+            )
+            report = compare_bundle_to_replay(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                replay_run_id=summary.run_id,
+            )
+
+            self.assertTrue(report.matched)
+            self.assertEqual(report.diff_count, 0)
+
     def test_compare_bundle_to_replay_matches_terminal_cancel_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

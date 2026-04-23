@@ -242,8 +242,6 @@ def _extract_order_intents_from_events(events: list[Any]) -> list[_TimedRecord]:
             level = _optional_float(payload.get("level"))
             entry_price = _optional_float(payload.get("entry_price"))
             notional_usdc = _optional_float(payload.get("notional_usdc"))
-            lifecycle_fraction = _optional_float(payload.get("lifecycle_fraction"))
-            reason = _optional_str(payload.get("reason"))
         elif isinstance(payload, OrderIntentEvent):
             timestamp = payload.event_time_ms
             market_id = payload.market_id
@@ -251,8 +249,6 @@ def _extract_order_intents_from_events(events: list[Any]) -> list[_TimedRecord]:
             level = _optional_float(payload.level)
             entry_price = _optional_float(payload.entry_price)
             notional_usdc = _optional_float(payload.notional_usdc)
-            lifecycle_fraction = _optional_float(payload.lifecycle_fraction)
-            reason = _optional_str(payload.reason)
         else:
             continue
         records.append(
@@ -264,8 +260,6 @@ def _extract_order_intents_from_events(events: list[Any]) -> list[_TimedRecord]:
                     f"level={_fmt_float(level)}",
                     f"entry_price={_fmt_float(entry_price)}",
                     f"notional_usdc={_fmt_float(notional_usdc)}",
-                    f"lifecycle_fraction={_fmt_float(lifecycle_fraction)}",
-                    f"reason={reason}",
                 ),
             )
         )
@@ -286,8 +280,6 @@ def _extract_order_intents_from_orders(orders: list[dict[str, Any]]) -> list[_Ti
                     f"level={_fmt_float(level)}",
                     f"entry_price={_fmt_float(price)}",
                     f"notional_usdc={_fmt_float(None if price is None or size is None else price * size)}",
-                    "lifecycle_fraction=None",
-                    "reason=None",
                 ),
             )
         )
@@ -311,17 +303,9 @@ def _extract_skip_decisions(events: list[Any]) -> list[_TimedRecord]:
                 continue
             timestamp = payload.get("event_time") or payload.get("event_time_ms")
             reason = payload.get("reason")
-            market_id = payload.get("market_id")
-            token_id = payload.get("token_id")
-            level = _optional_float(payload.get("level"))
-            details = _optional_str(payload.get("details"))
         elif isinstance(payload, SkipDecisionEvent):
             timestamp = payload.event_time_ms
             reason = payload.reason
-            market_id = payload.market_id
-            token_id = payload.token_id
-            level = _optional_float(payload.level)
-            details = _optional_str(payload.details)
         else:
             continue
         records.append(
@@ -329,10 +313,6 @@ def _extract_skip_decisions(events: list[Any]) -> list[_TimedRecord]:
                 key=_normalize_timestamp(timestamp),
                 values=(
                     f"reason={reason}",
-                    f"market_id={market_id}",
-                    f"token_id={token_id}",
-                    f"level={_fmt_float(level)}",
-                    f"details={details}",
                 ),
             )
         )
