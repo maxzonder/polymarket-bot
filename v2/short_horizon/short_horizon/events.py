@@ -5,7 +5,9 @@ from .core.events import (
     OrderAccepted,
     OrderCanceled,
     OrderFilled,
+    OrderIntentEvent,
     OrderRejected,
+    SkipDecisionEvent,
     TimerEvent,
     TradeTick,
 )
@@ -17,7 +19,9 @@ __all__ = [
     "OrderAccepted",
     "OrderCanceled",
     "OrderFilled",
+    "OrderIntentEvent",
     "OrderRejected",
+    "SkipDecisionEvent",
     "TimerEvent",
     "TradeTick",
 ]

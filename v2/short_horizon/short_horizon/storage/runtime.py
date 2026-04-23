@@ -14,7 +14,9 @@ from ..core.events import (
     OrderAccepted,
     OrderCanceled,
     OrderFilled,
+    OrderIntentEvent,
     OrderRejected,
+    SkipDecisionEvent,
     TimerEvent,
     TradeTick,
 )
@@ -827,6 +829,36 @@ def normalize_event_payload(event: NormalizedEvent) -> dict[str, Any]:
             "timer_kind": event.timer_kind,
             "deadline_ms": event.deadline_ms,
             "payload": event.payload,
+        }
+
+    if isinstance(event, OrderIntentEvent):
+        return {
+            "event_type": "OrderIntent",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "order_id": event.order_id,
+            "strategy_id": event.strategy_id,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "level": event.level,
+            "entry_price": event.entry_price,
+            "notional_usdc": event.notional_usdc,
+            "lifecycle_fraction": event.lifecycle_fraction,
+            "reason": event.reason,
+        }
+
+    if isinstance(event, SkipDecisionEvent):
+        return {
+            "event_type": "SkipDecision",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "reason": event.reason,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "level": event.level,
+            "details": event.details,
         }
 
     if isinstance(event, OrderAccepted):

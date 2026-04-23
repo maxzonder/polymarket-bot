@@ -25,6 +25,7 @@ from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummar
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay import ReplayCaptureWriter
+from short_horizon.replay.comparator import main as replay_comparator_main
 from short_horizon.replay_runner import compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
@@ -1976,6 +1977,80 @@ class ReplayRunnerTest(unittest.TestCase):
         (bundle_dir / "fills_final.jsonl").write_text("", encoding="utf-8")
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
+    def _write_skip_decision_bundle(self, bundle_dir: Path) -> None:
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        event_rows = [
+            {
+                "event_type": "MarketStateUpdate",
+                "event_time": 200000,
+                "ingest_time": 200050,
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "condition_id": "c1",
+                "question": "Bitcoin Up or Down?",
+                "asset_slug": "bitcoin",
+                "status": "active",
+                "start_time": 0,
+                "end_time": 900000,
+                "is_active": True,
+                "metadata_is_fresh": True,
+                "fee_rate_bps": 10.0,
+                "fee_metadata_age_ms": 1000,
+                "source": "sample.market_state",
+            },
+            {
+                "event_type": "BookUpdate",
+                "event_time": 220000,
+                "ingest_time": 220020,
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "best_bid": 0.53,
+                "best_ask": 0.54,
+                "source": "sample.book",
+            },
+            {
+                "event_type": "BookUpdate",
+                "event_time": 225000,
+                "ingest_time": 225020,
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "best_bid": 0.54,
+                "best_ask": 0.55,
+                "source": "sample.book",
+            },
+            {
+                "event_type": "SkipDecision",
+                "event_time": 225000,
+                "ingest_time": 225000,
+                "reason": "global_safe_mode",
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "level": 0.55,
+                "details": "operator_requested",
+                "source": "runtime.skip_decision",
+                "run_id": "bundle_skip_001",
+            },
+        ]
+        manifest = {
+            "run_id": "bundle_skip_001",
+            "strategy_id": "short_horizon_15m_touch_v1",
+            "config_hash": "test-config",
+            "files": {
+                "events_log": {"path": "events_log.jsonl", "count": len(event_rows)},
+                "market_state_snapshots": {"path": "market_state_snapshots.jsonl", "count": 1},
+                "venue_responses": {"path": "venue_responses.jsonl", "count": 0},
+                "orders_final": {"path": "orders_final.jsonl", "count": 0},
+                "fills_final": {"path": "fills_final.jsonl", "count": 0},
+            },
+        }
+
+        (bundle_dir / "events_log.jsonl").write_text("\n".join(json.dumps(row) for row in event_rows) + "\n", encoding="utf-8")
+        (bundle_dir / "market_state_snapshots.jsonl").write_text(json.dumps(event_rows[0]) + "\n", encoding="utf-8")
+        (bundle_dir / "venue_responses.jsonl").write_text("", encoding="utf-8")
+        (bundle_dir / "orders_final.jsonl").write_text("", encoding="utf-8")
+        (bundle_dir / "fills_final.jsonl").write_text("", encoding="utf-8")
+        (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
     def test_replay_runner_replays_jsonl_into_fresh_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2013,7 +2088,7 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(run_row[1], "replay")
             self.assertEqual(run_row[2], "short_horizon_15m_touch_v1")
             self.assertIsNotNone(run_row[3])
-            self.assertEqual(event_count, 11)
+            self.assertEqual(event_count, 12)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
 
@@ -2053,7 +2128,7 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(run_row[2], "short_horizon_15m_touch_v1")
             self.assertEqual(run_row[3], "test-config")
             self.assertIsNotNone(run_row[4])
-            self.assertEqual(event_count, 11)
+            self.assertEqual(event_count, 12)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "venue-live-1")
             self.assertEqual(order_row[2], "live")
@@ -2083,8 +2158,32 @@ class ReplayRunnerTest(unittest.TestCase):
             finally:
                 conn.close()
 
-            self.assertEqual(event_count, 11)
+            self.assertEqual(event_count, 12)
             self.assertEqual(accepted_count, 1)
+
+    def test_compare_bundle_to_replay_matches_skip_decision_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            self._write_skip_decision_bundle(bundle_dir)
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True)),
+            )
+            report = compare_bundle_to_replay(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                replay_run_id=summary.run_id,
+            )
+
+            self.assertTrue(report.matched)
+            self.assertEqual(report.diff_count, 0)
+            self.assertEqual(len(report.skip_decisions.matched), 1)
+            self.assertEqual(len(report.skip_decisions.live_only), 0)
+            self.assertEqual(len(report.skip_decisions.replay_only), 0)
 
     def test_compare_bundle_to_replay_matches_terminal_cancel_flow(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2146,6 +2245,37 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertIn("Result: DIFF", stdout.getvalue())
             self.assertIn("Terminal outcomes: 1 diff(s)", report_path.read_text(encoding="utf-8"))
 
+    def test_replay_comparator_main_writes_report_for_matching_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bundle_dir = tmp_path / "capture_bundle"
+            db_path = tmp_path / "bundle_replay.sqlite3"
+            report_path = tmp_path / "comparison.txt"
+            self._write_skip_decision_bundle(bundle_dir)
+
+            summary = replay_bundle(
+                bundle_dir=bundle_dir,
+                db_path=db_path,
+                config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True)),
+            )
+
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                replay_comparator_main(
+                    [
+                        str(bundle_dir),
+                        str(db_path),
+                        "--replay-run-id",
+                        summary.run_id,
+                        "--report-path",
+                        str(report_path),
+                    ]
+                )
+
+            self.assertTrue(report_path.exists())
+            self.assertIn("Result: MATCH", stdout.getvalue())
+            self.assertIn("Skip decisions: ok", report_path.read_text(encoding="utf-8"))
+
     def test_live_runner_shell_uses_same_stub_event_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -2179,7 +2309,7 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(run_row[0], "live_test_001")
             self.assertEqual(run_row[1], "live")
             self.assertIsNotNone(run_row[2])
-            self.assertEqual(event_count, 11)
+            self.assertEqual(event_count, 12)
 
     def test_live_runner_parser_supports_stub_and_live_modes(self) -> None:
         parser = build_parser()

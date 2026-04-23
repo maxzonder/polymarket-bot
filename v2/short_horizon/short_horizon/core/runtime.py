@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from ..core.clock import Clock, SystemClock
-from ..core.events import BookUpdate, MarketStateUpdate
+from ..core.events import BookUpdate, MarketStateUpdate, OrderIntentEvent, SkipDecisionEvent
 from ..core.models import OrderIntent, SkipDecision
 from ..core.order_state import OrderState
 from ..storage.runtime import RuntimeStore
@@ -90,6 +90,7 @@ class StrategyRuntime:
                     reason=decision.reason,
                     details=decision.details,
                 )
+                self.store.append_event_log(_skip_decision_event(decision))
                 outputs.append(decision)
                 continue
             decision = self.strategy.decide_on_touch(event=event, touch=touch)
@@ -97,6 +98,7 @@ class StrategyRuntime:
                 decision = self._apply_runtime_guards(decision)
             if isinstance(decision, OrderIntent):
                 self.store.persist_intent(decision)
+                self.store.append_event_log(_order_intent_event(decision), order_id=decision.intent_id)
                 touch_log.info(
                     "order_intent_created",
                     order_id=decision.intent_id,
@@ -112,6 +114,7 @@ class StrategyRuntime:
                     reason=decision.reason,
                     details=decision.details,
                 )
+                self.store.append_event_log(_skip_decision_event(decision))
             outputs.append(decision)
         return outputs
 
@@ -289,6 +292,34 @@ def _sum_open_notional_usdc(open_orders: list[dict]) -> float:
             continue
         current_open_notional += float(price) * float(size)
     return current_open_notional
+
+
+def _order_intent_event(intent: OrderIntent) -> OrderIntentEvent:
+    return OrderIntentEvent(
+        event_time_ms=intent.event_time_ms,
+        ingest_time_ms=intent.event_time_ms,
+        order_id=intent.intent_id,
+        strategy_id=str(intent.strategy_id),
+        market_id=intent.market_id,
+        token_id=intent.token_id,
+        level=float(intent.level),
+        entry_price=float(intent.entry_price),
+        notional_usdc=float(intent.notional_usdc),
+        lifecycle_fraction=float(intent.lifecycle_fraction),
+        reason=intent.reason,
+    )
+
+
+def _skip_decision_event(decision: SkipDecision) -> SkipDecisionEvent:
+    return SkipDecisionEvent(
+        event_time_ms=decision.event_time_ms,
+        ingest_time_ms=decision.event_time_ms,
+        reason=decision.reason,
+        market_id=decision.market_id,
+        token_id=decision.token_id,
+        level=float(decision.level),
+        details=decision.details,
+    )
 
 
 def _count_consecutive_rejects(all_orders: list[dict]) -> int:
