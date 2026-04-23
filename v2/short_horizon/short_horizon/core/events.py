@@ -23,6 +23,8 @@ class EventType(StrEnum):
     TRADE_TICK = "TradeTick"
     MARKET_STATE_UPDATE = "MarketStateUpdate"
     TIMER_EVENT = "TimerEvent"
+    ORDER_INTENT = "OrderIntent"
+    SKIP_DECISION = "SkipDecision"
     ORDER_ACCEPTED = "OrderAccepted"
     ORDER_REJECTED = "OrderRejected"
     ORDER_FILLED = "OrderFilled"
@@ -147,6 +149,38 @@ class TimerEvent:
 
 
 @dataclass(frozen=True)
+class OrderIntentEvent:
+    event_time_ms: EventTime
+    ingest_time_ms: IngestTime
+    order_id: OrderId
+    strategy_id: str
+    market_id: MarketId
+    token_id: TokenId
+    level: float
+    entry_price: float
+    notional_usdc: float
+    lifecycle_fraction: float
+    reason: str = "ascending_first_touch"
+    source: str = "runtime.order_intent"
+    run_id: RunId | None = None
+    event_type: EventType = field(default=EventType.ORDER_INTENT, init=False)
+
+
+@dataclass(frozen=True)
+class SkipDecisionEvent:
+    event_time_ms: EventTime
+    ingest_time_ms: IngestTime
+    reason: str
+    market_id: MarketId
+    token_id: TokenId
+    level: float
+    details: str = ""
+    source: str = "runtime.skip_decision"
+    run_id: RunId | None = None
+    event_type: EventType = field(default=EventType.SKIP_DECISION, init=False)
+
+
+@dataclass(frozen=True)
 class OrderAccepted:
     event_time_ms: EventTime
     ingest_time_ms: IngestTime
@@ -225,6 +259,8 @@ NormalizedEvent: TypeAlias = (
     | TradeTick
     | MarketStateUpdate
     | TimerEvent
+    | OrderIntentEvent
+    | SkipDecisionEvent
     | OrderAccepted
     | OrderRejected
     | OrderFilled

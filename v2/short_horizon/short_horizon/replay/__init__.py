@@ -19,8 +19,10 @@ from ..core.events import (
     OrderAccepted,
     OrderCanceled,
     OrderFilled,
+    OrderIntentEvent,
     OrderRejected,
     OrderSide,
+    SkipDecisionEvent,
     TimerEvent,
     TradeTick,
 )
@@ -122,6 +124,36 @@ def parse_event_record(payload: dict[str, Any]) -> NormalizedEvent:
             token_id=_parse_optional_str(payload.get("token_id")),
             deadline_ms=_parse_optional_int(payload.get("deadline_ms")),
             payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else None,
+            run_id=_parse_optional_str(payload.get("run_id")),
+        )
+
+    if event_type == EventType.ORDER_INTENT:
+        return OrderIntentEvent(
+            event_time_ms=_parse_timestamp_ms(payload.get("event_time_ms", payload.get("event_time"))),
+            ingest_time_ms=_parse_timestamp_ms(payload.get("ingest_time_ms", payload.get("ingest_time"))),
+            order_id=str(payload["order_id"]),
+            strategy_id=str(payload.get("strategy_id", "unknown_strategy")),
+            market_id=str(payload["market_id"]),
+            token_id=str(payload["token_id"]),
+            level=float(payload["level"]),
+            entry_price=float(payload["entry_price"]),
+            notional_usdc=float(payload["notional_usdc"]),
+            lifecycle_fraction=float(payload.get("lifecycle_fraction", 0.0)),
+            reason=_parse_optional_str(payload.get("reason")) or "ascending_first_touch",
+            source=str(payload.get("source", "runtime.order_intent")),
+            run_id=_parse_optional_str(payload.get("run_id")),
+        )
+
+    if event_type == EventType.SKIP_DECISION:
+        return SkipDecisionEvent(
+            event_time_ms=_parse_timestamp_ms(payload.get("event_time_ms", payload.get("event_time"))),
+            ingest_time_ms=_parse_timestamp_ms(payload.get("ingest_time_ms", payload.get("ingest_time"))),
+            reason=str(payload["reason"]),
+            market_id=str(payload["market_id"]),
+            token_id=str(payload["token_id"]),
+            level=float(payload["level"]),
+            details=_parse_optional_str(payload.get("details")) or "",
+            source=str(payload.get("source", "runtime.skip_decision")),
             run_id=_parse_optional_str(payload.get("run_id")),
         )
 
