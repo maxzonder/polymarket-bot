@@ -31,6 +31,9 @@ It is **separate** from:
 For real `--execution-mode live` runs with an EOA/private key wallet, Polymarket needs one-time Polygon approvals before the first real order can succeed.
 
 - The short-horizon live runner now has a dedicated flag: `--approve-allowances`
+- The live runner also supports pre-run and periodic resolved-position settlement via:
+  - `--redeem-resolved`
+  - optional `--redeem-resolved-interval-seconds 900` to keep sweeping regular resolved positions during a long live run
 - For the current v1 collateral path, the live runner also supports scripted Polygon native `USDC -> USDC.e` conversion via Polymarket's bridge deposit flow:
   - `--bridge-polygon-usdc-to-usdce`
   - optional `--bridge-polygon-usdc-amount 2.05` to bridge a specific native USDC amount, otherwise the runner sends the wallet's full native Polygon USDC balance
@@ -43,6 +46,11 @@ For real `--execution-mode live` runs with an EOA/private key wallet, Polymarket
   - transfers Polygon native USDC (`0x3c499...`) to that deposit address
   - polls bridge status until the transfer completes into Polygon `USDC.e` (`0x2791...`)
   - is intended for the current pre-cutover v1 flow where the venue still effectively consumes `USDC.e`
+- The redeem flags:
+  - sweep wallet-level regular resolved positions before the live run starts
+  - can optionally repeat on a timer during the run
+  - intentionally stay outside strategy logic, because settlement is an account-level maintenance action rather than an entry/exit signal
+  - skip unsupported paths such as negative-risk positions or positions tied to a different proxy wallet
 - These approvals are written on-chain on Polygon, not into the repo or SQLite probe DB:
   - USDC allowance is written on token contract `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`
   - conditional-token operator approval is written on contract `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`
@@ -55,6 +63,18 @@ For real `--execution-mode live` runs with an EOA/private key wallet, Polymarket
   - the wallet address changed
   - approvals were revoked
 - It is not required on every run once the wallet is already approved.
+
+## Live sizing notes
+
+Live sizing now respects both:
+- the venue dollar floor (for example the familiar `$1` minimum), and
+- the market-specific `orderMinSize` share minimum from market metadata
+
+That matters because some short-horizon markets accept a nominal `$1` order while others require a larger minimum share count such as `5` shares. The live execution path now scales the BUY request up to satisfy the stricter market-level minimum instead of sending an undersized order that gets venue-rejected.
+
+Practical implication:
+- a tiny target size like `--target-trade-size-usdc 0.10` is only a strategy target, not a hard guarantee of final submitted notional
+- if the venue requires more shares to satisfy `orderMinSize`, the translated live order can be increased above the nominal target so the order is actually valid
 
 Example bounded live smoke with explicit approvals:
 
@@ -82,6 +102,19 @@ POLYMARKET_DATA_DIR=/home/polybot/.polybot ./.venv/bin/python v2/short_horizon/b
   --approve-allowances \
   --confirm-live-order \
   --max-live-orders-total 1 \
+  --max-runtime-seconds 3600
+```
+
+Example bounded live run that redeems resolved positions first and uses a small target stake:
+
+```bash
+POLYMARKET_DATA_DIR=/home/polybot/.polybot ./.venv/bin/python v2/short_horizon/bin/live_runner \
+  /home/polybot/.polybot/short_horizon/probes/live_probe.sqlite3 \
+  --mode live \
+  --execution-mode live \
+  --allow-live-execution \
+  --redeem-resolved \
+  --target-trade-size-usdc 0.10 \
   --max-runtime-seconds 3600
 ```
 
