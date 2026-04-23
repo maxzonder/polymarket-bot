@@ -1089,6 +1089,7 @@ class ExecutionEngine:
             liquidity_role=canonical.liquidity_role.value if hasattr(canonical.liquidity_role, "value") else canonical.liquidity_role,
             venue_fill_id=canonical.venue_fill_id,
         )
+        self.store.append_event_log(canonical, order_id=order_row["order_id"])
         self._transition(
             order_row,
             next_state,

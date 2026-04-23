@@ -542,6 +542,41 @@ class ExecutionLiveModeIntegrationTest(unittest.TestCase):
         self.assertEqual(order_row["venue_order_status"], "filled")
         self.assertAlmostEqual(float(order_row["remaining_size"]), 0.0)
         self.assertEqual(self._fill_count(store), 1)
+        event_row = store.conn.execute(
+            "SELECT payload_json FROM events_log WHERE run_id = ? AND event_type = 'OrderFilled' ORDER BY seq",
+            (store.current_run_id,),
+        ).fetchone()
+        self.assertIsNotNone(event_row)
+        self.assertIn('\"source\": \"execution.live_reconcile\"', str(event_row[0]))
+
+    def test_live_stream_fill_appends_orderfilled_event_log(self) -> None:
+        client = _FakeExecutionClient(place_result={"order_id": "venue-123", "status": "live"})
+        store, intent, execution = self._prepare_live_execution(run_id="live_fill_eventlog_001", client=client)
+        execution.submit(intent)
+
+        execution.reconcile_order_event(
+            OrderFilled(
+                event_time_ms=225_100,
+                ingest_time_ms=225_110,
+                order_id="venue-123",
+                market_id="m1",
+                token_id="tok_yes",
+                side="BUY",
+                source="polymarket_clob_user_ws",
+                client_order_id="ord_exec_001",
+                fill_price=0.55,
+                fill_size=self._fill_size(),
+                cumulative_filled_size=self._fill_size(),
+                remaining_size=0.0,
+            )
+        )
+
+        event_row = store.conn.execute(
+            "SELECT payload_json FROM events_log WHERE run_id = ? AND event_type = 'OrderFilled' ORDER BY seq",
+            (store.current_run_id,),
+        ).fetchone()
+        self.assertIsNotNone(event_row)
+        self.assertIn('\"source\": \"polymarket_clob_user_ws\"', str(event_row[0]))
 
     def test_reconciliation_marks_missing_persisted_live_order_unknown(self) -> None:
         client = _FakeExecutionClient()
