@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .capture import ReplayCaptureWriter
 from ..core.events import (
     AggressorSide,
     BookLevel,
@@ -272,4 +273,4 @@ def _parse_optional_bool(value: Any) -> bool | None:
     return bool(value)
 
 
-__all__ = ["ReplayEventSource", "parse_event_record"]
+__all__ = ["ReplayCaptureWriter", "ReplayEventSource", "parse_event_record"]

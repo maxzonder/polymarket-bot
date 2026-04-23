@@ -17,6 +17,7 @@ from .core.runtime import StrategyRuntime
 from .execution import ExecutionEngine, ExecutionMode, LiveSubmitGuard, LiveSubmitGuardRejected
 from .market_data import LiveEventSource, MarketDataSource
 from .probe import assert_min_book_updates_per_minute, maybe_cross_validate_probe_against_collector, summarize_probe_db
+from .replay import ReplayCaptureWriter
 from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_events
 from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
@@ -183,11 +184,13 @@ def run_stub_live(
     config: ShortHorizonConfig | None = None,
     config_hash: str = "dev",
     execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
+    capture_dir: str | Path | None = None,
 ) -> RunnerSummary:
     resolved_mode = ExecutionMode(str(execution_mode))
     if resolved_mode is ExecutionMode.LIVE:
         raise ValueError("stub mode does not support execution_mode=live")
     runtime = build_live_runtime(db_path=db_path, run_id=run_id, config=config, config_hash=config_hash)
+    capture_writer = ReplayCaptureWriter(capture_dir) if capture_dir is not None else None
     try:
         source = MarketDataSource.from_jsonl(stub_event_log_path)
         return drive_runtime_events(
@@ -202,6 +205,7 @@ def run_stub_live(
         close = getattr(store, "close", None)
         if callable(close):
             close()
+        _write_capture_bundle_best_effort(capture_writer=capture_writer, db_path=getattr(store, "path", None), run_id=runtime.store.current_run_id)
 
 
 async def run_live(
@@ -217,12 +221,16 @@ async def run_live(
     execution_client: PolymarketExecutionClient | None = None,
     live_submit_guard: LiveSubmitGuard | None = None,
     resolved_redeem_interval_seconds: float | None = None,
+    capture_dir: str | Path | None = None,
 ) -> RunnerSummary:
     resolved_mode = ExecutionMode(str(execution_mode))
     runtime = build_live_runtime(db_path=db_path, run_id=run_id, config=config, config_hash=config_hash)
+    capture_writer = ReplayCaptureWriter(capture_dir) if capture_dir is not None else None
     client = execution_client
     if resolved_mode is ExecutionMode.LIVE:
         client = client or PolymarketExecutionClient()
+        if capture_writer is not None:
+            client = capture_writer.wrap_execution_client(client)
         client.startup()
         reconcile_runtime_orders(runtime=runtime, execution_client=client, execution_mode=resolved_mode)
     source = source or build_live_source(execution_mode=resolved_mode, execution_client=client)
@@ -257,6 +265,7 @@ async def run_live(
         close = getattr(store, "close", None)
         if callable(close):
             close()
+        _write_capture_bundle_best_effort(capture_writer=capture_writer, db_path=getattr(store, "path", None), run_id=runtime.store.current_run_id)
 
 
 def build_live_source(
@@ -363,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-events", type=int, default=None, help="Optional cap on processed live events, useful for smoke tests")
     parser.add_argument("--max-runtime-seconds", type=float, default=None, help="Optional wall-clock cap for live probes")
     parser.add_argument("--collector-csv", default=None, help="Optional collector CSV path for post-run cross-validation")
+    parser.add_argument("--capture-dir", default=None, help="Optional output directory for a Phase 4 replay capture bundle")
     parser.add_argument(
         "--min-book-updates-per-minute",
         type=float,
@@ -674,6 +684,32 @@ def _client_is_started(client: object) -> bool:
     return getattr(client, "_client", None) is not None
 
 
+def _write_capture_bundle_best_effort(*, capture_writer: ReplayCaptureWriter | None, db_path: str | Path | None, run_id: str | None) -> None:
+    if capture_writer is None or db_path is None or run_id is None:
+        return
+    try:
+        manifest = capture_writer.write_bundle(db_path=db_path, run_id=run_id)
+    except Exception as exc:
+        capture_writer.logger.warning(
+            "replay_capture_bundle_write_failed",
+            capture_dir=str(capture_writer.capture_dir),
+            db_path=str(db_path),
+            run_id=run_id,
+            error=str(exc),
+        )
+        return
+    capture_writer.logger.info(
+        "replay_capture_bundle_written",
+        capture_dir=str(capture_writer.capture_dir),
+        run_id=run_id,
+        events_log_count=manifest["files"]["events_log"]["count"],
+        market_state_snapshots_count=manifest["files"]["market_state_snapshots"]["count"],
+        venue_responses_count=manifest["files"]["venue_responses"]["count"],
+        orders_final_count=manifest["files"]["orders_final"]["count"],
+        fills_final_count=manifest["files"]["fills_final"]["count"],
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -717,6 +753,7 @@ def main(argv: list[str] | None = None) -> None:
             config=config,
             config_hash=args.config_hash,
             execution_mode=execution_mode,
+            capture_dir=args.capture_dir,
         )
     else:
         execution_client = None
@@ -755,6 +792,7 @@ def main(argv: list[str] | None = None) -> None:
                 execution_client=execution_client,
                 live_submit_guard=build_live_submit_guard(args),
                 resolved_redeem_interval_seconds=getattr(args, "redeem_resolved_interval_seconds", None),
+                capture_dir=args.capture_dir,
             )
         )
     logger = get_logger("short_horizon.live_runner", run_id=summary.run_id)

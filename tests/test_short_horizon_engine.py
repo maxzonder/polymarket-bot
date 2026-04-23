@@ -24,12 +24,13 @@ from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, O
 from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, PolygonUsdcBridgeSummary, ResolvedRedeemSummary, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, execute_polygon_usdc_bridge, execute_resolved_redeem, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
+from short_horizon.replay import ReplayCaptureWriter
 from short_horizon.replay_runner import replay_file
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
-from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolygonUsdcBridgeResult, VenueApiCredentials, VenueOrderState, VenuePlaceResult
+from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolygonUsdcBridgeResult, VenueApiCredentials, VenueOrderRequest, VenueOrderState, VenuePlaceResult
 from short_horizon.venue_polymarket import RedeemResult
 
 
@@ -135,6 +136,143 @@ class _FakeLiveRunnerClient:
 
     def list_open_orders(self, market_id=None):
         return list(self.open_orders_by_market.get(market_id, []))
+
+
+class ReplayCaptureWriterTest(unittest.TestCase):
+    def test_records_place_and_cancel_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = ReplayCaptureWriter(Path(tmpdir) / "capture")
+            client = _FakeLiveRunnerClient()
+            writer.wrap_execution_client(client)
+
+            place_result = client.place_order(
+                VenueOrderRequest(
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=1.818181,
+                    client_order_id="cid-123",
+                )
+            )
+            cancel_result = client.cancel_order(place_result.order_id)
+
+            records = writer.captured_venue_records()
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["kind"], "place_order")
+            self.assertEqual(records[0]["key"]["client_order_id"], "cid-123")
+            self.assertEqual(records[0]["response"]["order_id"], "venue-live-1")
+            self.assertEqual(records[1]["kind"], "cancel_order")
+            self.assertEqual(records[1]["key"]["venue_order_id"], place_result.order_id)
+            self.assertTrue(cancel_result.success)
+
+    def test_capture_record_error_does_not_propagate_to_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            writer = ReplayCaptureWriter(Path(tmpdir) / "capture")
+            client = _FakeLiveRunnerClient()
+            writer.wrap_execution_client(client)
+
+            with patch.object(writer, "_record_venue_response", side_effect=RuntimeError("boom")):
+                result = client.place_order(
+                    VenueOrderRequest(
+                        token_id="tok_yes",
+                        side="BUY",
+                        price=0.55,
+                        size=1.818181,
+                        client_order_id="cid-123",
+                    )
+                )
+
+            self.assertEqual(result.order_id, "venue-live-1")
+            self.assertEqual(writer.captured_venue_records(), [])
+
+    def test_run_stub_live_with_capture_dir_materializes_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            event_log_path = tmp_path / "stub_live_events.jsonl"
+            db_path = tmp_path / "live.sqlite3"
+            capture_dir = tmp_path / "capture_bundle"
+            event_log_path.write_text("\n".join(json.dumps(row) for row in self._sample_replay_rows()) + "\n", encoding="utf-8")
+
+            summary = run_stub_live(
+                stub_event_log_path=event_log_path,
+                db_path=db_path,
+                run_id="live_capture_test_001",
+                config_hash="test-config",
+                capture_dir=capture_dir,
+            )
+
+            self.assertEqual(summary.run_id, "live_capture_test_001")
+            expected_files = {
+                "events_log.jsonl",
+                "market_state_snapshots.jsonl",
+                "venue_responses.jsonl",
+                "orders_final.jsonl",
+                "fills_final.jsonl",
+                "manifest.json",
+            }
+            self.assertEqual(expected_files, {path.name for path in capture_dir.iterdir()})
+
+            manifest = json.loads((capture_dir / "manifest.json").read_text(encoding="utf-8"))
+            for key, filename in {
+                "events_log": "events_log.jsonl",
+                "market_state_snapshots": "market_state_snapshots.jsonl",
+                "venue_responses": "venue_responses.jsonl",
+                "orders_final": "orders_final.jsonl",
+                "fills_final": "fills_final.jsonl",
+            }.items():
+                file_path = capture_dir / filename
+                with file_path.open("r", encoding="utf-8") as handle:
+                    line_count = sum(1 for _ in handle)
+                self.assertEqual(manifest["files"][key]["count"], line_count)
+                self.assertEqual(manifest["files"][key]["path"], filename)
+
+            self.assertEqual(manifest["run_id"], "live_capture_test_001")
+            self.assertEqual(manifest["strategy_id"], "short_horizon_15m_touch_v1")
+            self.assertEqual(manifest["config_hash"], "test-config")
+
+    @staticmethod
+    def _sample_replay_rows() -> list[dict[str, object]]:
+        return [
+            {
+                "event_type": "MarketStateUpdate",
+                "event_time": "1970-01-01T00:03:20.000Z",
+                "ingest_time": "1970-01-01T00:03:20.050Z",
+                "source": "market_state",
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "condition_id": "c1",
+                "question": "Bitcoin Up or Down?",
+                "status": "active",
+                "start_time": "1970-01-01T00:00:00.000Z",
+                "end_time": "1970-01-01T00:15:00.000Z",
+                "duration_seconds": 900,
+                "asset_slug": "bitcoin",
+                "is_active": True,
+                "metadata_is_fresh": True,
+                "fee_rate_bps": 10.0,
+                "fee_metadata_age_ms": 1000,
+            },
+            {
+                "event_type": "BookUpdate",
+                "event_time": "1970-01-01T00:03:40.000Z",
+                "ingest_time": "1970-01-01T00:03:40.020Z",
+                "source": "book_update",
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "best_bid": 0.53,
+                "best_ask": 0.54,
+            },
+            {
+                "event_type": "BookUpdate",
+                "event_time": "1970-01-01T00:03:45.000Z",
+                "ingest_time": "1970-01-01T00:03:45.020Z",
+                "source": "book_update",
+                "market_id": "m1",
+                "token_id": "tok_yes",
+                "best_bid": 0.54,
+                "best_ask": 0.55,
+            },
+        ]
 
 
 class CoreTypesTest(unittest.TestCase):
@@ -1820,6 +1958,17 @@ class ReplayRunnerTest(unittest.TestCase):
         self.assertEqual(live_args.max_events, 5)
         self.assertEqual(live_args.max_runtime_seconds, 15.0)
         self.assertEqual(live_args.collector_csv, "collector.csv")
+
+        capture_args = parser.parse_args([
+            "live.sqlite3",
+            "--mode",
+            "stub",
+            "--stub-event-log-path",
+            "sample.jsonl",
+            "--capture-dir",
+            "captures/run_001",
+        ])
+        self.assertEqual(capture_args.capture_dir, "captures/run_001")
 
         approval_args = parser.parse_args([
             "live.sqlite3",
