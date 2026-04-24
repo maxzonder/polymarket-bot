@@ -209,6 +209,24 @@ class StrategyRuntime:
                     ),
                 )
 
+        max_orders_per_market_per_run = int(getattr(risk, "max_orders_per_market_per_run", 0) or 0)
+        if max_orders_per_market_per_run > 0:
+            market_orders_so_far = _count_non_rejected_orders_for_market(all_orders, market_id=decision.market_id)
+            projected_market_orders = market_orders_so_far + 1
+            if projected_market_orders > max_orders_per_market_per_run:
+                return SkipDecision(
+                    reason="max_orders_per_market_per_run_reached",
+                    market_id=decision.market_id,
+                    token_id=decision.token_id,
+                    level=decision.level,
+                    event_time_ms=decision.event_time_ms,
+                    details=(
+                        f"market_orders_so_far={market_orders_so_far} "
+                        f"projected_orders={projected_market_orders} "
+                        f"cap={max_orders_per_market_per_run}"
+                    ),
+                )
+
         max_tokens_with_exposure_per_market = int(getattr(risk, "max_tokens_with_exposure_per_market", 0) or 0)
         if max_tokens_with_exposure_per_market > 0:
             market_tokens_with_exposure = _tokens_with_exposure_for_market(all_orders, market_id=decision.market_id)
@@ -428,6 +446,17 @@ def _sum_order_notional_usdc(rows: list[dict], *, size_field: str) -> float:
             continue
         total_notional += float(price) * float(size)
     return total_notional
+
+
+def _count_non_rejected_orders_for_market(all_orders: list[dict], *, market_id: str) -> int:
+    count = 0
+    for row in all_orders:
+        if str(row.get("market_id") or "") != market_id:
+            continue
+        if str(row.get("state") or "") == OrderState.REJECTED.value:
+            continue
+        count += 1
+    return count
 
 
 def _tokens_with_exposure_for_market(all_orders: list[dict], *, market_id: str) -> set[str]:

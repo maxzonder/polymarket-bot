@@ -903,6 +903,76 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(outputs[0].reason, "max_open_orders_per_market_reached")
         self.assertEqual(len(engine.store.intents), 0)
 
+    def test_runtime_blocks_same_side_reentry_when_prior_fill_on_market_token(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    max_orders_per_market_per_run=1,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_prior_fill_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.55,
+            size=1.83,
+            state=OrderState.FILLED,
+            client_order_id="cli_prior_fill_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_500,
+            remaining_size=0.0,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.64, token_id="tok_yes")), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.66, token_id="tok_yes"))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_orders_per_market_per_run_reached")
+        self.assertIn("market_orders_so_far=1", outputs[0].details)
+        self.assertIn("cap=1", outputs[0].details)
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_ignores_rejected_orders_for_per_market_cap(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    max_orders_per_market_per_run=1,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_prior_reject_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.55,
+            size=1.83,
+            state=OrderState.REJECTED,
+            client_order_id="cli_prior_reject_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_500,
+            remaining_size=0.0,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54, token_id="tok_yes")), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55, token_id="tok_yes"))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], OrderIntent)
+
     def test_runtime_blocks_new_intent_when_max_daily_loss_usdc_is_already_breached(self) -> None:
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(
@@ -910,6 +980,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
                     max_daily_loss_usdc=5.0,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
+                    max_orders_per_market_per_run=10,
                     micro_live_cumulative_stake_cap_usdc=100.0,
                 )
             ),
@@ -980,6 +1051,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
                     max_daily_loss_usdc=1.0,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
+                    max_orders_per_market_per_run=10,
                     max_trade_notional_usdc=100.0,
                     micro_live_cumulative_stake_cap_usdc=100.0,
                 )
@@ -1186,6 +1258,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
             config=ShortHorizonConfig(
                 risk=RiskConfig(
                     max_open_orders_total=10,
+                    max_orders_per_market_per_run=10,
                     max_tokens_with_exposure_per_market=1,
                     micro_live_concurrent_open_notional_cap_usdc=100.0,
                     micro_live_cumulative_stake_cap_usdc=100.0,
