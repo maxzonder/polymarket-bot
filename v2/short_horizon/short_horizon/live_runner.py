@@ -174,7 +174,7 @@ def build_live_runtime(*, db_path: str | Path, run_id: str | None = None, config
     strategy = ShortHorizon15mTouchStrategy(config=config, clock=clock)
     hydrate_open_orders = getattr(strategy, "hydrate_open_orders", None)
     if callable(hydrate_open_orders):
-        hydrate_open_orders(store.load_non_terminal_orders())
+        hydrate_open_orders(store.load_all_orders())
     return StrategyRuntime(strategy=strategy, intent_store=store, clock=clock)
 
 
@@ -306,7 +306,7 @@ def reconcile_runtime_orders(
     reconciled = ExecutionEngine(store=runtime.store, client=execution_client, mode=resolved_mode, clock=runtime.clock).reconcile_persisted_orders()
     hydrate_open_orders = getattr(runtime.strategy, "hydrate_open_orders", None)
     if callable(hydrate_open_orders):
-        hydrate_open_orders(runtime.store.load_non_terminal_orders())
+        hydrate_open_orders(runtime.store.load_all_orders())
     return reconciled
 
 

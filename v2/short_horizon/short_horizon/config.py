@@ -48,6 +48,7 @@ class RiskConfig:
     max_consecutive_rejects: int = 5
     max_open_orders_total: int = 10
     max_open_orders_per_market: int = 1
+    max_tokens_with_exposure_per_market: int = 1
     micro_live_concurrent_open_notional_cap_usdc: float = 20.0
     micro_live_cumulative_stake_cap_usdc: float = 20.0
     max_trade_notional_usdc: float | None = None

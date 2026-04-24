@@ -202,6 +202,25 @@ class StrategyRuntime:
                     ),
                 )
 
+        max_tokens_with_exposure_per_market = int(getattr(risk, "max_tokens_with_exposure_per_market", 0) or 0)
+        if max_tokens_with_exposure_per_market > 0:
+            market_tokens_with_exposure = _tokens_with_exposure_for_market(all_orders, market_id=decision.market_id)
+            projected_market_tokens_with_exposure = set(market_tokens_with_exposure)
+            projected_market_tokens_with_exposure.add(decision.token_id)
+            if len(projected_market_tokens_with_exposure) > max_tokens_with_exposure_per_market:
+                return SkipDecision(
+                    reason="max_tokens_with_exposure_per_market_reached",
+                    market_id=decision.market_id,
+                    token_id=decision.token_id,
+                    level=decision.level,
+                    event_time_ms=decision.event_time_ms,
+                    details=(
+                        f"market_tokens_with_exposure={sorted(market_tokens_with_exposure)} "
+                        f"projected_tokens_with_exposure={sorted(projected_market_tokens_with_exposure)} "
+                        f"cap={max_tokens_with_exposure_per_market}"
+                    ),
+                )
+
         max_daily_loss_usdc = float(getattr(risk, "max_daily_loss_usdc", 0.0) or 0.0)
         if max_daily_loss_usdc > 0:
             realized_daily_pnl_usdc = _compute_realized_daily_pnl_usdc(
@@ -346,6 +365,33 @@ def _sum_order_notional_usdc(rows: list[dict], *, size_field: str) -> float:
             continue
         total_notional += float(price) * float(size)
     return total_notional
+
+
+def _tokens_with_exposure_for_market(all_orders: list[dict], *, market_id: str) -> set[str]:
+    tokens: set[str] = set()
+    for row in all_orders:
+        if str(row.get("market_id") or "") != market_id:
+            continue
+        if not _row_has_inventory_exposure(row):
+            continue
+        token_id = row.get("token_id")
+        if token_id is None:
+            continue
+        tokens.add(str(token_id))
+    return tokens
+
+
+def _row_has_inventory_exposure(row: dict) -> bool:
+    state = str(row.get("state") or "")
+    if state == OrderState.FILLED.value:
+        return True
+    cumulative_filled_size = row.get("cumulative_filled_size")
+    if cumulative_filled_size is None:
+        return False
+    try:
+        return float(cumulative_filled_size) > 1e-12
+    except (TypeError, ValueError):
+        return False
 
 
 def _order_intent_event(intent: OrderIntent) -> OrderIntentEvent:
