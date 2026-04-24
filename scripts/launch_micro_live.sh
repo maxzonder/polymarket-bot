@@ -54,6 +54,8 @@ exec "${PYTHON}" -m v2.short_horizon.short_horizon.live_runner \
     --execution-mode live \
     --allow-live-execution \
     --approve-allowances \
+    --redeem-resolved \
+    --redeem-resolved-interval-seconds 300 \
     --bridge-polygon-usdc-to-usdce \
     --capture-dir "${BUNDLE_DIR}" \
     --max-runtime-seconds 28800 \
