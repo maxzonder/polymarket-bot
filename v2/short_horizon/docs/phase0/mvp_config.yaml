@@ -53,7 +53,9 @@ risk:
   max_open_orders_per_market: 1
   max_live_positions_total: 10
   max_live_positions_per_market: 1
-  micro_live_total_stake_cap_usdc: 100
+  micro_live_concurrent_open_notional_cap_usdc: 100
+  micro_live_cumulative_stake_cap_usdc: 100
+  max_trade_notional_usdc: 1.5
 
 strategy:
   hold_to_resolution: true

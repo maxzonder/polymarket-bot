@@ -140,6 +140,21 @@ class StrategyRuntime:
         open_orders = [row for row in all_orders if str(row.get("state")) in _NON_TERMINAL_ORDER_STATES]
         effective_notional = self._effective_notional_usdc(decision)
 
+        max_trade_notional_usdc = _resolve_max_trade_notional_usdc(risk=risk, config=config)
+        if max_trade_notional_usdc > 0 and effective_notional > max_trade_notional_usdc + 1e-9:
+            return SkipDecision(
+                reason="max_trade_notional_usdc_reached",
+                market_id=decision.market_id,
+                token_id=decision.token_id,
+                level=decision.level,
+                event_time_ms=decision.event_time_ms,
+                details=(
+                    f"intent_notional_usdc={float(decision.notional_usdc):.6f} "
+                    f"effective_notional_usdc={effective_notional:.6f} "
+                    f"cap_usdc={max_trade_notional_usdc:.6f}"
+                ),
+            )
+
         max_notional_per_strategy_usdc = float(getattr(risk, "max_notional_per_strategy_usdc", 0.0) or 0.0)
         if max_notional_per_strategy_usdc > 0:
             current_strategy_notional = _sum_open_notional_usdc(open_orders)
@@ -222,20 +237,37 @@ class StrategyRuntime:
                     details=f"consecutive_rejects={consecutive_rejects} cap={max_consecutive_rejects}",
                 )
 
-        stake_cap_usdc = float(getattr(risk, "micro_live_total_stake_cap_usdc", 0.0) or 0.0)
-        if stake_cap_usdc > 0:
+        concurrent_open_cap_usdc = float(getattr(risk, "micro_live_concurrent_open_notional_cap_usdc", 0.0) or 0.0)
+        if concurrent_open_cap_usdc > 0:
             current_open_notional = _sum_open_notional_usdc(open_orders)
             projected_open_notional = current_open_notional + effective_notional
-            if projected_open_notional > stake_cap_usdc + 1e-9:
+            if projected_open_notional > concurrent_open_cap_usdc + 1e-9:
                 return SkipDecision(
-                    reason="micro_live_total_stake_cap_reached",
+                    reason="micro_live_concurrent_open_notional_cap_reached",
                     market_id=decision.market_id,
                     token_id=decision.token_id,
                     level=decision.level,
                     event_time_ms=decision.event_time_ms,
                     details=(
                         f"open_notional_usdc={current_open_notional:.6f} "
-                        f"projected_usdc={projected_open_notional:.6f} cap_usdc={stake_cap_usdc:.6f}"
+                        f"projected_usdc={projected_open_notional:.6f} cap_usdc={concurrent_open_cap_usdc:.6f}"
+                    ),
+                )
+
+        cumulative_stake_cap_usdc = float(getattr(risk, "micro_live_cumulative_stake_cap_usdc", 0.0) or 0.0)
+        if cumulative_stake_cap_usdc > 0:
+            current_cumulative_stake_usdc = _sum_cumulative_stake_usdc(all_orders)
+            projected_cumulative_stake_usdc = current_cumulative_stake_usdc + effective_notional
+            if projected_cumulative_stake_usdc > cumulative_stake_cap_usdc + 1e-9:
+                return SkipDecision(
+                    reason="micro_live_cumulative_stake_cap_reached",
+                    market_id=decision.market_id,
+                    token_id=decision.token_id,
+                    level=decision.level,
+                    event_time_ms=decision.event_time_ms,
+                    details=(
+                        f"cumulative_stake_usdc={current_cumulative_stake_usdc:.6f} "
+                        f"projected_usdc={projected_cumulative_stake_usdc:.6f} cap_usdc={cumulative_stake_cap_usdc:.6f}"
                     ),
                 )
         return decision
@@ -283,15 +315,37 @@ _NON_TERMINAL_ORDER_STATES = {
 }
 
 
+def _resolve_max_trade_notional_usdc(*, risk: object, config: object | None) -> float:
+    configured_cap = getattr(risk, "max_trade_notional_usdc", None)
+    if configured_cap is not None:
+        return float(configured_cap or 0.0)
+    execution = getattr(config, "execution", None)
+    target_trade_size_usdc = float(getattr(execution, "target_trade_size_usdc", 0.0) or 0.0)
+    if target_trade_size_usdc <= 0:
+        return 0.0
+    return target_trade_size_usdc * 1.5
+
+
 def _sum_open_notional_usdc(open_orders: list[dict]) -> float:
-    current_open_notional = 0.0
-    for row in open_orders:
+    return _sum_order_notional_usdc(open_orders, size_field="remaining_size")
+
+
+def _sum_cumulative_stake_usdc(all_orders: list[dict]) -> float:
+    attempted_orders = [row for row in all_orders if str(row.get("state") or "") != OrderState.REJECTED.value]
+    return _sum_order_notional_usdc(attempted_orders, size_field="size")
+
+
+def _sum_order_notional_usdc(rows: list[dict], *, size_field: str) -> float:
+    total_notional = 0.0
+    for row in rows:
         price = row.get("price")
-        size = row.get("remaining_size") if row.get("remaining_size") is not None else row.get("size")
+        size = row.get(size_field)
+        if size is None and size_field != "size":
+            size = row.get("size")
         if price is None or size is None:
             continue
-        current_open_notional += float(price) * float(size)
-    return current_open_notional
+        total_notional += float(price) * float(size)
+    return total_notional
 
 
 def _order_intent_event(intent: OrderIntent) -> OrderIntentEvent:

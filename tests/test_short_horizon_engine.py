@@ -673,7 +673,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
 
     def test_runtime_blocks_new_intent_when_max_open_orders_total_reached(self) -> None:
         engine = ShortHorizonEngine(
-            config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=1, micro_live_total_stake_cap_usdc=100.0)),
+            config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=1, micro_live_cumulative_stake_cap_usdc=100.0)),
             intent_store=InMemoryIntentStore(),
         )
         engine.on_market_state(self._market_state(token_id="tok_yes"))
@@ -706,7 +706,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
                     max_notional_per_strategy_usdc=0.5,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
-                    micro_live_total_stake_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
                 )
             ),
             intent_store=InMemoryIntentStore(),
@@ -726,9 +726,10 @@ class ShortHorizonEngineTest(unittest.TestCase):
             config=ShortHorizonConfig(
                 risk=RiskConfig(
                     max_notional_per_strategy_usdc=2.0,
+                    max_trade_notional_usdc=100.0,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
-                    micro_live_total_stake_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
                 )
             ),
             intent_store=InMemoryIntentStore(),
@@ -748,13 +749,43 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertIn("projected_usdc=2.7", outputs[0].details)
         self.assertEqual(len(engine.store.intents), 0)
 
+    def test_runtime_blocks_new_intent_when_effective_trade_notional_exceeds_cap(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_trade_notional_usdc=2.0,
+                    max_notional_per_strategy_usdc=100.0,
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    micro_live_concurrent_open_notional_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        market_state = self._market_state(token_id="tok_yes")
+        market_state = MarketStateUpdate(
+            **{**market_state.__dict__, "tick_size": 0.01, "min_order_size": 5.0}
+        )
+        engine.on_market_state(market_state)
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_trade_notional_usdc_reached")
+        self.assertIn("effective_notional_usdc=", outputs[0].details)
+        self.assertIn("cap_usdc=2.000000", outputs[0].details)
+        self.assertEqual(len(engine.store.intents), 0)
+
     def test_runtime_blocks_new_intent_when_max_open_orders_per_market_reached(self) -> None:
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(
                 risk=RiskConfig(
                     max_open_orders_total=10,
                     max_open_orders_per_market=1,
-                    micro_live_total_stake_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
                 )
             ),
             intent_store=InMemoryIntentStore(),
@@ -789,7 +820,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
                     max_daily_loss_usdc=5.0,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
-                    micro_live_total_stake_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
                 )
             ),
             intent_store=InMemoryIntentStore(),
@@ -859,7 +890,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
                     max_consecutive_rejects=3,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
-                    micro_live_total_stake_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
                 )
             ),
             intent_store=InMemoryIntentStore(),
@@ -891,7 +922,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
 
     def test_runtime_blocks_new_intent_in_global_safe_mode(self) -> None:
         engine = ShortHorizonEngine(
-            config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True, max_open_orders_total=10, micro_live_total_stake_cap_usdc=100.0)),
+            config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True, max_open_orders_total=10, micro_live_cumulative_stake_cap_usdc=100.0)),
             intent_store=InMemoryIntentStore(),
         )
         engine.on_market_state(self._market_state(token_id="tok_yes"))
@@ -905,9 +936,15 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(outputs[0].details, "operator_requested")
         self.assertEqual(len(engine.store.intents), 0)
 
-    def test_runtime_blocks_new_intent_when_micro_live_stake_cap_would_be_exceeded(self) -> None:
+    def test_runtime_blocks_new_intent_when_concurrent_open_notional_cap_would_be_exceeded(self) -> None:
         engine = ShortHorizonEngine(
-            config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=10, micro_live_total_stake_cap_usdc=10.0)),
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_open_orders_total=10,
+                    micro_live_concurrent_open_notional_cap_usdc=10.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
+                )
+            ),
             intent_store=InMemoryIntentStore(),
         )
         engine.on_market_state(self._market_state(token_id="tok_yes"))
@@ -930,7 +967,41 @@ class ShortHorizonEngineTest(unittest.TestCase):
 
         self.assertEqual(len(outputs), 1)
         self.assertIsInstance(outputs[0], SkipDecision)
-        self.assertEqual(outputs[0].reason, "micro_live_total_stake_cap_reached")
+        self.assertEqual(outputs[0].reason, "micro_live_concurrent_open_notional_cap_reached")
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_blocks_new_intent_when_cumulative_stake_cap_would_be_exceeded(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_open_orders_total=10,
+                    micro_live_concurrent_open_notional_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=10.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_existing_001",
+            market_id="m2",
+            token_id="tok_other",
+            side="BUY",
+            price=0.50,
+            size=20.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_existing_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "micro_live_cumulative_stake_cap_reached")
         self.assertEqual(len(engine.store.intents), 0)
 
 
@@ -3723,7 +3794,7 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             summary = await run_live(
                 db_path=db_path,
                 run_id=run_id,
-                config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=1, micro_live_total_stake_cap_usdc=100.0)),
+                config=ShortHorizonConfig(risk=RiskConfig(max_open_orders_total=1, micro_live_cumulative_stake_cap_usdc=100.0)),
                 config_hash="test-config",
                 source=source,
                 max_events=3,
@@ -3795,7 +3866,7 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             summary = await run_live(
                 db_path=db_path,
                 run_id="live_exec_safe_mode_test_001",
-                config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True, max_open_orders_total=10, micro_live_total_stake_cap_usdc=100.0)),
+                config=ShortHorizonConfig(risk=RiskConfig(global_safe_mode=True, max_open_orders_total=10, micro_live_cumulative_stake_cap_usdc=100.0)),
                 config_hash="test-config",
                 source=source,
                 max_events=3,
