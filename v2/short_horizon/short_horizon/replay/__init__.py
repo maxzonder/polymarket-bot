@@ -13,6 +13,7 @@ from ..core.events import (
     BookUpdate,
     EventType,
     LiquidityRole,
+    MarketResolvedWithInventory,
     MarketStateUpdate,
     MarketStatus,
     NormalizedEvent,
@@ -225,6 +226,21 @@ def parse_event_record(payload: dict[str, Any]) -> NormalizedEvent:
             cancel_reason=_parse_optional_str(payload.get("cancel_reason")),
             cumulative_filled_size=_parse_optional_float(payload.get("cumulative_filled_size")),
             remaining_size=_parse_optional_float(payload.get("remaining_size")),
+            run_id=_parse_optional_str(payload.get("run_id")),
+        )
+
+    if event_type == EventType.MARKET_RESOLVED_WITH_INVENTORY:
+        return MarketResolvedWithInventory(
+            event_time_ms=_parse_timestamp_ms(payload.get("event_time_ms", payload.get("event_time"))),
+            ingest_time_ms=_parse_timestamp_ms(payload.get("ingest_time_ms", payload.get("ingest_time"))),
+            market_id=str(payload["market_id"]),
+            token_id=str(payload["token_id"]),
+            side=OrderSide(str(payload["side"])),
+            size=float(payload["size"]),
+            outcome_price=float(payload["outcome_price"]),
+            average_entry_price=float(payload["average_entry_price"]),
+            estimated_pnl_usdc=float(payload["estimated_pnl_usdc"]),
+            source=str(payload.get("source", "runtime.market_resolved_holding")),
             run_id=_parse_optional_str(payload.get("run_id")),
         )
 

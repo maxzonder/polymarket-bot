@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from ..core.events import (
     BookUpdate,
+    MarketResolvedWithInventory,
     MarketStateUpdate,
     NormalizedEvent,
     OrderAccepted,
@@ -929,6 +930,22 @@ def normalize_event_payload(event: NormalizedEvent) -> dict[str, Any]:
             "cancel_reason": event.cancel_reason,
             "cumulative_filled_size": event.cumulative_filled_size,
             "remaining_size": event.remaining_size,
+        }
+
+    if isinstance(event, MarketResolvedWithInventory):
+        return {
+            "event_type": "MarketResolvedWithInventory",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "market_id": event.market_id,
+            "token_id": event.token_id,
+            "side": event.side,
+            "size": event.size,
+            "outcome_price": event.outcome_price,
+            "average_entry_price": event.average_entry_price,
+            "estimated_pnl_usdc": event.estimated_pnl_usdc,
+            "run_id": event.run_id,
         }
 
     status = "active" if event.is_active else "closed"
