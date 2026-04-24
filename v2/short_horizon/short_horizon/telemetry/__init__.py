@@ -18,6 +18,7 @@ def configure_logging(
     *,
     level: int | str = logging.INFO,
     stream: TextIO | None = None,
+    alert_handler: logging.Handler | None = None,
 ) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -30,6 +31,9 @@ def configure_logging(
     setattr(handler, _HANDLER_MARKER, True)
     handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(handler)
+    if alert_handler is not None:
+        setattr(alert_handler, _HANDLER_MARKER, True)
+        logger.addHandler(alert_handler)
 
     structlog.configure(
         processors=[

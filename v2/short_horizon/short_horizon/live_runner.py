@@ -22,6 +22,8 @@ from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_eve
 from .storage import RunContext, SQLiteRuntimeStore
 from .strategies import ShortHorizon15mTouchStrategy
 from .telemetry import configure_logging, get_logger
+from .telemetry.alerting import create_telegram_alert_handler
+import os
 from .venue_polymarket import PolymarketUserStream
 from .venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolymarketExecutionClient, PolygonUsdcBridgeResult
 
@@ -729,7 +731,11 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     execution_mode = validate_cli_args(parser, args)
     config = apply_cli_config_overrides(None, args)
-    configure_logging()
+    alert_handler = create_telegram_alert_handler(
+        bot_token=os.environ.get("TELEGRAM_BOT_TOKEN"),
+        chat_id=os.environ.get("TELEGRAM_CHAT_ID")
+    )
+    configure_logging(alert_handler=alert_handler)
 
     if getattr(args, "kill_switch", False):
         try:
