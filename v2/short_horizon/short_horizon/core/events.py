@@ -29,6 +29,7 @@ class EventType(StrEnum):
     ORDER_REJECTED = "OrderRejected"
     ORDER_FILLED = "OrderFilled"
     ORDER_CANCELED = "OrderCanceled"
+    MARKET_RESOLVED_WITH_INVENTORY = "MarketResolvedWithInventory"
 
 
 class MarketStatus(StrEnum):
@@ -254,6 +255,22 @@ class OrderCanceled:
     event_type: EventType = field(default=EventType.ORDER_CANCELED, init=False)
 
 
+@dataclass(frozen=True)
+class MarketResolvedWithInventory:
+    event_time_ms: EventTime
+    ingest_time_ms: IngestTime
+    market_id: MarketId
+    token_id: TokenId
+    side: OrderSide
+    size: float
+    outcome_price: float
+    average_entry_price: float
+    estimated_pnl_usdc: float
+    source: str = "runtime.market_resolved_holding"
+    run_id: RunId | None = None
+    event_type: EventType = field(default=EventType.MARKET_RESOLVED_WITH_INVENTORY, init=False)
+
+
 NormalizedEvent: TypeAlias = (
     BookUpdate
     | TradeTick
@@ -265,4 +282,5 @@ NormalizedEvent: TypeAlias = (
     | OrderRejected
     | OrderFilled
     | OrderCanceled
+    | MarketResolvedWithInventory
 )

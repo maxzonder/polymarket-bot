@@ -1,6 +1,7 @@
 from .core.events import (
     BookLevel,
     BookUpdate,
+    MarketResolvedWithInventory,
     MarketStateUpdate,
     OrderAccepted,
     OrderCanceled,
@@ -15,6 +16,7 @@ from .core.events import (
 __all__ = [
     "BookLevel",
     "BookUpdate",
+    "MarketResolvedWithInventory",
     "MarketStateUpdate",
     "OrderAccepted",
     "OrderCanceled",
