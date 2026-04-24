@@ -63,6 +63,7 @@ class ShortHorizon15mTouchStrategy:
         self.market_state_by_token: dict[str, MarketState] = {}
         self.active_order_ids_by_market_token: dict[tuple[str, str], str] = {}
         self.active_order_states_by_market_token: dict[tuple[str, str], OrderState] = {}
+        self.active_inventory_by_market: dict[str, set[str]] = {}
 
     def on_market_event(self, event: BookUpdate | MarketStateUpdate | TradeTick) -> list[StrategyIntent]:
         if isinstance(event, MarketStateUpdate):
@@ -79,6 +80,17 @@ class ShortHorizon15mTouchStrategy:
                         market_id=event.market_id,
                         token_id=event.token_id,
                         details={"existing_order_id": self.active_order_ids_by_market_token[(event.market_id, event.token_id)]},
+                    )
+                )
+                continue
+            market_inventory = self.active_inventory_by_market.get(event.market_id, set())
+            if market_inventory:
+                outputs.append(
+                    Noop(
+                        reason="opposite_side_position_on_market",
+                        market_id=event.market_id,
+                        token_id=event.token_id,
+                        details={"inventory_token_ids": sorted(market_inventory)},
                     )
                 )
                 continue
@@ -103,6 +115,7 @@ class ShortHorizon15mTouchStrategy:
             self.active_order_states_by_market_token[key] = OrderState.ACCEPTED
             return []
         if isinstance(event, OrderFilled):
+            self.active_inventory_by_market.setdefault(event.market_id, set()).add(event.token_id)
             if event.remaining_size > 1e-12:
                 self.active_order_ids_by_market_token[key] = event.order_id
                 self.active_order_states_by_market_token[key] = OrderState.PARTIALLY_FILLED
@@ -120,11 +133,16 @@ class ShortHorizon15mTouchStrategy:
     def hydrate_open_orders(self, rows: Iterable[dict]) -> None:
         self.active_order_ids_by_market_token.clear()
         self.active_order_states_by_market_token.clear()
+        self.active_inventory_by_market.clear()
         for row in rows:
             state = OrderState(str(row["state"]))
+            market_id = str(row["market_id"])
+            token_id = str(row["token_id"])
+            if _row_has_inventory_exposure(row, state=state):
+                self.active_inventory_by_market.setdefault(market_id, set()).add(token_id)
             if state in {OrderState.REJECTED, OrderState.FILLED, OrderState.CANCEL_CONFIRMED, OrderState.EXPIRED, OrderState.REPLACED}:
                 continue
-            key = (str(row["market_id"]), str(row["token_id"]))
+            key = (market_id, token_id)
             self.active_order_ids_by_market_token[key] = str(row["order_id"])
             self.active_order_states_by_market_token[key] = state
 
@@ -143,6 +161,8 @@ class ShortHorizon15mTouchStrategy:
             fee_fetched_at_ms=event.fee_fetched_at_ms,
             fee_metadata_age_ms=event.fee_metadata_age_ms,
         )
+        if not event.is_active or event.event_time_ms >= event.end_time_ms:
+            self.active_inventory_by_market.pop(event.market_id, None)
         if self.config.execution.hold_to_resolution:
             return []
         key = (event.market_id, event.token_id)
@@ -198,3 +218,15 @@ class ShortHorizon15mTouchStrategy:
 
     def _has_active_order(self, *, market_id: str, token_id: str) -> bool:
         return (market_id, token_id) in self.active_order_ids_by_market_token
+
+
+def _row_has_inventory_exposure(row: dict, *, state: OrderState) -> bool:
+    if state is OrderState.FILLED:
+        return True
+    cumulative_filled_size = row.get("cumulative_filled_size")
+    if cumulative_filled_size is None:
+        return False
+    try:
+        return float(cumulative_filled_size) > 1e-12
+    except (TypeError, ValueError):
+        return False
