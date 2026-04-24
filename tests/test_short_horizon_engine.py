@@ -464,6 +464,67 @@ class StrategyApiContractTest(unittest.TestCase):
         )
         self.assertEqual(strategy.active_order_ids_by_market_token, {})
 
+    def test_touch_strategy_skips_opposite_side_when_market_inventory_exists(self) -> None:
+        strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig())
+        strategy.on_market_event(
+            MarketStateUpdate(
+                event_time_ms=200_000,
+                ingest_time_ms=200_050,
+                market_id="m1",
+                token_id="tok_yes",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                asset_slug="bitcoin",
+                start_time_ms=0,
+                end_time_ms=900_000,
+                is_active=True,
+                metadata_is_fresh=True,
+                fee_rate_bps=10.0,
+                fee_metadata_age_ms=1_000,
+            )
+        )
+        strategy.on_market_event(
+            MarketStateUpdate(
+                event_time_ms=200_000,
+                ingest_time_ms=200_050,
+                market_id="m1",
+                token_id="tok_no",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                asset_slug="bitcoin",
+                start_time_ms=0,
+                end_time_ms=900_000,
+                is_active=True,
+                metadata_is_fresh=True,
+                fee_rate_bps=10.0,
+                fee_metadata_age_ms=1_000,
+            )
+        )
+        strategy.on_order_event(
+            OrderFilled(
+                event_time_ms=225_001,
+                ingest_time_ms=225_001,
+                order_id="ord_fill_yes",
+                market_id="m1",
+                token_id="tok_yes",
+                side="buy",
+                fill_price=0.55,
+                fill_size=1.0,
+                cumulative_filled_size=1.0,
+                remaining_size=0.0,
+                source="test",
+                run_id="run1",
+            )
+        )
+
+        self.assertEqual(strategy.on_market_event(BookUpdate(event_time_ms=220_000, ingest_time_ms=220_020, market_id="m1", token_id="tok_no", best_bid=0.53, best_ask=0.54)), [])
+        outputs = strategy.on_market_event(BookUpdate(event_time_ms=225_000, ingest_time_ms=225_020, market_id="m1", token_id="tok_no", best_bid=0.54, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], Noop)
+        self.assertEqual(outputs[0].reason, "opposite_side_position_on_market")
+        self.assertEqual(outputs[0].details, {"inventory_token_ids": ["tok_yes"]})
+
     def test_touch_strategy_emits_cancel_when_market_closes_and_hold_to_resolution_disabled(self) -> None:
         strategy = ShortHorizon15mTouchStrategy(
             config=ShortHorizonConfig(
@@ -1002,6 +1063,51 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertIsInstance(outputs[0], SkipDecision)
         self.assertEqual(outputs[0].reason, "micro_live_cumulative_stake_cap_reached")
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_blocks_new_token_when_market_exposure_cap_would_be_exceeded(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_open_orders_total=10,
+                    max_tokens_with_exposure_per_market=1,
+                    micro_live_concurrent_open_notional_cap_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
+                    max_trade_notional_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_no"))
+        engine.store.insert_order(
+            order_id="ord_existing_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.50,
+            size=20.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_existing_001",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+        engine.store.update_order_state(
+            order_id="ord_existing_001",
+            state=OrderState.FILLED,
+            event_time_ms=210_100,
+            cumulative_filled_size=20.0,
+            remaining_size=0.0,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(token_id="tok_no", event_time_ms=220_000, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(token_id="tok_no", event_time_ms=225_000, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_tokens_with_exposure_per_market_reached")
+        self.assertIn("tok_yes", outputs[0].details)
+        self.assertIn("tok_no", outputs[0].details)
         self.assertEqual(len(engine.store.intents), 0)
 
 
@@ -3998,6 +4104,52 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             runtime = build_live_runtime(db_path=db_path, run_id="live_restart_test_001", config_hash="test-config")
             try:
                 self.assertEqual(runtime.strategy.active_order_ids_by_market_token, {("m1", "tok_yes"): "ord_seed_1"})
+                self.assertEqual(runtime.strategy.active_inventory_by_market, {})
+            finally:
+                runtime.store.close()
+
+    def test_build_live_runtime_hydrates_filled_inventory_exposure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "live_restart_inventory.sqlite3"
+            seed_store = SQLiteRuntimeStore(
+                db_path,
+                run=RunContext(
+                    run_id="live_restart_test_inventory_001",
+                    strategy_id="short_horizon_15m_touch_v1",
+                    config_hash="test-config",
+                ),
+            )
+            try:
+                seed_store.insert_order(
+                    order_id="ord_seed_fill_1",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.55,
+                    size=18.1818181818,
+                    state=OrderState.FILLED,
+                    client_order_id="cid-fill-1",
+                    venue_order_id="venue-fill-1",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_100,
+                    remaining_size=0.0,
+                    venue_order_status="matched",
+                    reconciliation_required=False,
+                )
+                seed_store.update_order_state(
+                    order_id="ord_seed_fill_1",
+                    state=OrderState.FILLED,
+                    event_time_ms=225_100,
+                    cumulative_filled_size=18.1818181818,
+                    remaining_size=0.0,
+                )
+            finally:
+                seed_store.close()
+
+            runtime = build_live_runtime(db_path=db_path, run_id="live_restart_test_inventory_001", config_hash="test-config")
+            try:
+                self.assertEqual(runtime.strategy.active_order_ids_by_market_token, {})
+                self.assertEqual(runtime.strategy.active_inventory_by_market, {"m1": {"tok_yes"}})
             finally:
                 runtime.store.close()
 
@@ -4055,6 +4207,7 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(reconciled, 1)
                 self.assertEqual(runtime.strategy.active_order_ids_by_market_token, {})
+                self.assertEqual(runtime.strategy.active_inventory_by_market, {})
             finally:
                 runtime.store.close()
 
