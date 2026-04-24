@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
@@ -2646,11 +2646,13 @@ class ReplayRunnerTest(unittest.TestCase):
             "--redeem-resolved",
             "--redeem-resolved-interval-seconds",
             "60",
+            "--no-final-redeem",
             "--max-events",
             "1",
         ])
         self.assertTrue(redeem_args.redeem_resolved)
         self.assertEqual(redeem_args.redeem_resolved_interval_seconds, 60.0)
+        self.assertTrue(redeem_args.no_final_redeem)
 
         bridge_args = parser.parse_args([
             "live.sqlite3",
@@ -3047,7 +3049,13 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertIsNone(main(argv))
 
         client = client_ctor.return_value
-        redeem_mock.assert_called_once_with(None, execution_client=client)
+        self.assertEqual(
+            redeem_mock.call_args_list,
+            [
+                call(None, execution_client=client),
+                call("live_test_001", execution_client=client),
+            ],
+        )
         bridge_mock.assert_called_once_with(
             None,
             execution_client=client,
@@ -3056,6 +3064,70 @@ class ReplayRunnerTest(unittest.TestCase):
         approve_mock.assert_called_once_with(None, execution_client=client)
         self.assertEqual(run_live_mock.call_args.kwargs["execution_client"], client)
         self.assertEqual(run_live_mock.call_args.kwargs["resolved_redeem_interval_seconds"], 60.0)
+
+    def test_main_live_mode_can_disable_final_redeem(self) -> None:
+        argv = [
+            "live.sqlite3",
+            "--mode",
+            "live",
+            "--execution-mode",
+            "live",
+            "--allow-live-execution",
+            "--no-final-redeem",
+            "--max-events",
+            "1",
+        ]
+
+        fake_summary = type("Summary", (), {"run_id": "live_test_002", "event_count": 0, "order_intents": 0, "synthetic_order_events": 0, "db_path": "live.sqlite3"})()
+        fake_probe = type(
+            "ProbeSummary",
+            (),
+            {
+                "run_id": "live_test_002",
+                "total_events": 0,
+                "market_state_updates": 0,
+                "book_updates": 0,
+                "trade_ticks": 0,
+                "order_events": 0,
+                "distinct_markets": 0,
+                "distinct_tokens": 0,
+                "first_event_time": None,
+                "last_event_time": None,
+                "window_minutes": 0.0,
+                "book_updates_per_minute": 0.0,
+            },
+        )()
+
+        with patch.dict(os.environ, {PRIVATE_KEY_ENV_VAR: "test-private-key"}, clear=True), patch(
+            "short_horizon.live_runner.PolymarketExecutionClient",
+            return_value=_FakeLiveRunnerClient(),
+        ) as client_ctor, patch(
+            "short_horizon.live_runner.execute_resolved_redeem",
+            return_value=ResolvedRedeemSummary(
+                total_actions=0,
+                redeemed_count=0,
+                skipped_negative_risk_count=0,
+                skipped_proxy_wallet_count=0,
+                error_count=0,
+            ),
+        ) as redeem_mock, patch(
+            "short_horizon.live_runner.run_live",
+            return_value=fake_summary,
+        ) as run_live_mock, patch(
+            "short_horizon.live_runner.asyncio.run",
+            side_effect=lambda coro: coro.close() or fake_summary,
+        ), patch(
+            "short_horizon.live_runner.summarize_probe_db",
+            return_value=fake_probe,
+        ), patch(
+            "short_horizon.live_runner.assert_min_book_updates_per_minute",
+            return_value=None,
+        ):
+            self.assertIsNone(main(argv))
+
+        client_ctor.assert_not_called()
+        redeem_mock.assert_not_called()
+        self.assertIsNone(run_live_mock.call_args.kwargs["execution_client"])
 
     def test_live_runner_cli_validation_requires_bounded_live_probe(self) -> None:
         parser = build_parser()

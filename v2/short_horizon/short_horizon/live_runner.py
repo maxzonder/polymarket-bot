@@ -369,6 +369,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional periodic cadence for resolved-position redeem sweeps during a live run; requires --redeem-resolved",
     )
     parser.add_argument(
+        "--no-final-redeem",
+        action="store_true",
+        help="Skip the best-effort resolved-position redeem sweep after the live run finishes",
+    )
+    parser.add_argument(
         "--bridge-polygon-usdc-to-usdce",
         action="store_true",
         help="Use the Polymarket bridge deposit flow to convert Polygon native USDC into Polygon USDC.e before the live run",
@@ -754,6 +759,7 @@ def main(argv: list[str] | None = None) -> None:
         safe_mode=bool(args.safe_mode),
         redeem_resolved=bool(getattr(args, "redeem_resolved", False)),
         redeem_resolved_interval_seconds=getattr(args, "redeem_resolved_interval_seconds", None),
+        no_final_redeem=bool(getattr(args, "no_final_redeem", False)),
         approve_allowances=bool(getattr(args, "approve_allowances", False)),
         bridge_polygon_usdc_to_usdce=bool(getattr(args, "bridge_polygon_usdc_to_usdce", False)),
         bridge_polygon_usdc_amount=getattr(args, "bridge_polygon_usdc_amount", None),
@@ -777,10 +783,12 @@ def main(argv: list[str] | None = None) -> None:
         )
     else:
         execution_client = None
+        final_redeem_enabled = execution_mode is ExecutionMode.LIVE and not getattr(args, "no_final_redeem", False)
         if execution_mode is ExecutionMode.LIVE and (
             getattr(args, "redeem_resolved", False)
             or getattr(args, "approve_allowances", False)
             or getattr(args, "bridge_polygon_usdc_to_usdce", False)
+            or final_redeem_enabled
         ):
             execution_client = PolymarketExecutionClient()
         if execution_mode is ExecutionMode.LIVE and getattr(args, "redeem_resolved", False):
@@ -800,21 +808,42 @@ def main(argv: list[str] | None = None) -> None:
             )
         if execution_mode is ExecutionMode.LIVE and getattr(args, "approve_allowances", False):
             execute_allowance_approve(args.run_id, execution_client=execution_client)
-        summary = asyncio.run(
-            run_live(
-                db_path=args.db_path,
-                run_id=args.run_id,
-                config=config,
-                config_hash=args.config_hash,
-                max_events=args.max_events,
-                max_runtime_seconds=args.max_runtime_seconds,
-                execution_mode=execution_mode,
-                execution_client=execution_client,
-                live_submit_guard=build_live_submit_guard(args),
-                resolved_redeem_interval_seconds=getattr(args, "redeem_resolved_interval_seconds", None),
-                capture_dir=args.capture_dir,
+        summary = None
+        run_error: BaseException | None = None
+        try:
+            summary = asyncio.run(
+                run_live(
+                    db_path=args.db_path,
+                    run_id=args.run_id,
+                    config=config,
+                    config_hash=args.config_hash,
+                    max_events=args.max_events,
+                    max_runtime_seconds=args.max_runtime_seconds,
+                    execution_mode=execution_mode,
+                    execution_client=execution_client,
+                    live_submit_guard=build_live_submit_guard(args),
+                    resolved_redeem_interval_seconds=getattr(args, "redeem_resolved_interval_seconds", None),
+                    capture_dir=args.capture_dir,
+                )
             )
-        )
+        except BaseException as exc:
+            run_error = exc
+        finally:
+            if final_redeem_enabled:
+                final_redeem_run_id = getattr(summary, "run_id", None) if summary is not None else args.run_id
+                try:
+                    execute_resolved_redeem(final_redeem_run_id, execution_client=execution_client)
+                except Exception as redeem_exc:
+                    if run_error is None:
+                        raise
+                    logger.exception(
+                        "live_final_redeem_failed_after_run_error",
+                        error=str(redeem_exc),
+                    )
+        if run_error is not None:
+            raise run_error
+        if summary is None:
+            raise RuntimeError("live runner finished without a summary")
     logger = get_logger("short_horizon.live_runner", run_id=summary.run_id)
     probe_summary = summarize_probe_db(args.db_path, run_id=summary.run_id)
     logger.info(
