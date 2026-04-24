@@ -50,6 +50,7 @@ sleep 3
 
 exec "${PYTHON}" -m v2.short_horizon.short_horizon.live_runner \
     "${DB_PATH}" \
+    --mode live \
     --execution-mode live \
     --allow-live-execution \
     --capture-dir "${BUNDLE_DIR}" \
