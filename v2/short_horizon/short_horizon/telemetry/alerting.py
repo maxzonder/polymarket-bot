@@ -36,6 +36,11 @@ class TelegramWebhookHandler(logging.Handler):
             )
             with urllib.request.urlopen(req, timeout=5) as response:
                 pass
+        except urllib.error.HTTPError as e:
+            if e.code == 404 or e.code == 401:
+                pass # Fake/invalid tokens, ignore
+            else:
+                self.handleError(record)
         except Exception as e:
             self.handleError(record)
 
