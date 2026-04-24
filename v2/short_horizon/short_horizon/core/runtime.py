@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from ..core.clock import Clock, SystemClock
-from ..core.events import BookUpdate, MarketStateUpdate, OrderIntentEvent, SkipDecisionEvent
+from ..core.events import BookUpdate, MarketResolvedWithInventory, MarketStateUpdate, OrderIntentEvent, OrderSide, SkipDecisionEvent
 from ..core.models import OrderIntent, SkipDecision
 from ..core.order_state import OrderState
 from ..storage.runtime import RuntimeStore
@@ -41,24 +41,31 @@ class StrategyRuntime:
         self.logger = get_logger("short_horizon.runtime", run_id=intent_store.current_run_id)
         self.venue_min_notional_usdc = float(venue_min_notional_usdc)
         self.venue_default_tick_size = float(venue_default_tick_size)
+        self.latest_best_bid_by_market_token: dict[tuple[str, str], float] = {}
+        self.resolved_inventory_marks_by_market_token: dict[tuple[str, str], MarketResolvedWithInventory] = {}
+        self._reported_resolved_inventory: set[tuple[str, str]] = set()
 
     def on_market_state(self, event: MarketStateUpdate) -> list[StrategyIntent]:
         log = self.logger.bind(**event_log_fields(event))
         self.store.append_event(event)
         self.store.upsert_market_state(event)
         outputs = self.strategy.on_market_state(event)
+        resolved_inventory_events = self._emit_market_resolved_inventory_events(event)
         log.info(
             "market_state_ingested",
             condition_id=event.condition_id,
             question=event.question,
             status=event.status,
             asset_slug=event.asset_slug,
+            resolved_inventory_events=len(resolved_inventory_events),
         )
         return outputs
 
     def on_book_update(self, event: BookUpdate) -> list[OrderIntent | SkipDecision]:
         log = self.logger.bind(**event_log_fields(event))
         self.store.append_event(event)
+        if event.best_bid is not None:
+            self.latest_best_bid_by_market_token[(event.market_id, event.token_id)] = float(event.best_bid)
         log.info(
             "book_update_ingested",
             best_bid=event.best_bid,
@@ -223,12 +230,14 @@ class StrategyRuntime:
 
         max_daily_loss_usdc = float(getattr(risk, "max_daily_loss_usdc", 0.0) or 0.0)
         if max_daily_loss_usdc > 0:
-            realized_daily_pnl_usdc = _compute_realized_daily_pnl_usdc(
+            daily_pnl_usdc = _compute_daily_pnl_usdc(
                 orders=all_orders,
                 fills=all_fills,
                 event_time_ms=decision.event_time_ms,
+                latest_best_bid_by_market_token=self.latest_best_bid_by_market_token,
+                resolved_inventory_marks_by_market_token=self.resolved_inventory_marks_by_market_token,
             )
-            realized_daily_loss_usdc = max(0.0, -realized_daily_pnl_usdc)
+            realized_daily_loss_usdc = max(0.0, -daily_pnl_usdc)
             if realized_daily_loss_usdc > max_daily_loss_usdc + 1e-9:
                 return SkipDecision(
                     reason="max_daily_loss_usdc_reached",
@@ -237,7 +246,7 @@ class StrategyRuntime:
                     level=decision.level,
                     event_time_ms=decision.event_time_ms,
                     details=(
-                        f"realized_daily_pnl_usdc={realized_daily_pnl_usdc:.6f} "
+                        f"daily_pnl_usdc={daily_pnl_usdc:.6f} "
                         f"realized_daily_loss_usdc={realized_daily_loss_usdc:.6f} "
                         f"cap_usdc={max_daily_loss_usdc:.6f}"
                     ),
@@ -290,6 +299,60 @@ class StrategyRuntime:
                     ),
                 )
         return decision
+
+    def _emit_market_resolved_inventory_events(self, event: MarketStateUpdate) -> list[MarketResolvedWithInventory]:
+        if event.is_active and (event.end_time_ms is None or event.event_time_ms < event.end_time_ms):
+            return []
+
+        inventory_lots = _build_intraday_inventory_lots(
+            orders=self.store.load_all_orders(),
+            fills=self.store.load_fills(),
+            event_time_ms=event.event_time_ms,
+        )
+        resolved_events: list[MarketResolvedWithInventory] = []
+        for market_token, lots in inventory_lots.items():
+            market_id, token_id = market_token
+            if market_id != event.market_id or token_id is None or not lots:
+                continue
+            resolved_key = (str(market_id), str(token_id))
+            if resolved_key in self._reported_resolved_inventory:
+                continue
+            outcome_price = self.latest_best_bid_by_market_token.get(resolved_key)
+            if outcome_price is None:
+                continue
+            total_size = sum(float(size) for size, _unit_cost in lots)
+            if total_size <= 1e-12:
+                continue
+            total_cost_basis = sum(float(size) * float(unit_cost) for size, unit_cost in lots)
+            average_entry_price = total_cost_basis / total_size
+            estimated_pnl_usdc = sum(float(size) * (float(outcome_price) - float(unit_cost)) for size, unit_cost in lots)
+            resolved_event = MarketResolvedWithInventory(
+                event_time_ms=event.event_time_ms,
+                ingest_time_ms=event.ingest_time_ms,
+                market_id=str(market_id),
+                token_id=str(token_id),
+                side=OrderSide.BUY,
+                size=total_size,
+                outcome_price=float(outcome_price),
+                average_entry_price=average_entry_price,
+                estimated_pnl_usdc=estimated_pnl_usdc,
+                run_id=self.store.current_run_id,
+            )
+            self.store.append_event_log(resolved_event)
+            self.resolved_inventory_marks_by_market_token[resolved_key] = resolved_event
+            self._reported_resolved_inventory.add(resolved_key)
+            self.logger.info(
+                "live_market_resolved_holding",
+                market_id=resolved_event.market_id,
+                token_id=resolved_event.token_id,
+                side=resolved_event.side,
+                size=resolved_event.size,
+                outcome_price=resolved_event.outcome_price,
+                average_entry_price=resolved_event.average_entry_price,
+                estimated_pnl_usdc=resolved_event.estimated_pnl_usdc,
+            )
+            resolved_events.append(resolved_event)
+        return resolved_events
 
     def _effective_notional_usdc(self, decision: OrderIntent) -> float:
         """Expected submitted notional after translator upscales for venue minimums.
@@ -439,7 +502,35 @@ def _count_consecutive_rejects(all_orders: list[dict]) -> int:
     return consecutive_rejects
 
 
-def _compute_realized_daily_pnl_usdc(*, orders: list[dict], fills: list[dict], event_time_ms: int) -> float:
+def _compute_daily_pnl_usdc(
+    *,
+    orders: list[dict],
+    fills: list[dict],
+    event_time_ms: int,
+    latest_best_bid_by_market_token: dict[tuple[str, str], float],
+    resolved_inventory_marks_by_market_token: dict[tuple[str, str], MarketResolvedWithInventory],
+) -> float:
+    inventory_lots = _build_intraday_inventory_lots(orders=orders, fills=fills, event_time_ms=event_time_ms)
+    realized_pnl_usdc = _compute_intraday_realized_sell_pnl_usdc(orders=orders, fills=fills, event_time_ms=event_time_ms)
+    mark_to_market_pnl_usdc = 0.0
+    for market_token, lots in inventory_lots.items():
+        if not lots:
+            continue
+        resolved_mark = resolved_inventory_marks_by_market_token.get((str(market_token[0]), str(market_token[1])))
+        if resolved_mark is not None:
+            mark_price = float(resolved_mark.outcome_price)
+        else:
+            token_id = market_token[1]
+            if token_id is None:
+                continue
+            mark_price = latest_best_bid_by_market_token.get((str(market_token[0]), str(token_id)))
+            if mark_price is None:
+                continue
+        mark_to_market_pnl_usdc += sum(float(size) * (float(mark_price) - float(unit_cost)) for size, unit_cost in lots)
+    return realized_pnl_usdc + mark_to_market_pnl_usdc
+
+
+def _compute_intraday_realized_sell_pnl_usdc(*, orders: list[dict], fills: list[dict], event_time_ms: int) -> float:
     target_day = _iso_day_from_ms(event_time_ms)
     order_by_id = {str(row.get("order_id")): row for row in orders if row.get("order_id") is not None}
     inventory_lots: dict[tuple[str | None, str | None], list[list[float]]] = defaultdict(list)
@@ -467,6 +558,30 @@ def _compute_realized_daily_pnl_usdc(*, orders: list[dict], fills: list[dict], e
             continue
         realized_pnl_usdc -= fee_paid_usdc
     return realized_pnl_usdc
+
+
+def _build_intraday_inventory_lots(*, orders: list[dict], fills: list[dict], event_time_ms: int) -> dict[tuple[str | None, str | None], list[list[float]]]:
+    target_day = _iso_day_from_ms(event_time_ms)
+    order_by_id = {str(row.get("order_id")): row for row in orders if row.get("order_id") is not None}
+    inventory_lots: dict[tuple[str | None, str | None], list[list[float]]] = defaultdict(list)
+    for fill in sorted(fills, key=lambda row: (str(row.get("filled_at") or ""), str(row.get("fill_id") or ""))):
+        filled_at = str(fill.get("filled_at") or "")
+        if not filled_at.startswith(target_day):
+            continue
+        order = order_by_id.get(str(fill.get("order_id") or ""), {})
+        side = str(order.get("side") or "").upper()
+        price = float(fill.get("price") or 0.0)
+        size = float(fill.get("size") or 0.0)
+        fee_paid_usdc = float(fill.get("fee_paid_usdc") or 0.0)
+        market_token = (fill.get("market_id"), fill.get("token_id"))
+        if size <= 0:
+            continue
+        if side == "BUY":
+            inventory_lots[market_token].append([size, (price * size + fee_paid_usdc) / size])
+            continue
+        if side == "SELL":
+            _consume_cost_basis(inventory_lots[market_token], size=size, fallback_price=price)
+    return inventory_lots
 
 
 def _consume_cost_basis(lots: list[list[float]], *, size: float, fallback_price: float) -> float:

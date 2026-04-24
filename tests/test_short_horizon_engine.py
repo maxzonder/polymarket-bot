@@ -17,14 +17,14 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.config import ExecutionConfig, RiskConfig, ShortHorizonConfig
-from short_horizon.core import EventType, OrderState, ReplayClock
+from short_horizon.core import EventType, MarketResolvedWithInventory, OrderSide, OrderState, ReplayClock
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
 from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, PolygonUsdcBridgeSummary, ResolvedRedeemSummary, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, execute_polygon_usdc_bridge, execute_resolved_redeem, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
-from short_horizon.replay import ReplayCaptureWriter, ReplayFidelityError
+from short_horizon.replay import ReplayCaptureWriter, ReplayFidelityError, parse_event_record
 from short_horizon.replay.comparator import main as replay_comparator_main
 from short_horizon.replay_runner import compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file, render_comparison_report
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
@@ -33,6 +33,7 @@ from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
 from short_horizon.telemetry import configure_logging, event_log_fields, get_logger
 from short_horizon.venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolygonUsdcBridgeResult, VenueApiCredentials, VenueOrderRequest, VenueOrderState, VenuePlaceResult
 from short_horizon.venue_polymarket import RedeemResult
+from short_horizon.storage.runtime import normalize_event_payload
 
 
 class _AsyncNormalizedSource:
@@ -325,6 +326,25 @@ class CoreTypesTest(unittest.TestCase):
         self.assertEqual(market.event_type, EventType.MARKET_STATE_UPDATE)
         self.assertEqual(book.event_type, EventType.BOOK_UPDATE)
 
+    def test_market_resolved_with_inventory_round_trips_through_normalizer_and_replay_parser(self) -> None:
+        event = MarketResolvedWithInventory(
+            event_time_ms=230_000,
+            ingest_time_ms=230_050,
+            market_id="m1",
+            token_id="tok_yes",
+            side=OrderSide.BUY,
+            size=10.0,
+            outcome_price=0.15,
+            average_entry_price=0.62,
+            estimated_pnl_usdc=-4.7,
+            run_id="run1",
+        )
+
+        payload = normalize_event_payload(event)
+        parsed = parse_event_record(payload)
+
+        self.assertEqual(parsed, event)
+
 
 class StrategyApiContractTest(unittest.TestCase):
     def test_touch_strategy_implements_market_event_contract(self) -> None:
@@ -613,30 +633,39 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.store = InMemoryIntentStore()
         self.engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=self.store)
 
-    def _market_state(self, *, token_id: str = "tok_yes", asset_slug: str = "bitcoin") -> MarketStateUpdate:
+    def _market_state(
+        self,
+        *,
+        token_id: str = "tok_yes",
+        asset_slug: str = "bitcoin",
+        event_time_ms: int = 200_000,
+        ingest_time_ms: int | None = None,
+        end_time_ms: int = 900_000,
+        is_active: bool = True,
+    ) -> MarketStateUpdate:
         return MarketStateUpdate(
-            event_time_ms=200_000,
-            ingest_time_ms=200_050,
+            event_time_ms=event_time_ms,
+            ingest_time_ms=event_time_ms + 50 if ingest_time_ms is None else ingest_time_ms,
             market_id="m1",
             token_id=token_id,
             condition_id="c1",
             question="Bitcoin Up or Down?",
             asset_slug=asset_slug,
             start_time_ms=0,
-            end_time_ms=900_000,
-            is_active=True,
+            end_time_ms=end_time_ms,
+            is_active=is_active,
             metadata_is_fresh=True,
             fee_rate_bps=10.0,
             fee_metadata_age_ms=1_000,
         )
 
-    def _book(self, *, event_time_ms: int, best_ask: float, token_id: str = "tok_yes") -> BookUpdate:
+    def _book(self, *, event_time_ms: int, best_ask: float, token_id: str = "tok_yes", best_bid: float | None = None) -> BookUpdate:
         return BookUpdate(
             event_time_ms=event_time_ms,
             ingest_time_ms=event_time_ms + 20,
             market_id="m1",
             token_id=token_id,
-            best_bid=best_ask - 0.01,
+            best_bid=(best_ask - 0.01) if best_bid is None else best_bid,
             best_ask=best_ask,
         )
 
@@ -936,13 +965,100 @@ class ShortHorizonEngineTest(unittest.TestCase):
             fee_paid_usdc=0.10,
         )
 
-        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_ask=0.54)), [])
-        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55))
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_bid=0.10, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_bid=0.10, best_ask=0.55))
 
         self.assertEqual(len(outputs), 1)
         self.assertIsInstance(outputs[0], SkipDecision)
         self.assertEqual(outputs[0].reason, "max_daily_loss_usdc_reached")
         self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_blocks_new_intent_when_buy_only_mark_to_market_loss_is_already_breached(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                risk=RiskConfig(
+                    max_daily_loss_usdc=1.0,
+                    max_open_orders_total=10,
+                    max_open_orders_per_market=10,
+                    max_trade_notional_usdc=100.0,
+                    micro_live_cumulative_stake_cap_usdc=100.0,
+                )
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_buy_loss_002",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.60,
+            size=10.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_buy_loss_002",
+            intent_created_at_ms=200_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+        engine.store.insert_fill(
+            fill_id="fill_buy_loss_002",
+            order_id="ord_buy_loss_002",
+            market_id="m1",
+            token_id="tok_yes",
+            price=0.60,
+            size=10.0,
+            filled_at_ms=210_000,
+            source="test",
+            fee_paid_usdc=0.20,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_bid=0.40, best_ask=0.54)), [])
+        outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_bid=0.41, best_ask=0.55))
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_daily_loss_usdc_reached")
+        self.assertIn("daily_pnl_usdc=", outputs[0].details)
+        self.assertEqual(len(engine.store.intents), 0)
+
+    def test_runtime_emits_market_resolved_with_inventory_event(self) -> None:
+        engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=InMemoryIntentStore())
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_buy_resolved_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.60,
+            size=10.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_buy_resolved_001",
+            intent_created_at_ms=200_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+        engine.store.insert_fill(
+            fill_id="fill_buy_resolved_001",
+            order_id="ord_buy_resolved_001",
+            market_id="m1",
+            token_id="tok_yes",
+            price=0.60,
+            size=10.0,
+            filled_at_ms=210_000,
+            source="test",
+            fee_paid_usdc=0.20,
+        )
+
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_bid=0.15, best_ask=0.54)), [])
+        outputs = engine.on_market_state(self._market_state(token_id="tok_yes", event_time_ms=230_000, end_time_ms=230_000, is_active=False))
+
+        self.assertEqual(outputs, [])
+        resolved_events = [event for event in engine.store.events if isinstance(event, MarketResolvedWithInventory)]
+        self.assertEqual(len(resolved_events), 1)
+        self.assertEqual(resolved_events[0].market_id, "m1")
+        self.assertEqual(resolved_events[0].token_id, "tok_yes")
+        self.assertEqual(resolved_events[0].outcome_price, 0.15)
+        self.assertAlmostEqual(resolved_events[0].estimated_pnl_usdc, -4.7)
 
     def test_runtime_blocks_new_intent_when_max_consecutive_rejects_reached(self) -> None:
         engine = ShortHorizonEngine(
