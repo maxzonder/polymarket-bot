@@ -142,12 +142,14 @@ def analyze_probe(db_path: str | Path, *, log_path: str | Path | None = None) ->
     )
 
     ws_warning_counts, log_warning_counts, log_error_count = _log_health(log)
-    closed_cleanly = bool(event_counts.get("live_run_completed") or event_counts.get("live_stub_run_completed") or event_counts.get("replay_capture_bundle_written"))
+    closed_cleanly = bool(event_counts.get("replay_capture_bundle_written"))
     if log is not None and log.exists():
-        # live_run_completed is a log event, not persisted in events_log.
+        # Do not merge log counts into persisted event counts: runtime logs mirror
+        # lifecycle events such as order_intent_created/live_order_filled and would
+        # double-count intents/fills/rejects. Use logs only for non-persisted
+        # completion/health signals.
         log_counts = _log_event_counts(log)
         closed_cleanly = closed_cleanly or bool(log_counts.get("live_run_completed") or log_counts.get("live_runner_completed"))
-        event_counts.update(log_counts)
 
     return ProbePostmortem(
         db_path=db,
@@ -160,10 +162,10 @@ def analyze_probe(db_path: str | Path, *, log_path: str | Path | None = None) ->
         runtime_minutes=runtime_minutes,
         event_counts=event_counts,
         order_state_counts=order_state_counts,
-        intents=int(event_counts.get("OrderIntent", 0) + event_counts.get("order_intent_created", 0)),
-        accepted=int(event_counts.get("OrderAccepted", 0) + event_counts.get("live_order_accepted", 0)),
+        intents=int(event_counts.get("OrderIntent", 0)),
+        accepted=int(event_counts.get("OrderAccepted", 0)),
         fills=len(fills),
-        rejects=int(event_counts.get("OrderRejected", 0) + event_counts.get("order_rejected", 0)),
+        rejects=int(event_counts.get("OrderRejected", 0)),
         cumulative_stake_usdc=cumulative_stake,
         resolved_pnl_usdc=resolved_pnl,
         unresolved_cost_usdc=unresolved_cost,
