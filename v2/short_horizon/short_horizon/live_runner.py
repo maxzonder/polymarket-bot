@@ -28,6 +28,17 @@ from .venue_polymarket import PolymarketUserStream
 from .venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolymarketExecutionClient, PolygonUsdcBridgeResult
 
 
+# Polymarket's documented minimum for resting (non-marketable) limit orders is
+# 5 shares. Gamma's fee_refresh response sometimes returns a market without an
+# explicit min_order_size, in which case the translator must still upscale to
+# avoid sending sub-minimum orders that bounce as "Size lower than minimum: 5"
+# and then lock the market for the rest of the run via the per-market attempt
+# cap. Replay deliberately keeps this fallback at 0.0 to preserve byte-for-byte
+# determinism against capture bundles that were captured before this default
+# was wired in.
+DEFAULT_LIVE_VENUE_MIN_ORDER_SHARES_FALLBACK = 5.0
+
+
 @dataclass(frozen=True)
 class KillSwitchSummary:
     open_order_count: int
@@ -175,7 +186,12 @@ def build_live_runtime(*, db_path: str | Path, run_id: str | None = None, config
     hydrate_open_orders = getattr(strategy, "hydrate_open_orders", None)
     if callable(hydrate_open_orders):
         hydrate_open_orders(store.load_all_orders())
-    return StrategyRuntime(strategy=strategy, intent_store=store, clock=clock)
+    return StrategyRuntime(
+        strategy=strategy,
+        intent_store=store,
+        clock=clock,
+        venue_min_order_shares_fallback=DEFAULT_LIVE_VENUE_MIN_ORDER_SHARES_FALLBACK,
+    )
 
 
 def run_stub_live(
