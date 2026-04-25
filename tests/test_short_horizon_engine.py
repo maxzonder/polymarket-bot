@@ -940,7 +940,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertIn("cap=1", outputs[0].details)
         self.assertEqual(len(engine.store.intents), 0)
 
-    def test_runtime_ignores_rejected_orders_for_per_market_cap(self) -> None:
+    def test_runtime_counts_rejected_order_attempts_for_per_market_cap(self) -> None:
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(
                 risk=RiskConfig(
@@ -971,7 +971,10 @@ class ShortHorizonEngineTest(unittest.TestCase):
         outputs = engine.on_book_update(self._book(event_time_ms=225_000, best_ask=0.55, token_id="tok_yes"))
 
         self.assertEqual(len(outputs), 1)
-        self.assertIsInstance(outputs[0], OrderIntent)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "max_orders_per_market_per_run_reached")
+        self.assertIn("market_orders_so_far=1", outputs[0].details)
+        self.assertEqual(len(engine.store.intents), 0)
 
     def test_runtime_blocks_new_intent_when_max_daily_loss_usdc_is_already_breached(self) -> None:
         engine = ShortHorizonEngine(
