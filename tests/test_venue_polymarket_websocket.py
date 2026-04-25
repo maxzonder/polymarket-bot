@@ -15,16 +15,26 @@ from short_horizon.venue_polymarket import PolymarketWebsocket
 
 
 class _FakeWebsocket:
-    def __init__(self, messages: list[str], *, disconnect_after_messages: bool = False):
+    def __init__(
+        self,
+        messages: list[str],
+        *,
+        disconnect_after_messages: bool = False,
+        fail_send: bool = False,
+        closed: bool = False,
+    ):
         self._messages = list(messages)
         self._disconnect_after_messages = disconnect_after_messages
         self._raised_disconnect = False
+        self._fail_send = fail_send
         self._closed_event = asyncio.Event()
         self.entered = asyncio.Event()
         self.sent: list[str] = []
-        self.closed = False
+        self.closed = closed
 
     async def send(self, data: str) -> None:
+        if self._fail_send:
+            raise RuntimeError("send failed")
         self.sent.append(data)
 
     async def close(self) -> None:
@@ -135,6 +145,77 @@ class VenuePolymarketWebsocketTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(message)["event_type"], "book")
 
         await manager.close()
+
+    async def test_subscribe_send_failure_is_best_effort_and_replayed_on_reconnect(self) -> None:
+        ws1 = _FakeWebsocket([], fail_send=True)
+        manager = PolymarketWebsocket(
+            backoff_initial_seconds=0.01,
+            backoff_max_seconds=0.02,
+            ping_interval_seconds=None,
+        )
+        manager._ws = ws1
+
+        await manager.subscribe(["tok_a", "tok_b"])
+        self.assertEqual(ws1.sent, [])
+        self.assertEqual(manager._subscription_send_failure_count, 1)
+
+        ws3 = _FakeWebsocket(['{"event_type":"book"}'])
+        manager = PolymarketWebsocket(
+            connect_factory=_FakeConnectFactory([ws3]),
+            backoff_initial_seconds=0.01,
+            backoff_max_seconds=0.02,
+            ping_interval_seconds=None,
+        )
+        manager._subscribed_tokens.update(["tok_a", "tok_b"])
+        await manager.connect()
+        await asyncio.wait_for(ws3.entered.wait(), timeout=0.2)
+        self.assertEqual(json.loads(ws3.sent[0])["assets_ids"], ["tok_a", "tok_b"])
+        await manager.close()
+
+    async def test_unsubscribe_send_failure_is_best_effort(self) -> None:
+        ws = _FakeWebsocket([], fail_send=True)
+        manager = PolymarketWebsocket(
+            backoff_initial_seconds=0.01,
+            backoff_max_seconds=0.02,
+            ping_interval_seconds=None,
+        )
+        manager._ws = ws
+        manager._subscribed_tokens.update(["tok_a", "tok_b"])
+
+        await manager.unsubscribe(["tok_b"])
+
+        self.assertEqual(manager._subscribed_tokens, {"tok_a"})
+        self.assertEqual(manager._subscription_send_failure_count, 1)
+        await manager.close()
+
+    async def test_subscribe_skips_closed_connection_without_failure_count(self) -> None:
+        ws = _FakeWebsocket([], fail_send=True, closed=True)
+        manager = PolymarketWebsocket(
+            backoff_initial_seconds=0.01,
+            backoff_max_seconds=0.02,
+            ping_interval_seconds=None,
+        )
+        manager._ws = ws
+
+        await manager.subscribe(["tok_a"])
+
+        self.assertEqual(manager._subscribed_tokens, {"tok_a"})
+        self.assertEqual(manager._subscription_send_failure_count, 0)
+        await manager.close()
+
+    async def test_resubscribe_current_tokens_remains_fail_fast_inside_reconnect_loop(self) -> None:
+        ws = _FakeWebsocket([], fail_send=True)
+        manager = PolymarketWebsocket(
+            connect_factory=_FakeConnectFactory([ws]),
+            backoff_initial_seconds=0.01,
+            backoff_max_seconds=0.02,
+            ping_interval_seconds=None,
+        )
+        manager._ws = ws
+        manager._subscribed_tokens.update(["tok_a"])
+
+        with self.assertRaises(RuntimeError):
+            await manager._resubscribe_current_tokens()
 
 
 if __name__ == "__main__":
