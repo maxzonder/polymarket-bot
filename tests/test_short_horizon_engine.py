@@ -1142,6 +1142,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
                     max_consecutive_rejects=3,
                     max_open_orders_total=10,
                     max_open_orders_per_market=10,
+                    max_orders_per_market_per_run=10,
                     micro_live_cumulative_stake_cap_usdc=100.0,
                 )
             ),
