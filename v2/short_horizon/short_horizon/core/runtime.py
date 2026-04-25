@@ -211,7 +211,7 @@ class StrategyRuntime:
 
         max_orders_per_market_per_run = int(getattr(risk, "max_orders_per_market_per_run", 0) or 0)
         if max_orders_per_market_per_run > 0:
-            market_orders_so_far = _count_non_rejected_orders_for_market(all_orders, market_id=decision.market_id)
+            market_orders_so_far = _count_order_attempts_for_market(all_orders, market_id=decision.market_id)
             projected_market_orders = market_orders_so_far + 1
             if projected_market_orders > max_orders_per_market_per_run:
                 return SkipDecision(
@@ -448,12 +448,10 @@ def _sum_order_notional_usdc(rows: list[dict], *, size_field: str) -> float:
     return total_notional
 
 
-def _count_non_rejected_orders_for_market(all_orders: list[dict], *, market_id: str) -> int:
+def _count_order_attempts_for_market(all_orders: list[dict], *, market_id: str) -> int:
     count = 0
     for row in all_orders:
         if str(row.get("market_id") or "") != market_id:
-            continue
-        if str(row.get("state") or "") == OrderState.REJECTED.value:
             continue
         count += 1
     return count
