@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import argparse
 import html
-import json
-import os
-import urllib.request
+import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from postmortem_probe import analyze_probe
+from utils.telegram import send_message
 
 
 def build_telegram_summary(db_path: str | Path, *, log_path: str | Path | None = None, max_chars: int = 3500) -> str:
@@ -45,32 +48,18 @@ def build_telegram_summary(db_path: str | Path, *, log_path: str | Path | None =
     return text
 
 
-def send_telegram(text: str, *, bot_token: str, chat_id: str) -> None:
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{bot_token}/sendMessage",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=10):
-        return
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Send Telegram summary for a completed short-horizon probe")
     parser.add_argument("db_path")
     parser.add_argument("--log-path", default=None)
-    parser.add_argument("--bot-token", default=os.environ.get("TELEGRAM_BOT_TOKEN"))
-    parser.add_argument("--chat-id", default=os.environ.get("TELEGRAM_CHAT_ID"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     text = build_telegram_summary(args.db_path, log_path=args.log_path)
     if args.dry_run:
         print(text)
         return
-    if not args.bot_token or not args.chat_id:
-        raise SystemExit("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required")
-    send_telegram(text, bot_token=args.bot_token, chat_id=args.chat_id)
+    if not send_message(text):
+        raise SystemExit("Telegram notification failed")
 
 
 if __name__ == "__main__":
