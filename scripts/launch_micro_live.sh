@@ -24,9 +24,14 @@ mkdir -p "${POLYMARKET_DATA_DIR}"
 
 DB_PATH="${POLYMARKET_DATA_DIR}/live.sqlite3"
 BUNDLE_DIR="${POLYMARKET_DATA_DIR}/capture_bundles/micro_live_$(date +%Y%m%d_%H%M%S)"
+LOG_PATH="${LOG_PATH:-}"
+NOTIFY_ON_COMPLETE="${NOTIFY_ON_COMPLETE:-1}"
 
 echo "DB_PATH=${DB_PATH}"
 echo "BUNDLE_DIR=${BUNDLE_DIR}"
+if [[ -n "${LOG_PATH}" ]]; then
+    echo "LOG_PATH=${LOG_PATH}"
+fi
 
 # Determine python executable
 if [[ -f "./.venv/bin/python" && -x "./.venv/bin/python" ]]; then
@@ -48,7 +53,8 @@ trap 'echo "Received termination signal. live_runner should handle graceful shut
 echo "Launching live_runner in 3 seconds..."
 sleep 3
 
-exec "${PYTHON}" -m v2.short_horizon.short_horizon.live_runner \
+set +e
+"${PYTHON}" -m v2.short_horizon.short_horizon.live_runner \
     "${DB_PATH}" \
     --mode live \
     --execution-mode live \
@@ -60,3 +66,17 @@ exec "${PYTHON}" -m v2.short_horizon.short_horizon.live_runner \
     --capture-dir "${BUNDLE_DIR}" \
     --max-runtime-seconds 28800 \
     "$@"
+status=$?
+set -e
+
+if [[ "${NOTIFY_ON_COMPLETE}" != "0" ]]; then
+    notify_args=("${DB_PATH}")
+    if [[ -n "${LOG_PATH}" ]]; then
+        notify_args+=(--log-path "${LOG_PATH}")
+    fi
+    if ! "${PYTHON}" scripts/notify_probe_completed.py "${notify_args[@]}"; then
+        echo "WARNING: completion Telegram notification failed" >&2
+    fi
+fi
+
+exit "${status}"
