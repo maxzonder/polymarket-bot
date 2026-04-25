@@ -34,6 +34,7 @@ class PolymarketWebsocket:
         self._stop_event = asyncio.Event()
         self._connected_event = asyncio.Event()
         self._ws: Any = None
+        self._subscription_send_failure_count = 0
 
     async def connect(self) -> None:
         if self._task is not None and not self._task.done():
@@ -61,9 +62,14 @@ class PolymarketWebsocket:
             payload = _subscription_payload(self._subscribed_tokens)
             ws = self._ws
         self.logger.info("ws_subscribe_requested", token_count=len(payload["assets_ids"]))
-        if ws is not None and payload["assets_ids"]:
-            await ws.send(json.dumps(payload))
-            self.logger.info("ws_subscribe_sent", token_count=len(payload["assets_ids"]))
+        if ws is not None and payload["assets_ids"] and not _is_connection_closed(ws):
+            await self._send_subscription_best_effort(
+                ws,
+                json.dumps(payload),
+                success_event="ws_subscribe_sent",
+                failure_event="ws_subscribe_send_failed",
+                token_count=len(payload["assets_ids"]),
+            )
 
     async def unsubscribe(self, token_ids: list[str] | tuple[str, ...] | set[str]) -> None:
         async with self._lock:
@@ -72,9 +78,15 @@ class PolymarketWebsocket:
             payload = _subscription_payload(self._subscribed_tokens)
             ws = self._ws
         self.logger.info("ws_unsubscribe_requested", token_count=len(token_ids), remaining=len(payload["assets_ids"]))
-        if ws is not None and payload["assets_ids"]:
-            await ws.send(json.dumps(payload))
-            self.logger.info("ws_subscribe_sent", token_count=len(payload["assets_ids"]))
+        if ws is not None and payload["assets_ids"] and not _is_connection_closed(ws):
+            await self._send_subscription_best_effort(
+                ws,
+                json.dumps(payload),
+                success_event="ws_subscribe_sent",
+                failure_event="ws_unsubscribe_send_failed",
+                token_count=len(payload["assets_ids"]),
+                requested_count=len(token_ids),
+            )
 
     async def recv(self) -> str:
         return await self.messages.get()
@@ -135,6 +147,34 @@ class PolymarketWebsocket:
         await ws.send(json.dumps(payload))
         self.logger.info("ws_subscribe_sent", token_count=len(payload["assets_ids"]))
 
+    async def _send_subscription_best_effort(
+        self,
+        ws: Any,
+        payload_json: str,
+        *,
+        success_event: str,
+        failure_event: str,
+        token_count: int,
+        requested_count: int | None = None,
+    ) -> None:
+        try:
+            await ws.send(payload_json)
+        except Exception as exc:
+            self._subscription_send_failure_count += 1
+            if self._ws is ws:
+                self._connected_event.clear()
+                self._ws = None
+            self.logger.warning(
+                failure_event,
+                endpoint=self.endpoint,
+                error=str(exc),
+                token_count=token_count,
+                requested_count=requested_count,
+                failure_count=self._subscription_send_failure_count,
+            )
+            return
+        self.logger.info(success_event, token_count=token_count)
+
     async def _ping_loop(self, ws: Any) -> None:
         assert self.ping_interval_seconds is not None
         while True:
@@ -144,6 +184,22 @@ class PolymarketWebsocket:
 
 def _is_control_message(message: Any) -> bool:
     return isinstance(message, str) and message.strip().upper() in {"PONG", "PING"}
+
+
+def _is_connection_closed(ws: Any) -> bool:
+    closed = getattr(ws, "closed", False)
+    if bool(closed):
+        return True
+    state = getattr(ws, "state", None)
+    if state is None:
+        return False
+    state_name = str(getattr(state, "name", state)).upper()
+    if state_name in {"CLOSED", "CLOSING"}:
+        return True
+    try:
+        return int(state) in {2, 3}
+    except (TypeError, ValueError):
+        return False
 
 
 def _subscription_payload(token_ids: set[str]) -> dict[str, Any]:

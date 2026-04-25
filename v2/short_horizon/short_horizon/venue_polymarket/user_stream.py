@@ -333,6 +333,7 @@ class PolymarketUserStream:
         self._stop_event = asyncio.Event()
         self._connected_event = asyncio.Event()
         self._ws: Any = None
+        self._subscription_send_failure_count = 0
 
     async def connect(self) -> None:
         if self._task is not None and not self._task.done():
@@ -360,9 +361,14 @@ class PolymarketUserStream:
             payload = _user_subscription_payload(self.auth, self._subscribed_markets)
             ws = self._ws
         self.logger.info("user_ws_subscribe_requested", market_count=len(payload["markets"]))
-        if ws is not None:
-            await ws.send(json.dumps(payload))
-            self.logger.info("user_ws_subscribe_sent", market_count=len(payload["markets"]))
+        if ws is not None and not _is_connection_closed(ws):
+            await self._send_subscription_best_effort(
+                ws,
+                json.dumps(payload),
+                success_event="user_ws_subscribe_sent",
+                failure_event="user_ws_subscribe_send_failed",
+                market_count=len(payload["markets"]),
+            )
 
     async def unsubscribe(self, market_ids: list[str] | tuple[str, ...] | set[str]) -> None:
         async with self._lock:
@@ -371,9 +377,15 @@ class PolymarketUserStream:
                 self._subscribed_markets.discard(market_id)
             ws = self._ws
         self.logger.info("user_ws_unsubscribe_requested", market_count=len(requested), remaining=len(self._subscribed_markets))
-        if ws is not None and requested:
-            await ws.send(json.dumps({"markets": requested, "operation": "unsubscribe"}))
-            self.logger.info("user_ws_unsubscribe_sent", market_count=len(requested), remaining=len(self._subscribed_markets))
+        if ws is not None and requested and not _is_connection_closed(ws):
+            await self._send_subscription_best_effort(
+                ws,
+                json.dumps({"markets": requested, "operation": "unsubscribe"}),
+                success_event="user_ws_unsubscribe_sent",
+                failure_event="user_ws_unsubscribe_send_failed",
+                market_count=len(requested),
+                remaining=len(self._subscribed_markets),
+            )
 
     async def recv(self) -> object:
         return await self.messages.get()
@@ -439,6 +451,37 @@ class PolymarketUserStream:
         await ws.send(json.dumps(payload))
         self.logger.info("user_ws_subscribe_sent", market_count=len(payload["markets"]))
 
+    async def _send_subscription_best_effort(
+        self,
+        ws: Any,
+        payload_json: str,
+        *,
+        success_event: str,
+        failure_event: str,
+        market_count: int,
+        remaining: int | None = None,
+    ) -> None:
+        try:
+            await ws.send(payload_json)
+        except Exception as exc:
+            self._subscription_send_failure_count += 1
+            if self._ws is ws:
+                self._connected_event.clear()
+                self._ws = None
+            self.logger.warning(
+                failure_event,
+                endpoint=self.endpoint,
+                error=str(exc),
+                market_count=market_count,
+                remaining=remaining,
+                failure_count=self._subscription_send_failure_count,
+            )
+            return
+        if remaining is None:
+            self.logger.info(success_event, market_count=market_count)
+        else:
+            self.logger.info(success_event, market_count=market_count, remaining=remaining)
+
     async def _ping_loop(self, ws: Any) -> None:
         assert self.ping_interval_seconds is not None
         while True:
@@ -471,6 +514,22 @@ def _decode_payload(message: Any) -> Any:
 
 def _is_control_message(message: Any) -> bool:
     return isinstance(message, str) and message.strip().upper() in {"PING", "PONG"}
+
+
+def _is_connection_closed(ws: Any) -> bool:
+    closed = getattr(ws, "closed", False)
+    if bool(closed):
+        return True
+    state = getattr(ws, "state", None)
+    if state is None:
+        return False
+    state_name = str(getattr(state, "name", state)).upper()
+    if state_name in {"CLOSED", "CLOSING"}:
+        return True
+    try:
+        return int(state) in {2, 3}
+    except (TypeError, ValueError):
+        return False
 
 
 def _parse_float(value: Any) -> float | None:
