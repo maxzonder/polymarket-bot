@@ -160,5 +160,85 @@ class EstimateEffectiveBuyNotionalTest(unittest.TestCase):
         self.assertEqual(notional, 1.0)
 
 
+class StrategyRuntimeVenueMinSharesFallbackTest(unittest.TestCase):
+    """Covers the live-only fallback that upscales orders to the venue minimum
+    when Gamma's fee_refresh response omits min_order_size, so we stop sending
+    sub-minimum orders that the venue rejects with "Size lower than minimum: 5".
+    """
+
+    def _build_runtime(self, *, venue_min_order_shares_fallback: float):
+        from short_horizon.config import RiskConfig, ShortHorizonConfig
+        from short_horizon.core.clock import SystemClock
+        from short_horizon.core.runtime import StrategyRuntime
+        from short_horizon.storage.runtime import InMemoryIntentStore
+        from short_horizon.strategies import ShortHorizon15mTouchStrategy
+
+        config = ShortHorizonConfig(
+            risk=RiskConfig(
+                micro_live_cumulative_stake_cap_usdc=15.0,
+                max_orders_per_market_per_run=10,
+            )
+        )
+        clock = SystemClock()
+        strategy = ShortHorizon15mTouchStrategy(config=config, clock=clock)
+        return StrategyRuntime(
+            strategy=strategy,
+            intent_store=InMemoryIntentStore(),
+            clock=clock,
+            venue_min_order_shares_fallback=venue_min_order_shares_fallback,
+        )
+
+    def _intent(self, *, notional_usdc: float = 1.0, entry_price: float = 0.55):
+        from short_horizon.core.models import OrderIntent
+
+        return OrderIntent(
+            intent_id="intent-1",
+            strategy_id="short_horizon_15m_touch_v1",
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            level=0.55,
+            entry_price=entry_price,
+            notional_usdc=notional_usdc,
+            lifecycle_fraction=0.25,
+            event_time_ms=225_000,
+        )
+
+    def test_disabled_fallback_keeps_effective_notional_close_to_intent(self) -> None:
+        runtime = self._build_runtime(venue_min_order_shares_fallback=0.0)
+        notional = runtime._effective_notional_usdc(self._intent())
+        self.assertLess(notional, 1.05)
+
+    def test_enabled_fallback_upscales_to_five_shares_when_meta_missing(self) -> None:
+        runtime = self._build_runtime(venue_min_order_shares_fallback=5.0)
+        notional = runtime._effective_notional_usdc(self._intent())
+        self.assertAlmostEqual(notional, 2.75, places=6)
+
+    def test_cumulative_stake_cap_projects_upscaled_notional_and_skips_early(self) -> None:
+        from short_horizon.core.models import SkipDecision
+
+        runtime = self._build_runtime(venue_min_order_shares_fallback=5.0)
+        runtime.store.insert_order(
+            order_id="o_prev",
+            market_id="m_other",
+            token_id="t_other",
+            side="BUY",
+            price=0.55,
+            size=23.0,
+            state="filled",
+            client_order_id="c_prev",
+            intent_created_at_ms=210_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+
+        decision = runtime._apply_runtime_guards(self._intent())
+
+        self.assertIsInstance(decision, SkipDecision)
+        self.assertEqual(decision.reason, "micro_live_cumulative_stake_cap_reached")
+
+
 if __name__ == "__main__":
     unittest.main()

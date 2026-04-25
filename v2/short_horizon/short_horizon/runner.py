@@ -41,6 +41,7 @@ def drive_runtime_events(
         client=execution_client,
         live_submit_guard=live_submit_guard,
         clock=runtime.clock,
+        venue_min_order_shares_fallback=getattr(runtime, "venue_min_order_shares_fallback", 0.0),
     )
     event_count = 0
     order_intents = 0
@@ -90,6 +91,7 @@ async def drive_runtime_event_stream(
         client=execution_client,
         live_submit_guard=live_submit_guard,
         clock=runtime.clock,
+        venue_min_order_shares_fallback=getattr(runtime, "venue_min_order_shares_fallback", 0.0),
     )
     event_count = 0
     order_intents = 0

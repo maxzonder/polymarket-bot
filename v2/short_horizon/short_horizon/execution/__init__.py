@@ -237,6 +237,7 @@ class ExecutionEngine:
         mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
         tick_size: float = 0.01,
         min_order_size: float = 1.0,
+        venue_min_order_shares_fallback: float = 0.0,
         translation_policy: TranslationPolicy | None = None,
         live_submit_guard: LiveSubmitGuard | None = None,
         clock: Clock | None = None,
@@ -246,6 +247,7 @@ class ExecutionEngine:
         self.mode = ExecutionMode(str(mode))
         self.tick_size = float(tick_size)
         self.min_order_size = float(min_order_size)
+        self.venue_min_order_shares_fallback = float(venue_min_order_shares_fallback)
         self.translation_policy = translation_policy or TranslationPolicy()
         self.live_submit_guard = live_submit_guard
         self.clock = clock or SystemClock()
@@ -309,13 +311,16 @@ class ExecutionEngine:
 
     def _translate_order_request(self, intent: OrderIntent) -> VenueOrderRequest:
         market_meta = self._market_meta_for_intent(intent)
+        min_order_shares = market_meta.min_order_size
+        if min_order_shares is None:
+            min_order_shares = self.venue_min_order_shares_fallback
         return translate_place_order(
             intent,
             market_meta,
             VenueConstraints(
                 tick_size=market_meta.tick_size or self.tick_size,
                 min_order_size=self.min_order_size,
-                min_order_shares=market_meta.min_order_size,
+                min_order_shares=min_order_shares,
             ),
             client_order_id_seed=self.store.current_run_id,
             policy=self.translation_policy,

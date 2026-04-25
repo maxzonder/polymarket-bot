@@ -13,6 +13,7 @@ from ..telemetry import event_log_fields, get_logger
 
 DEFAULT_VENUE_MIN_NOTIONAL_USDC = 1.0
 DEFAULT_VENUE_TICK_SIZE = 0.01
+DEFAULT_VENUE_MIN_ORDER_SHARES_FALLBACK = 0.0
 
 
 class StrategyRuntime:
@@ -31,6 +32,7 @@ class StrategyRuntime:
         intent_store: RuntimeStore,
         venue_min_notional_usdc: float = DEFAULT_VENUE_MIN_NOTIONAL_USDC,
         venue_default_tick_size: float = DEFAULT_VENUE_TICK_SIZE,
+        venue_min_order_shares_fallback: float = DEFAULT_VENUE_MIN_ORDER_SHARES_FALLBACK,
         clock: Clock | None = None,
     ):
         self.strategy = strategy
@@ -41,6 +43,7 @@ class StrategyRuntime:
         self.logger = get_logger("short_horizon.runtime", run_id=intent_store.current_run_id)
         self.venue_min_notional_usdc = float(venue_min_notional_usdc)
         self.venue_default_tick_size = float(venue_default_tick_size)
+        self.venue_min_order_shares_fallback = float(venue_min_order_shares_fallback)
         self.latest_best_bid_by_market_token: dict[tuple[str, str], float] = {}
         self.resolved_inventory_marks_by_market_token: dict[tuple[str, str], MarketResolvedWithInventory] = {}
         self._reported_resolved_inventory: set[tuple[str, str]] = set()
@@ -147,7 +150,11 @@ class StrategyRuntime:
         open_orders = [row for row in all_orders if str(row.get("state")) in _NON_TERMINAL_ORDER_STATES]
         effective_notional = self._effective_notional_usdc(decision)
 
-        max_trade_notional_usdc = _resolve_max_trade_notional_usdc(risk=risk, config=config)
+        max_trade_notional_usdc = _resolve_max_trade_notional_usdc(
+            risk=risk,
+            config=config,
+            venue_min_order_shares_fallback=self.venue_min_order_shares_fallback,
+        )
         if max_trade_notional_usdc > 0 and effective_notional > max_trade_notional_usdc + 1e-9:
             return SkipDecision(
                 reason="max_trade_notional_usdc_reached",
@@ -379,7 +386,7 @@ class StrategyRuntime:
         absence of data never silently inflates cap projections.
         """
         tick_size = self.venue_default_tick_size
-        min_order_shares: float | None = None
+        min_order_shares: float | None = self.venue_min_order_shares_fallback
         load_latest_market_state = getattr(self.store, "load_latest_market_state", None)
         if callable(load_latest_market_state):
             market_state = load_latest_market_state(decision.market_id)
@@ -415,7 +422,12 @@ _NON_TERMINAL_ORDER_STATES = {
 }
 
 
-def _resolve_max_trade_notional_usdc(*, risk: object, config: object | None) -> float:
+def _resolve_max_trade_notional_usdc(
+    *,
+    risk: object,
+    config: object | None,
+    venue_min_order_shares_fallback: float = 0.0,
+) -> float:
     configured_cap = getattr(risk, "max_trade_notional_usdc", None)
     if configured_cap is not None:
         return float(configured_cap or 0.0)
@@ -423,7 +435,9 @@ def _resolve_max_trade_notional_usdc(*, risk: object, config: object | None) -> 
     target_trade_size_usdc = float(getattr(execution, "target_trade_size_usdc", 0.0) or 0.0)
     if target_trade_size_usdc <= 0:
         return 0.0
-    return target_trade_size_usdc * 1.5
+    auto_cap = target_trade_size_usdc * 1.5
+    venue_floor = max(float(venue_min_order_shares_fallback or 0.0), 0.0)
+    return max(auto_cap, venue_floor)
 
 
 def _sum_open_notional_usdc(open_orders: list[dict]) -> float:
