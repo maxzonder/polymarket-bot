@@ -9,7 +9,7 @@ from typing import Any
 
 from .config import ShortHorizonConfig
 from .core.clock import ReplayClock
-from .core.events import OrderAccepted, OrderCanceled, OrderFilled, OrderIntentEvent, OrderRejected, SkipDecisionEvent
+from .core.events import MarketResolvedWithInventory, OrderAccepted, OrderCanceled, OrderFilled, OrderIntentEvent, OrderRejected, SkipDecisionEvent
 from .core.runtime import StrategyRuntime
 from .replay import ReplayEventSource
 from .replay.venue_client import CapturedResponseExecutionClient
@@ -250,6 +250,8 @@ def _validate_manifest_count(files: dict[str, Any], key: str, actual_count: int)
 
 
 def _is_replay_input_event(event: object) -> bool:
+    if isinstance(event, MarketResolvedWithInventory):
+        return False
     if isinstance(event, (OrderIntentEvent, SkipDecisionEvent)):
         return False
     if isinstance(event, (OrderAccepted, OrderRejected, OrderCanceled)):
