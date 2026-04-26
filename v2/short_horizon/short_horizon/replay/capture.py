@@ -36,7 +36,14 @@ class ReplayCaptureWriter:
     def captured_venue_records(self) -> list[dict[str, Any]]:
         return list(self._venue_records)
 
-    def write_bundle(self, *, db_path: str | Path, run_id: str, execution_mode: str | None = None) -> dict[str, Any]:
+    def write_bundle(
+        self,
+        *,
+        db_path: str | Path,
+        run_id: str,
+        execution_mode: str | None = None,
+        runtime_config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         db_path = Path(db_path)
         bundle = _load_bundle_rows(db_path=db_path, run_id=run_id)
 
@@ -53,7 +60,7 @@ class ReplayCaptureWriter:
         _write_jsonl(orders_path, bundle["orders_final"], json_dumps=self._json_dumps)
         _write_jsonl(fills_path, bundle["fills_final"], json_dumps=self._json_dumps)
 
-        manifest = {
+        manifest: dict[str, Any] = {
             "run_id": bundle["run"]["run_id"],
             "strategy_id": bundle["run"].get("strategy_id"),
             "config_hash": bundle["run"].get("config_hash"),
@@ -69,6 +76,8 @@ class ReplayCaptureWriter:
                 "fills_final": {"path": fills_path.name, "count": len(bundle["fills_final"])},
             },
         }
+        if runtime_config:
+            manifest["runtime_config"] = dict(runtime_config)
         manifest_path.write_text(self._json_dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return manifest
 

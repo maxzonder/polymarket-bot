@@ -228,6 +228,7 @@ def run_stub_live(
             db_path=getattr(store, "path", None),
             run_id=runtime.store.current_run_id,
             execution_mode=resolved_mode,
+            runtime=runtime,
         )
 
 
@@ -293,6 +294,7 @@ async def run_live(
             db_path=getattr(store, "path", None),
             run_id=runtime.store.current_run_id,
             execution_mode=resolved_mode,
+            runtime=runtime,
         )
 
 
@@ -717,14 +719,29 @@ def _client_is_started(client: object) -> bool:
     return getattr(client, "_client", None) is not None
 
 
-def _write_capture_bundle_best_effort(*, capture_writer: ReplayCaptureWriter | None, db_path: str | Path | None, run_id: str | None, execution_mode: ExecutionMode | str | None = None) -> None:
+def _write_capture_bundle_best_effort(
+    *,
+    capture_writer: ReplayCaptureWriter | None,
+    db_path: str | Path | None,
+    run_id: str | None,
+    execution_mode: ExecutionMode | str | None = None,
+    runtime: StrategyRuntime | None = None,
+) -> None:
     if capture_writer is None or db_path is None or run_id is None:
         return
+    runtime_config: dict[str, object] | None = None
+    if runtime is not None:
+        runtime_config = {
+            "venue_min_order_shares_fallback": float(
+                getattr(runtime, "venue_min_order_shares_fallback", 0.0) or 0.0
+            ),
+        }
     try:
         manifest = capture_writer.write_bundle(
             db_path=db_path,
             run_id=run_id,
             execution_mode=str(ExecutionMode(str(execution_mode))) if execution_mode is not None else None,
+            runtime_config=runtime_config,
         )
     except Exception as exc:
         capture_writer.logger.warning(

@@ -26,7 +26,8 @@ from short_horizon.probe import assert_min_book_updates_per_minute, cross_valida
 from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay import ReplayCaptureWriter, ReplayFidelityError, parse_event_record
 from short_horizon.replay.comparator import main as replay_comparator_main
-from short_horizon.replay_runner import compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file, render_comparison_report
+from short_horizon.replay_runner import build_replay_runtime, compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file, render_comparison_report
+from short_horizon.live_runner import DEFAULT_LIVE_VENUE_MIN_ORDER_SHARES_FALLBACK
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
 from short_horizon.strategy_api import CancelOrder, Noop, PlaceOrder
@@ -2462,6 +2463,67 @@ class ReplayRunnerTest(unittest.TestCase):
             self.assertEqual(event_count, 12)
             self.assertEqual(order_row[0], "accepted")
             self.assertEqual(order_row[1], "accepted")
+
+    def test_replay_bundle_reads_venue_min_order_shares_fallback_from_manifest(self) -> None:
+        """Bundles captured with the live fallback active stamp it into the manifest;
+        replay must read it back so order sizing in replay matches what live submitted.
+        Bundles without the field (pre-stamp captures) keep the default 0.0 so older
+        bundles continue to replay byte-for-byte against their captured behavior."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+
+            stamped_dir = tmp_path / "stamped"
+            self._write_bundle(stamped_dir)
+            manifest_path = stamped_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["runtime_config"] = {"venue_min_order_shares_fallback": 5.0}
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+            unstamped_dir = tmp_path / "unstamped"
+            self._write_bundle(unstamped_dir)
+
+            from short_horizon.replay_runner import load_replay_bundle
+
+            stamped_bundle = load_replay_bundle(stamped_dir)
+            unstamped_bundle = load_replay_bundle(unstamped_dir)
+
+            self.assertEqual(stamped_bundle.manifest["runtime_config"]["venue_min_order_shares_fallback"], 5.0)
+            self.assertNotIn("runtime_config", unstamped_bundle.manifest)
+
+            with patch("short_horizon.replay_runner.build_replay_runtime", wraps=build_replay_runtime) as spy:
+                replay_bundle(bundle_dir=stamped_dir, db_path=tmp_path / "stamped_replay.sqlite3")
+                replay_bundle(bundle_dir=unstamped_dir, db_path=tmp_path / "unstamped_replay.sqlite3")
+
+            stamped_kwargs = spy.call_args_list[0].kwargs
+            unstamped_kwargs = spy.call_args_list[1].kwargs
+            self.assertEqual(stamped_kwargs["venue_min_order_shares_fallback"], 5.0)
+            self.assertEqual(unstamped_kwargs["venue_min_order_shares_fallback"], 0.0)
+
+    def test_capture_writer_stamps_runtime_config_into_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            event_log_path = tmp_path / "stub_live_events.jsonl"
+            db_path = tmp_path / "live.sqlite3"
+            capture_dir = tmp_path / "capture_bundle"
+            event_log_path.write_text(
+                "\n".join(json.dumps(row) for row in self._sample_replay_rows()) + "\n", encoding="utf-8"
+            )
+
+            run_stub_live(
+                stub_event_log_path=event_log_path,
+                db_path=db_path,
+                run_id="live_capture_stamp_001",
+                config_hash="test-config",
+                capture_dir=capture_dir,
+            )
+
+            manifest = json.loads((capture_dir / "manifest.json").read_text(encoding="utf-8"))
+            runtime_config = manifest.get("runtime_config")
+            self.assertIsNotNone(runtime_config)
+            self.assertEqual(
+                runtime_config.get("venue_min_order_shares_fallback"),
+                DEFAULT_LIVE_VENUE_MIN_ORDER_SHARES_FALLBACK,
+            )
 
     def test_replay_runner_replays_bundle_into_fresh_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
