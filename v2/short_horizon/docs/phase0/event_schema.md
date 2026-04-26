@@ -178,7 +178,8 @@ Represents market-level metadata required for strategy gating and lifecycle-cloc
 - `duration_seconds: integer | null`
 - `token_yes_id: string | null`
 - `token_no_id: string | null`
-- `fee_rate_bps: number | null`
+- `fee_rate_bps: number | null` — V1-era headline taker fee in bps. Kept for back-compat on existing capture bundles; V2 captures populate `fee_info` instead and may also mirror `base_fee_bps` here.
+- `fee_info: object | null` — V2 dynamic-fee descriptor. Shape: `{base_fee_bps: integer, rate: number, exponent: number, source: string}` where `rate` and `exponent` are the V2 `fd.r` / `fd.e` parameters from `getClobMarketInfo`. Consumers should prefer `fee_info.base_fee_bps` over `fee_rate_bps` when both are present.
 - `fee_fetched_at: string | null`
 - `fees_enabled: boolean | null`
 - `is_ascending_market: boolean | null`
@@ -215,6 +216,7 @@ Represents market-level metadata required for strategy gating and lifecycle-cloc
   "token_yes_id": "123456789",
   "token_no_id": "987654321",
   "fee_rate_bps": 35,
+  "fee_info": {"base_fee_bps": 35, "rate": 0.0035, "exponent": 1.0, "source": "v2.clob_market_info"},
   "fee_fetched_at": "2026-04-18T14:19:59.000Z",
   "fees_enabled": true,
   "is_ascending_market": true,

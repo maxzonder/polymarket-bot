@@ -41,6 +41,42 @@ class MarketStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True)
+class FeeInfo:
+    """V2 dynamic-fee descriptor for a token.
+
+    `base_fee_bps` is the headline integer fee in bps (V2 SDK
+    `get_fee_rate_bps`); `rate` and `exponent` are the V2 `fd.r` / `fd.e`
+    parameters returned by `getClobMarketInfo` for any future per-price
+    effective-fee computation. `source` records where the snapshot came
+    from (Gamma `feeSchedule`, V2 `clob_market_info`, etc.).
+    """
+
+    base_fee_bps: int
+    rate: float = 0.0
+    exponent: float = 0.0
+    source: str = "v2.clob_market_info"
+
+
+def effective_fee_rate_bps(
+    *,
+    fee_info: FeeInfo | None,
+    fee_rate_bps: float | None,
+) -> float | None:
+    """Return the headline fee rate in bps, preferring V2 fee_info.
+
+    V2 captures populate fee_info; V1-era replay bundles only have
+    fee_rate_bps. Consumers should call this helper instead of reading
+    fee_rate_bps directly so that V2 inputs are honored once the venue
+    adapter starts emitting fee_info.
+    """
+    if fee_info is not None:
+        return float(fee_info.base_fee_bps)
+    if fee_rate_bps is None:
+        return None
+    return float(fee_rate_bps)
+
+
 class OrderSide(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
@@ -127,6 +163,7 @@ class MarketStateUpdate:
     token_yes_id: TokenId | None = None
     token_no_id: TokenId | None = None
     fee_rate_bps: float | None = None
+    fee_info: FeeInfo | None = None
     tick_size: float | None = None
     min_order_size: float | None = None
     fee_fetched_at_ms: IngestTime | None = None
