@@ -36,9 +36,9 @@ class _FakeVenueClient:
         self.create_and_post_order_calls = []
         self.cancel_calls = []
         self.get_order_calls = []
-        self.get_orders_calls = []
+        self.get_open_orders_calls = []
 
-    def create_or_derive_api_creds(self):
+    def create_or_derive_api_key(self):
         return {"api_key": "derived", "secret": "derived-secret", "passphrase": "derived-pass"}
 
     def set_api_creds(self, api_creds):
@@ -48,8 +48,8 @@ class _FakeVenueClient:
         self.create_and_post_order_calls.append(order_args)
         return {"orderID": "venue-123", "status": "live"}
 
-    def cancel(self, order_id):
-        self.cancel_calls.append(order_id)
+    def cancel_order(self, payload):
+        self.cancel_calls.append(payload)
         return {"success": True, "status": "canceled"}
 
     def get_order(self, order_id):
@@ -64,8 +64,8 @@ class _FakeVenueClient:
             "matched_size": "0",
         }
 
-    def get_orders(self, **kwargs):
-        self.get_orders_calls.append(kwargs)
+    def get_open_orders(self, params=None, only_first_page=False, next_cursor=None):
+        self.get_open_orders_calls.append(params)
         return [
             {"id": "ord_live", "status": "ORDER_STATUS_LIVE", "asset_id": "tok_yes", "size": "10", "matched_size": "0"},
             {"id": "ord_dead", "status": "ORDER_STATUS_CANCELED", "asset_id": "tok_yes", "size": "10", "matched_size": "0"},
@@ -80,7 +80,7 @@ class _ApiCredsShape:
 
 
 class _FakeVenueClientApiCredsObject(_FakeVenueClient):
-    def create_or_derive_api_creds(self):
+    def create_or_derive_api_key(self):
         return _ApiCredsShape(api_key="derived", api_secret="derived-secret", api_passphrase="derived-pass")
 
 
@@ -97,6 +97,27 @@ class _FakeOrderArgs:
         }
 
 
+class _FakeOrderPayload:
+    def __init__(self, *, orderID):
+        self.orderID = orderID
+
+
+class _FakeOpenOrderParams:
+    def __init__(self, *, id=None, market=None, asset_id=None):
+        self.id = id
+        self.market = market
+        self.asset_id = asset_id
+
+
+def _build_client(client_factory, **overrides):
+    return PolymarketExecutionClient(
+        client_factory=client_factory,
+        order_args_factory=overrides.get("order_args_factory", _FakeOrderArgs),
+        cancel_payload_factory=overrides.get("cancel_payload_factory", _FakeOrderPayload),
+        open_order_params_factory=overrides.get("open_order_params_factory", _FakeOpenOrderParams),
+    )
+
+
 class VenuePolymarketExecutionClientTest(unittest.TestCase):
     def test_startup_uses_env_private_key_and_healthchecks(self) -> None:
         captured = {}
@@ -109,7 +130,7 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
             return captured["client"]
 
         with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
-            client = PolymarketExecutionClient(client_factory=client_factory, order_args_factory=_FakeOrderArgs)
+            client = PolymarketExecutionClient(client_factory=client_factory, order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
             client.startup()
 
         self.assertEqual(captured["host"], "https://clob.polymarket.com")
@@ -119,13 +140,15 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
             captured["client"].api_creds,
             {"api_key": "derived", "secret": "derived-secret", "passphrase": "derived-pass"},
         )
-        self.assertEqual(captured["client"].get_orders_calls, [{}])
+        self.assertEqual(captured["client"].get_open_orders_calls, [None])
 
     def test_api_credentials_exposed_after_startup(self) -> None:
         fake_client = _FakeVenueClient(host="https://clob.polymarket.com", key="env-secret", chain_id=137)
         client = PolymarketExecutionClient(
             client_factory=lambda **kwargs: fake_client,
             order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
         )
 
         with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
@@ -141,6 +164,8 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         client = PolymarketExecutionClient(
             client_factory=lambda **kwargs: fake_client,
             order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
         )
 
         with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
@@ -159,7 +184,7 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
             return _FakeVenueClient(host=host, key=key, chain_id=chain_id)
 
         with patch.dict(os.environ, {}, clear=True):
-            client = PolymarketExecutionClient(client_factory=client_factory, order_args_factory=_FakeOrderArgs)
+            client = PolymarketExecutionClient(client_factory=client_factory, order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
             with self.assertRaises(ExecutionClientConfigError) as ctx:
                 client.startup()
 
@@ -171,6 +196,8 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         client = PolymarketExecutionClient(
             client_factory=lambda **kwargs: fake_client,
             order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
         )
         with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
             client.startup()
@@ -209,6 +236,8 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         client = PolymarketExecutionClient(
             client_factory=lambda **kwargs: fake_client,
             order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
         )
         with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
             client.startup()
@@ -216,10 +245,12 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         orders = client.list_open_orders(market_id="market-1")
 
         self.assertEqual([order.order_id for order in orders], ["ord_live"])
-        self.assertEqual(fake_client.get_orders_calls[-1], {"market": "market-1"})
+        last_params = fake_client.get_open_orders_calls[-1]
+        self.assertIsInstance(last_params, _FakeOpenOrderParams)
+        self.assertEqual(last_params.market, "market-1")
 
     def test_approve_allowances_submits_missing_usdc_and_conditional_approvals(self) -> None:
-        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
 
         sent_raw = []
         tx_counter = 0
@@ -263,7 +294,7 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertIn(hex(MAX_UINT256)[2:].lower(), sent_raw[0]["data"].lower())
 
     def test_approve_allowances_skips_when_already_approved(self) -> None:
-        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
 
         def rpc_call(method, params):
             if method == "eth_call":
@@ -282,7 +313,7 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertTrue(all(result.status == "already_approved" for result in results))
 
     def test_bridge_polygon_usdc_to_usdce_transfers_into_polymarket_bridge_and_waits_for_completion(self) -> None:
-        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
 
         sent_raw = []
         statuses = [
@@ -398,7 +429,7 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertTrue(str(sent_raw[0]["data"]).startswith("0xa9059cbb"))
 
     def test_bridge_polygon_usdc_to_usdce_rejects_amount_below_bridge_minimum(self) -> None:
-        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
 
         def rpc_call(method, params):
             if method == "eth_call":
@@ -432,7 +463,7 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertIn("below the documented Polymarket bridge minimum", str(ctx.exception))
 
     def test_redeem_positions_encodes_ctf_call_and_waits_for_receipt(self) -> None:
-        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
 
         sent_raw = []
 
@@ -470,7 +501,7 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertIn(ZERO_BYTES32.replace("0x", ""), str(sent_raw[0]["data"]).lower())
 
     def test_redeem_resolved_positions_groups_conditions_and_skips_unsupported_wallet_shapes(self) -> None:
-        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs)
+        client = PolymarketExecutionClient(client_factory=lambda **kwargs: _FakeVenueClient(**kwargs), order_args_factory=_FakeOrderArgs, cancel_payload_factory=_FakeOrderPayload, open_order_params_factory=_FakeOpenOrderParams)
 
         sent_raw = []
 
@@ -550,9 +581,9 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
     @unittest.skipUnless(os.getenv("POLYMARKET_RUN_VENUE_TESTS") == "1", "set POLYMARKET_RUN_VENUE_TESTS=1 to hit real venue")
     def test_startup_and_list_open_orders_against_real_venue(self) -> None:
         try:
-            import py_clob_client  # noqa: F401
+            import py_clob_client_v2  # noqa: F401
         except ImportError as exc:  # pragma: no cover
-            self.skipTest(f"py-clob-client unavailable: {exc}")
+            self.skipTest(f"py-clob-client-v2 unavailable: {exc}")
 
         client = PolymarketExecutionClient()
         client.startup()
