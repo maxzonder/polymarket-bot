@@ -11,7 +11,7 @@ SCRIPTS_ROOT = REPO_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from evaluate_touch_policy import PolicyCandidate, evaluate_candidates, realized_net_pnl
+from evaluate_touch_policy import PolicyCandidate, evaluate_candidates, evaluate_touch_policy_from_scores, realized_net_pnl
 from train_touch_model import TouchModelRow, load_artifact, train_touch_model, walk_forward_split
 
 
@@ -53,6 +53,18 @@ class TouchModelPolicyTest(unittest.TestCase):
             conn.close()
             self.assertEqual(count, 20)
             self.assertEqual(splits, {"test": 10, "train": 10})
+
+            policy_report = tmp_path / "policy_report.md"
+            policy_summary = evaluate_touch_policy_from_scores(
+                scores_path,
+                report_path=policy_report,
+                touch_dataset_path=touch_db,
+                spot_features_path=spot_db,
+                split="test",
+                bootstrap_samples=10,
+            )
+            self.assertEqual(policy_summary.input_rows, 10)
+            self.assertTrue(policy_report.exists())
 
     def test_walk_forward_split_uses_time_order_not_random_shuffle(self) -> None:
         rows = [
@@ -138,6 +150,79 @@ class TouchModelPolicyTest(unittest.TestCase):
         self.assertEqual(decisions[0].action, "accept")
         self.assertEqual(decisions[1].reason, "daily_loss_cap_reached")
         self.assertEqual(decisions[2].reason, "below_min_order_shares")
+
+    def test_policy_candidate_filters_and_fit10_entry_price(self) -> None:
+        candidates = [
+            PolicyCandidate(
+                probe_id="good",
+                market_id="m1",
+                touch_time_iso="2026-04-26T00:00:00Z",
+                split="test",
+                resolves_yes=1,
+                market_price=0.50,
+                model_prob=0.10,
+                fee_rate_bps=0.0,
+                asset_slug="btc",
+                lifecycle_fraction=0.70,
+                spot_implied_prob=0.60,
+                spot_implied_prob_minus_market_prob=0.10,
+                spot_source="binance_1s",
+                fit_10_usdc="+1_tick",
+                tick_size=0.01,
+            ),
+            PolicyCandidate(
+                probe_id="bad_asset",
+                market_id="m2",
+                touch_time_iso="2026-04-26T00:01:00Z",
+                split="test",
+                resolves_yes=1,
+                market_price=0.50,
+                model_prob=0.95,
+                fee_rate_bps=0.0,
+                asset_slug="bnb",
+                lifecycle_fraction=0.80,
+                spot_implied_prob=0.80,
+                spot_implied_prob_minus_market_prob=0.30,
+                spot_source="binance_1s",
+                fit_10_usdc="+0_tick",
+            ),
+            PolicyCandidate(
+                probe_id="bad_fit",
+                market_id="m3",
+                touch_time_iso="2026-04-26T00:02:00Z",
+                split="test",
+                resolves_yes=1,
+                market_price=0.50,
+                model_prob=0.95,
+                fee_rate_bps=0.0,
+                asset_slug="btc",
+                lifecycle_fraction=0.80,
+                spot_implied_prob=0.80,
+                spot_implied_prob_minus_market_prob=0.30,
+                spot_source="binance_1s",
+                fit_10_usdc="+2plus_ticks",
+            ),
+        ]
+        decisions = evaluate_candidates(
+            candidates,
+            stake_usdc=10.0,
+            edge_buffer_bps=200.0,
+            min_size_policy="upscale",
+            max_orders_per_market_per_run=1,
+            daily_loss_cap_usdc=30.0,
+            min_survived_ms=0.0,
+            asset_allowlist={"btc", "eth", "sol", "xrp"},
+            min_lifecycle_fraction=0.65,
+            min_spot_implied_prob_minus_market_prob=0.10,
+            spot_source_prefix_allowlist={"binance"},
+            fit_10_allowlist={"+0_tick", "+1_tick"},
+            use_fit_10_entry_price=True,
+            edge_probability_field="spot_implied_prob",
+        )
+        self.assertEqual(decisions[0].action, "accept")
+        self.assertEqual(decisions[1].reason, "asset_not_allowed")
+        self.assertEqual(decisions[2].reason, "fit_10_not_allowed")
+        self.assertAlmostEqual(decisions[0].net_pnl_usdc, (10.0 / 0.51) - 10.0)
 
 
 def _write_training_dbs(touch_db: Path, spot_db: Path) -> None:
