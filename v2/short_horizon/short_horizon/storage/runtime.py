@@ -18,6 +18,7 @@ from ..core.events import (
     OrderIntentEvent,
     OrderRejected,
     SkipDecisionEvent,
+    SpotPriceUpdate,
     TimerEvent,
     TradeTick,
 )
@@ -830,6 +831,22 @@ def normalize_event_payload(event: NormalizedEvent) -> dict[str, Any]:
             "timer_kind": event.timer_kind,
             "deadline_ms": event.deadline_ms,
             "payload": event.payload,
+        }
+
+    if isinstance(event, SpotPriceUpdate):
+        return {
+            "event_type": "SpotPriceUpdate",
+            "event_time": iso_from_ms(event.event_time_ms),
+            "ingest_time": iso_from_ms(event.ingest_time_ms),
+            "source": event.source,
+            "asset_slug": event.asset_slug,
+            "spot_price": event.spot_price,
+            "bid": event.bid,
+            "ask": event.ask,
+            "staleness_ms": event.staleness_ms,
+            "currency": event.currency,
+            "venue": event.venue,
+            "run_id": event.run_id,
         }
 
     if isinstance(event, OrderIntentEvent):

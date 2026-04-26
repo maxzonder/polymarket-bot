@@ -31,6 +31,7 @@ class LiveEventSource:
         fee_refresh: FeeMetadataRefreshLoop | AsyncIterator[MarketStateUpdate] | None = None,
         websocket: PolymarketWebsocket | Any | None = None,
         user_stream: PolymarketUserStream | Any | None = None,
+        spot_feed: AsyncIterator[NormalizedEvent] | Any | None = None,
         book_normalizer: BookNormalizer | None = None,
         trade_normalizer: TradeNormalizer | None = None,
         clock_ms: callable | None = None,
@@ -44,6 +45,7 @@ class LiveEventSource:
         self.fee_refresh = fee_refresh or FeeMetadataRefreshLoop(discovery_fn=shared_discovery, max_rows=discovery_config.max_rows)
         self.websocket = websocket or PolymarketWebsocket()
         self.user_stream = user_stream
+        self.spot_feed = spot_feed
         self.book_normalizer = book_normalizer or BookNormalizer()
         self.trade_normalizer = trade_normalizer or TradeNormalizer()
         self.clock_ms = clock_ms or _default_clock_ms
@@ -81,6 +83,7 @@ class LiveEventSource:
         self._terminal_error = None
         await _maybe_call(self.websocket, "connect")
         await _maybe_call(self.user_stream, "connect")
+        await _maybe_call(self.spot_feed, "connect")
         await _maybe_call(self.market_refresh, "start")
         await _maybe_call(self.fee_refresh, "start")
         self._forward_tasks = [
@@ -91,6 +94,9 @@ class LiveEventSource:
         ]
         if self.user_stream is not None:
             self._forward_tasks.append(asyncio.create_task(self._consume_user_stream(), name="live_source_user_stream"))
+        if self.spot_feed is not None:
+            await _maybe_call(self.spot_feed, "start")
+            self._forward_tasks.append(asyncio.create_task(self._consume_spot_feed(), name="live_source_spot_feed"))
 
     async def stop(self) -> None:
         if not self._started:
@@ -106,6 +112,8 @@ class LiveEventSource:
         await _maybe_call(self.fee_refresh, "stop")
         await _maybe_call(self.websocket, "close")
         await _maybe_call(self.user_stream, "close")
+        await _maybe_call(self.spot_feed, "close")
+        await _maybe_call(self.spot_feed, "stop")
         await self._queue.put(self._sentinel)
 
     async def _consume_market_refresh(self) -> None:
@@ -169,6 +177,23 @@ class LiveEventSource:
             raise
         except Exception as exc:
             await self._signal_terminal_error(exc, component="user_stream_consumer")
+
+    async def _consume_spot_feed(self) -> None:
+        if self.spot_feed is None:
+            return
+        try:
+            recv = getattr(self.spot_feed, "recv", None)
+            if callable(recv):
+                while True:
+                    event = await recv()
+                    await self._queue.put(event)
+            else:
+                async for event in self.spot_feed:
+                    await self._queue.put(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._signal_terminal_error(exc, component="spot_feed_consumer")
 
     async def _monitor_components(self) -> None:
         try:

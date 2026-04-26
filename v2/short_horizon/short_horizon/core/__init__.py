@@ -16,6 +16,7 @@ from .events import (
     OrderRejected,
     OrderSide,
     SkipDecisionEvent,
+    SpotPriceUpdate,
     TimerEvent,
     TradeTick,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "StrategyRuntime",
     "SystemClock",
     "SkipDecisionEvent",
+    "SpotPriceUpdate",
     "TimerEvent",
     "TokenId",
     "TouchSignal",

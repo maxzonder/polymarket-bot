@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from ..core.clock import Clock, SystemClock
-from ..core.events import BookUpdate, MarketResolvedWithInventory, MarketStateUpdate, OrderIntentEvent, OrderSide, SkipDecisionEvent
+from ..core.events import BookUpdate, MarketResolvedWithInventory, MarketStateUpdate, OrderIntentEvent, OrderSide, SkipDecisionEvent, SpotPriceUpdate
 from ..core.models import OrderIntent, SkipDecision
 from ..core.order_state import OrderState
 from ..storage.runtime import RuntimeStore
@@ -45,6 +45,7 @@ class StrategyRuntime:
         self.venue_default_tick_size = float(venue_default_tick_size)
         self.venue_min_order_shares_fallback = float(venue_min_order_shares_fallback)
         self.latest_best_bid_by_market_token: dict[tuple[str, str], float] = {}
+        self.latest_spot_by_asset: dict[str, SpotPriceUpdate] = {}
         self.resolved_inventory_marks_by_market_token: dict[tuple[str, str], MarketResolvedWithInventory] = {}
         self._reported_resolved_inventory: set[tuple[str, str]] = set()
 
@@ -127,6 +128,18 @@ class StrategyRuntime:
                 self.store.append_event_log(_skip_decision_event(decision))
             outputs.append(decision)
         return outputs
+
+    def on_spot_price_update(self, event: SpotPriceUpdate) -> None:
+        self.latest_spot_by_asset[event.asset_slug] = event
+        self.logger.bind(**event_log_fields(event)).info(
+            "spot_price_update_ingested",
+            asset_slug=event.asset_slug,
+            spot_price=event.spot_price,
+            bid=event.bid,
+            ask=event.ask,
+            staleness_ms=event.staleness_ms,
+            venue=event.venue,
+        )
 
     def _apply_runtime_guards(self, decision: OrderIntent) -> OrderIntent | SkipDecision:
         config = getattr(self.strategy, "config", None)

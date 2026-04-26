@@ -15,7 +15,7 @@ from short_horizon.replay_runner import _is_replay_input_event, replay_bundle
 from short_horizon.replay.comparator import compare_bundle_to_replay
 from short_horizon.replay.venue_client import ReplayFidelityError
 from short_horizon.config import ShortHorizonConfig, ExecutionConfig
-from short_horizon.core import MarketResolvedWithInventory, OrderSide
+from short_horizon.core import MarketResolvedWithInventory, OrderSide, SpotPriceUpdate
 
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "replay_fidelity" / "minimal_bundle"
 
@@ -29,6 +29,17 @@ class ReplayFidelityGateTest(unittest.TestCase):
             report = compare_bundle_to_replay(bundle_dir=FIXTURE_DIR, db_path=db_path)
             self.assertTrue(report.matched, "Fidelity comparison failed on minimal bundle")
 
+
+    def test_spot_price_update_is_replay_input(self) -> None:
+        event = SpotPriceUpdate(
+            event_time_ms=1,
+            ingest_time_ms=1,
+            source="fixture.spot",
+            asset_slug="btc",
+            spot_price=75123.45,
+        )
+
+        self.assertTrue(_is_replay_input_event(event))
 
     def test_resolved_inventory_events_are_not_replay_inputs(self) -> None:
         event = MarketResolvedWithInventory(

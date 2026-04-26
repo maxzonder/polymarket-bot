@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .core.clock import advance_clock
-from .core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, TimerEvent, TradeTick
+from .core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, SpotPriceUpdate, TimerEvent, TradeTick
 from .core.models import OrderIntent
 from .core.runtime import StrategyRuntime
 from .execution import ExecutionEngine, ExecutionMode, ExecutionVenueClient, LiveSubmitGuard
@@ -187,6 +187,13 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
             execution=execution,
             fallback_event_time_ms=event.event_time_ms,
         )
+
+    if isinstance(event, SpotPriceUpdate):
+        runtime.store.append_event(event)
+        on_spot_price_update = getattr(runtime, "on_spot_price_update", None)
+        if callable(on_spot_price_update):
+            on_spot_price_update(event)
+        return 0, 0
 
     if isinstance(event, (OrderAccepted, OrderRejected, OrderFilled, OrderCanceled)):
         canonical_event = execution.reconcile_order_event(event)
