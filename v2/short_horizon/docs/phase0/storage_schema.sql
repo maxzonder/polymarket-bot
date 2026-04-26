@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS markets (
     fee_fetched_at TEXT,
     fees_enabled INTEGER,
     market_source_revision TEXT,
+    fee_info_json TEXT,
     updated_at TEXT NOT NULL
 );
 

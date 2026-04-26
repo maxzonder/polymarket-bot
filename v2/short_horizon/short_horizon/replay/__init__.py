@@ -12,6 +12,7 @@ from ..core.events import (
     BookLevel,
     BookUpdate,
     EventType,
+    FeeInfo,
     LiquidityRole,
     MarketResolvedWithInventory,
     MarketStateUpdate,
@@ -103,6 +104,7 @@ def parse_event_record(payload: dict[str, Any]) -> NormalizedEvent:
             token_yes_id=_parse_optional_str(payload.get("token_yes_id")),
             token_no_id=_parse_optional_str(payload.get("token_no_id")),
             fee_rate_bps=_parse_optional_float(payload.get("fee_rate_bps")),
+            fee_info=_parse_fee_info(payload.get("fee_info")),
             fee_fetched_at_ms=_parse_optional_timestamp_ms(payload.get("fee_fetched_at_ms", payload.get("fee_fetched_at"))),
             fees_enabled=_parse_optional_bool(payload.get("fees_enabled")),
             is_ascending_market=_parse_optional_bool(payload.get("is_ascending_market")),
@@ -316,6 +318,20 @@ def _parse_optional_float(value: Any) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _parse_fee_info(value: Any) -> FeeInfo | None:
+    if not isinstance(value, dict):
+        return None
+    base_raw = value.get("base_fee_bps")
+    if base_raw is None:
+        return None
+    return FeeInfo(
+        base_fee_bps=int(base_raw),
+        rate=float(value.get("rate", 0.0) or 0.0),
+        exponent=float(value.get("exponent", 0.0) or 0.0),
+        source=str(value.get("source") or "v2.clob_market_info"),
+    )
 
 
 def _parse_optional_str(value: Any) -> str | None:

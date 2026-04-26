@@ -186,6 +186,7 @@ def _market_changed(previous: MarketMetadata, current: MarketMetadata) -> bool:
         or previous.asset_slug != current.asset_slug
         or previous.fees_enabled != current.fees_enabled
         or previous.fee_rate_bps != current.fee_rate_bps
+        or previous.fee_info != current.fee_info
         or previous.tick_size != current.tick_size
         or previous.min_order_size != current.min_order_size
     )
@@ -214,6 +215,7 @@ def _to_market_state_update(
         token_yes_id=market.token_yes_id,
         token_no_id=market.token_no_id,
         fee_rate_bps=market.fee_rate_bps,
+        fee_info=market.fee_info,
         tick_size=market.tick_size,
         min_order_size=market.min_order_size,
         fee_fetched_at_ms=ingest_time_ms,
