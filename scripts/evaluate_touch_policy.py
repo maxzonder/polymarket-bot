@@ -86,6 +86,7 @@ def evaluate_touch_policy_from_scores(
     asset_allowlist: set[str] | None = None,
     min_lifecycle_fraction: float | None = None,
     min_spot_implied_prob_minus_market_prob: float | None = None,
+    direction_allowlist: set[str] | None = None,
     spot_source_prefix_allowlist: set[str] | None = None,
     fit_10_allowlist: set[str] | None = None,
     use_fit_10_entry_price: bool = False,
@@ -110,6 +111,7 @@ def evaluate_touch_policy_from_scores(
         asset_allowlist=asset_allowlist,
         min_lifecycle_fraction=min_lifecycle_fraction,
         min_spot_implied_prob_minus_market_prob=min_spot_implied_prob_minus_market_prob,
+        direction_allowlist=direction_allowlist,
         spot_source_prefix_allowlist=spot_source_prefix_allowlist,
         fit_10_allowlist=fit_10_allowlist,
         use_fit_10_entry_price=use_fit_10_entry_price,
@@ -138,6 +140,7 @@ def evaluate_touch_policy_from_scores(
             asset_allowlist=asset_allowlist,
             min_lifecycle_fraction=min_lifecycle_fraction,
             min_spot_implied_prob_minus_market_prob=min_spot_implied_prob_minus_market_prob,
+            direction_allowlist=direction_allowlist,
             spot_source_prefix_allowlist=spot_source_prefix_allowlist,
             fit_10_allowlist=fit_10_allowlist,
             use_fit_10_entry_price=use_fit_10_entry_price,
@@ -193,6 +196,7 @@ def evaluate_candidates(
     asset_allowlist: set[str] | None = None,
     min_lifecycle_fraction: float | None = None,
     min_spot_implied_prob_minus_market_prob: float | None = None,
+    direction_allowlist: set[str] | None = None,
     spot_source_prefix_allowlist: set[str] | None = None,
     fit_10_allowlist: set[str] | None = None,
     use_fit_10_entry_price: bool = False,
@@ -203,6 +207,7 @@ def evaluate_candidates(
     if edge_probability_field not in {"model_prob", "spot_implied_prob"}:
         raise ValueError("edge_probability_field must be 'model_prob' or 'spot_implied_prob'")
     asset_allowlist = _normalize_set(asset_allowlist)
+    direction_allowlist = _normalize_set(direction_allowlist)
     spot_source_prefix_allowlist = _normalize_set(spot_source_prefix_allowlist)
     fit_10_allowlist = set(fit_10_allowlist or set()) or None
     decisions: list[PolicyDecision] = []
@@ -233,6 +238,10 @@ def evaluate_candidates(
         ):
             action = "skip"
             reason = "spot_gap_below_min"
+            actual_stake = 0.0
+        elif direction_allowlist is not None and candidate.direction.lower() not in direction_allowlist:
+            action = "skip"
+            reason = "direction_not_allowed"
             actual_stake = 0.0
         elif spot_source_prefix_allowlist is not None and not _has_allowed_prefix(candidate.spot_source, spot_source_prefix_allowlist):
             action = "skip"
@@ -378,6 +387,7 @@ def render_policy_report(
     asset_allowlist: set[str] | None,
     min_lifecycle_fraction: float | None,
     min_spot_implied_prob_minus_market_prob: float | None,
+    direction_allowlist: set[str] | None,
     spot_source_prefix_allowlist: set[str] | None,
     fit_10_allowlist: set[str] | None,
     use_fit_10_entry_price: bool,
@@ -403,6 +413,7 @@ def render_policy_report(
         f"- Asset allowlist: `{_fmt_set(asset_allowlist)}`",
         f"- Minimum lifecycle_fraction: `{_fmt(min_lifecycle_fraction)}`",
         f"- Minimum spot_implied_prob_minus_market_prob: `{_fmt(min_spot_implied_prob_minus_market_prob)}`",
+        f"- Direction allowlist: `{_fmt_set(direction_allowlist)}`",
         f"- Spot source prefix allowlist: `{_fmt_set(spot_source_prefix_allowlist)}`",
         f"- fit_10_usdc allowlist: `{_fmt_set(fit_10_allowlist)}`",
         "",
@@ -587,6 +598,7 @@ def main() -> int:
         default=None,
         help="Comma-separated allowed spot source prefixes, e.g. binance",
     )
+    parser.add_argument("--direction-allowlist", default=None, help="Comma-separated allowed direction values, e.g. DOWN/NO")
     parser.add_argument("--fit-10-allowlist", default=None, help="Comma-separated allowed fit_10_usdc labels")
     parser.add_argument("--use-fit-10-entry-price", action="store_true", help="Use +0/+1 tick fit_10 slippage to adjust entry price")
     parser.add_argument(
@@ -613,6 +625,7 @@ def main() -> int:
         asset_allowlist=_parse_csv_set(args.asset_allowlist),
         min_lifecycle_fraction=args.min_lifecycle_fraction,
         min_spot_implied_prob_minus_market_prob=args.min_spot_implied_prob_minus_market_prob,
+        direction_allowlist=_parse_csv_set(args.direction_allowlist),
         spot_source_prefix_allowlist=_parse_csv_set(args.spot_source_prefix_allowlist),
         fit_10_allowlist=_parse_csv_set(args.fit_10_allowlist),
         use_fit_10_entry_price=args.use_fit_10_entry_price,

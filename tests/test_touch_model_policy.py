@@ -163,6 +163,7 @@ class TouchModelPolicyTest(unittest.TestCase):
                 model_prob=0.10,
                 fee_rate_bps=0.0,
                 asset_slug="btc",
+                direction="DOWN/NO",
                 lifecycle_fraction=0.70,
                 spot_implied_prob=0.60,
                 spot_implied_prob_minus_market_prob=0.10,
@@ -180,6 +181,7 @@ class TouchModelPolicyTest(unittest.TestCase):
                 model_prob=0.95,
                 fee_rate_bps=0.0,
                 asset_slug="bnb",
+                direction="DOWN/NO",
                 lifecycle_fraction=0.80,
                 spot_implied_prob=0.80,
                 spot_implied_prob_minus_market_prob=0.30,
@@ -187,7 +189,7 @@ class TouchModelPolicyTest(unittest.TestCase):
                 fit_10_usdc="+0_tick",
             ),
             PolicyCandidate(
-                probe_id="bad_fit",
+                probe_id="bad_direction",
                 market_id="m3",
                 touch_time_iso="2026-04-26T00:02:00Z",
                 split="test",
@@ -196,6 +198,24 @@ class TouchModelPolicyTest(unittest.TestCase):
                 model_prob=0.95,
                 fee_rate_bps=0.0,
                 asset_slug="btc",
+                direction="UP/YES",
+                lifecycle_fraction=0.80,
+                spot_implied_prob=0.80,
+                spot_implied_prob_minus_market_prob=0.30,
+                spot_source="binance_1s",
+                fit_10_usdc="+2plus_ticks",
+            ),
+            PolicyCandidate(
+                probe_id="bad_fit",
+                market_id="m4",
+                touch_time_iso="2026-04-26T00:03:00Z",
+                split="test",
+                resolves_yes=1,
+                market_price=0.50,
+                model_prob=0.95,
+                fee_rate_bps=0.0,
+                asset_slug="btc",
+                direction="DOWN/NO",
                 lifecycle_fraction=0.80,
                 spot_implied_prob=0.80,
                 spot_implied_prob_minus_market_prob=0.30,
@@ -214,6 +234,7 @@ class TouchModelPolicyTest(unittest.TestCase):
             asset_allowlist={"btc", "eth", "sol", "xrp"},
             min_lifecycle_fraction=0.65,
             min_spot_implied_prob_minus_market_prob=0.10,
+            direction_allowlist={"DOWN/NO"},
             spot_source_prefix_allowlist={"binance"},
             fit_10_allowlist={"+0_tick", "+1_tick"},
             use_fit_10_entry_price=True,
@@ -221,7 +242,8 @@ class TouchModelPolicyTest(unittest.TestCase):
         )
         self.assertEqual(decisions[0].action, "accept")
         self.assertEqual(decisions[1].reason, "asset_not_allowed")
-        self.assertEqual(decisions[2].reason, "fit_10_not_allowed")
+        self.assertEqual(decisions[2].reason, "direction_not_allowed")
+        self.assertEqual(decisions[3].reason, "fit_10_not_allowed")
         self.assertAlmostEqual(decisions[0].net_pnl_usdc, (10.0 / 0.51) - 10.0)
 
 

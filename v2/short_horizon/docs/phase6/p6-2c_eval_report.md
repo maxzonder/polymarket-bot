@@ -43,8 +43,9 @@ cd /home/polybot/claude-polymarket
   --edge-probability-field spot_implied_prob \
   --edge-buffer-bps 200 \
   --asset-allowlist btc,eth,sol,xrp \
-  --min-lifecycle-fraction 0.65 \
-  --min-spot-gap 0.10 \
+  --direction-allowlist DOWN/NO \
+  --min-lifecycle-fraction 0.60 \
+  --min-spot-gap 0.06 \
   --spot-source-prefix-allowlist binance \
   --fit-10-allowlist +0_tick,+1_tick \
   --use-fit-10-entry-price \
@@ -74,7 +75,7 @@ cd /home/polybot/claude-polymarket
 
 - `model_prob - market_price >= fee_break_even_gap + edge_buffer`, where default edge buffer is `200 bps`
 - optionally, `spot_implied_prob` can replace `model_prob` as the edge probability for explicit spot-dislocation gates
-- optional candidate filters pass: asset allowlist, minimum lifecycle fraction, minimum spot-implied gap, spot source prefix, and `fit_10_usdc` allowlist
+- optional candidate filters pass: asset allowlist, direction allowlist, minimum lifecycle fraction, minimum spot-implied gap, spot source prefix, and `fit_10_usdc` allowlist
 - optional `fit_10_usdc` slippage adjustment moves entry from ask to ask+tick for `+1_tick` rows and skips rows without a supported fit label
 - min-size policy passes (`upscale` by default, `skip` supported)
 - `max_orders_per_market_per_run` is not exceeded
