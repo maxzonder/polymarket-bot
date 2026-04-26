@@ -19,7 +19,14 @@ from .strategies import ShortHorizon15mTouchStrategy
 from .telemetry import configure_logging, get_logger
 
 
-def build_replay_runtime(*, db_path: str | Path, run_id: str | None = None, config: ShortHorizonConfig | None = None, config_hash: str = "dev") -> StrategyRuntime:
+def build_replay_runtime(
+    *,
+    db_path: str | Path,
+    run_id: str | None = None,
+    config: ShortHorizonConfig | None = None,
+    config_hash: str = "dev",
+    venue_min_order_shares_fallback: float = 0.0,
+) -> StrategyRuntime:
     config = config or ShortHorizonConfig()
     run_context = RunContext(
         run_id=run_id or generate_run_id(),
@@ -30,7 +37,12 @@ def build_replay_runtime(*, db_path: str | Path, run_id: str | None = None, conf
     store = SQLiteRuntimeStore(db_path, run=run_context)
     clock = ReplayClock()
     strategy = ShortHorizon15mTouchStrategy(config=config, clock=clock)
-    return StrategyRuntime(strategy=strategy, intent_store=store, clock=clock)
+    return StrategyRuntime(
+        strategy=strategy,
+        intent_store=store,
+        clock=clock,
+        venue_min_order_shares_fallback=venue_min_order_shares_fallback,
+    )
 
 
 @dataclass(frozen=True)
@@ -115,11 +127,14 @@ def replay_bundle(
     effective_run_id = run_id or _optional_str(bundle.manifest.get("run_id")) or generate_run_id()
     effective_config_hash = config_hash or _optional_str(bundle.manifest.get("config_hash")) or "dev"
     effective_execution_mode = _optional_str(bundle.manifest.get("execution_mode")) or "live"
+    runtime_config = bundle.manifest.get("runtime_config") or {}
+    venue_min_order_shares_fallback = float(runtime_config.get("venue_min_order_shares_fallback", 0.0) or 0.0)
     runtime = build_replay_runtime(
         db_path=db_path,
         run_id=effective_run_id,
         config=config,
         config_hash=effective_config_hash,
+        venue_min_order_shares_fallback=venue_min_order_shares_fallback,
     )
     execution_client = CapturedResponseExecutionClient(bundle.venue_responses)
     try:
