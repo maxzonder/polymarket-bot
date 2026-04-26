@@ -147,6 +147,8 @@ class PolymarketExecutionClient:
         private_key_env_var: str = PRIVATE_KEY_ENV_VAR,
         client_factory: Callable[..., Any] | None = None,
         order_args_factory: Callable[..., Any] | None = None,
+        cancel_payload_factory: Callable[..., Any] | None = None,
+        open_order_params_factory: Callable[..., Any] | None = None,
     ):
         self._private_key = private_key
         self.host = host
@@ -154,6 +156,8 @@ class PolymarketExecutionClient:
         self.private_key_env_var = private_key_env_var
         self._client_factory = client_factory
         self._order_args_factory = order_args_factory
+        self._cancel_payload_factory = cancel_payload_factory
+        self._open_order_params_factory = open_order_params_factory
         self._client = None
         self._api_credentials: VenueApiCredentials | None = None
 
@@ -161,17 +165,28 @@ class PolymarketExecutionClient:
         private_key = self._resolve_private_key()
         client_factory = self._client_factory
         order_args_factory = self._order_args_factory
-        if client_factory is None or order_args_factory is None:
-            sdk_client_factory, sdk_order_args_factory = self._load_sdk_factories()
-            client_factory = client_factory or sdk_client_factory
-            order_args_factory = order_args_factory or sdk_order_args_factory
+        cancel_payload_factory = self._cancel_payload_factory
+        open_order_params_factory = self._open_order_params_factory
+        if (
+            client_factory is None
+            or order_args_factory is None
+            or cancel_payload_factory is None
+            or open_order_params_factory is None
+        ):
+            sdk = self._load_sdk_factories()
+            client_factory = client_factory or sdk[0]
+            order_args_factory = order_args_factory or sdk[1]
+            cancel_payload_factory = cancel_payload_factory or sdk[2]
+            open_order_params_factory = open_order_params_factory or sdk[3]
         client = client_factory(host=self.host, key=private_key, chain_id=self.chain_id)
-        api_creds = client.create_or_derive_api_creds()
+        api_creds = client.create_or_derive_api_key()
         self._api_credentials = _normalize_api_creds(api_creds)
         client.set_api_creds(api_creds)
         self._client = client
         self._client_factory = client_factory
         self._order_args_factory = order_args_factory
+        self._cancel_payload_factory = cancel_payload_factory
+        self._open_order_params_factory = open_order_params_factory
         self.list_open_orders()
 
     def place_order(self, order_request: VenueOrderRequest) -> VenuePlaceResult:
@@ -190,7 +205,10 @@ class PolymarketExecutionClient:
 
     def cancel_order(self, order_id: str) -> VenueCancelResult:
         client = self._require_client()
-        raw = client.cancel(order_id)
+        if self._cancel_payload_factory is None:
+            raise ExecutionClientNotStartedError("Execution client cancel-payload factory is not initialized")
+        cancel_payload = self._cancel_payload_factory(orderID=order_id)
+        raw = client.cancel_order(cancel_payload)
         payload = raw if isinstance(raw, dict) else {"value": raw}
         success = bool(payload.get("success", True))
         status = str(payload.get("status") or ("canceled" if success else "error"))
@@ -203,8 +221,10 @@ class PolymarketExecutionClient:
 
     def list_open_orders(self, market_id: str | None = None) -> list[VenueOrderState]:
         client = self._require_client()
-        kwargs = {"market": market_id} if market_id else {}
-        raw = client.get_orders(**kwargs)
+        if self._open_order_params_factory is None:
+            raise ExecutionClientNotStartedError("Execution client open-order-params factory is not initialized")
+        params = self._open_order_params_factory(market=market_id) if market_id else None
+        raw = client.get_open_orders(params=params)
         items = raw if isinstance(raw, list) else raw.get("data", [])
         results = [self._normalize_order_state(item) for item in items]
         return [row for row in results if _is_live_status(row.status)]
@@ -637,15 +657,22 @@ class PolymarketExecutionClient:
             )
         return private_key
 
-    def _load_sdk_factories(self) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    def _load_sdk_factories(
+        self,
+    ) -> tuple[Callable[..., Any], Callable[..., Any], Callable[..., Any], Callable[..., Any]]:
         try:
-            client_module = importlib.import_module("py_clob_client.client")
-            types_module = importlib.import_module("py_clob_client.clob_types")
+            client_module = importlib.import_module("py_clob_client_v2.client")
+            types_module = importlib.import_module("py_clob_client_v2.clob_types")
         except ImportError as exc:
             raise ExecutionClientConfigError(
-                "py-clob-client is required for live Polymarket execution"
+                "py-clob-client-v2 is required for live Polymarket execution"
             ) from exc
-        return client_module.ClobClient, types_module.OrderArgs
+        return (
+            client_module.ClobClient,
+            types_module.OrderArgs,
+            types_module.OrderPayload,
+            types_module.OpenOrderParams,
+        )
 
     def _require_client(self):
         if self._client is None:
