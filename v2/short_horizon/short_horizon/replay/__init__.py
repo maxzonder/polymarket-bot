@@ -24,6 +24,7 @@ from ..core.events import (
     OrderRejected,
     OrderSide,
     SkipDecisionEvent,
+    SpotPriceUpdate,
     TimerEvent,
     TradeTick,
 )
@@ -125,6 +126,21 @@ def parse_event_record(payload: dict[str, Any]) -> NormalizedEvent:
             token_id=_parse_optional_str(payload.get("token_id")),
             deadline_ms=_parse_optional_int(payload.get("deadline_ms")),
             payload=payload.get("payload") if isinstance(payload.get("payload"), dict) else None,
+            run_id=_parse_optional_str(payload.get("run_id")),
+        )
+
+    if event_type == EventType.SPOT_PRICE_UPDATE:
+        return SpotPriceUpdate(
+            event_time_ms=_parse_timestamp_ms(payload.get("event_time_ms", payload.get("event_time"))),
+            ingest_time_ms=_parse_timestamp_ms(payload.get("ingest_time_ms", payload.get("ingest_time"))),
+            source=str(payload.get("source", "replay.spot_price")),
+            asset_slug=str(payload["asset_slug"]),
+            spot_price=float(payload["spot_price"]),
+            bid=_parse_optional_float(payload.get("bid")),
+            ask=_parse_optional_float(payload.get("ask")),
+            staleness_ms=_parse_optional_int(payload.get("staleness_ms")),
+            currency=str(payload.get("currency", "USD")),
+            venue=_parse_optional_str(payload.get("venue")),
             run_id=_parse_optional_str(payload.get("run_id")),
         )
 

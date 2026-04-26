@@ -2,7 +2,7 @@
   "config_hash": "fixture-config",
   "files": {
     "events_log": {
-      "count": 7,
+      "count": 8,
       "path": "events_log.jsonl"
     },
     "fills_final": {

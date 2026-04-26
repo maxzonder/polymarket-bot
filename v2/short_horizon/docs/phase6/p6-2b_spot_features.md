@@ -99,3 +99,27 @@ By asset:
 - `xrp`: `2791/2791`, median touch latency `235 ms`
 
 Latency interpretation: Binance-backed assets clear the 1s median alignment sanity check. Hyperliquid/HYPE is intentionally backed by minute bars, so its median latency exceeds 1s and should be treated as lower-resolution in P6-2c.
+
+## P6-2b-2 live spot event plumbing
+
+`P6-2b-2` adds `SpotPriceUpdate` as a normalized input event that is persisted and replayed but does not affect strategy decisions yet. This keeps the live/capture/replay plumbing ready for future spot-aware strategies without changing P6-2c offline evaluation semantics.
+
+Event fields:
+
+- `event_time_ms`, `ingest_time_ms`
+- `source`, `venue`
+- `asset_slug`
+- `spot_price`, optional `bid`, optional `ask`
+- optional `staleness_ms`
+- `currency`, default `USD`
+- optional `run_id`
+
+Plumbing contract:
+
+- `EventType.SPOT_PRICE_UPDATE` and dataclass `SpotPriceUpdate` live in `short_horizon.core.events`.
+- `normalize_event_payload()` writes `SpotPriceUpdate` rows to `events_log` with `event_type='SpotPriceUpdate'`.
+- Replay `parse_event_record()` round-trips `SpotPriceUpdate` from JSONL.
+- Runner treats `SpotPriceUpdate` as an input event: append to store, update `StrategyRuntime.latest_spot_by_asset`, and emit no strategy output.
+- `LiveEventSource` accepts an optional async `spot_feed` and merges those events into the live queue alongside market refresh, CLOB websocket, and user-stream events.
+
+Minimal acceptance is synthetic/dry-run plumbing only; no external live spot subscription is enabled by default in this PR.

@@ -17,7 +17,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.config import ExecutionConfig, RiskConfig, ShortHorizonConfig
-from short_horizon.core import EventType, MarketResolvedWithInventory, OrderSide, OrderState, ReplayClock
+from short_horizon.core import EventType, MarketResolvedWithInventory, OrderSide, OrderState, ReplayClock, SpotPriceUpdate
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
 from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
@@ -27,6 +27,7 @@ from short_horizon.models import OrderIntent, SkipDecision
 from short_horizon.replay import ReplayCaptureWriter, ReplayFidelityError, parse_event_record
 from short_horizon.replay.comparator import main as replay_comparator_main
 from short_horizon.replay_runner import build_replay_runtime, compare_bundle_to_replay, main as replay_main, replay_bundle, replay_file, render_comparison_report
+from short_horizon.runner import drive_runtime_events
 from short_horizon.live_runner import DEFAULT_LIVE_VENUE_MIN_ORDER_SHARES_FALLBACK
 from short_horizon.storage import InMemoryIntentStore, RunContext, SQLiteRuntimeStore
 from short_horizon.strategies import ShortHorizon15mTouchStrategy
@@ -327,6 +328,26 @@ class CoreTypesTest(unittest.TestCase):
         self.assertEqual(market.event_type, EventType.MARKET_STATE_UPDATE)
         self.assertEqual(book.event_type, EventType.BOOK_UPDATE)
 
+    def test_spot_price_update_round_trips_through_normalizer_and_replay_parser(self) -> None:
+        event = SpotPriceUpdate(
+            event_time_ms=123_000,
+            ingest_time_ms=123_050,
+            source="coinbase.spot",
+            asset_slug="btc",
+            spot_price=75123.45,
+            bid=75123.40,
+            ask=75123.50,
+            staleness_ms=50,
+            venue="coinbase",
+            run_id="run1",
+        )
+
+        payload = normalize_event_payload(event)
+        parsed = parse_event_record(payload)
+
+        self.assertEqual(payload["event_type"], "SpotPriceUpdate")
+        self.assertEqual(parsed, event)
+
     def test_market_resolved_with_inventory_round_trips_through_normalizer_and_replay_parser(self) -> None:
         event = MarketResolvedWithInventory(
             event_time_ms=230_000,
@@ -348,6 +369,35 @@ class CoreTypesTest(unittest.TestCase):
 
 
 class StrategyApiContractTest(unittest.TestCase):
+    def test_runner_persists_spot_price_update_without_strategy_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "spot.sqlite3"
+            runtime = build_live_runtime(db_path=db_path, run_id="run1", config=ShortHorizonConfig())
+            event = SpotPriceUpdate(
+                event_time_ms=123_000,
+                ingest_time_ms=123_050,
+                source="coinbase.spot",
+                asset_slug="btc",
+                spot_price=75123.45,
+            )
+
+            summary = drive_runtime_events(
+                events=[event],
+                runtime=runtime,
+                logger_name="test.spot",
+                completed_event_name="test_completed",
+            )
+            runtime.store.close()
+
+            self.assertEqual(summary.event_count, 1)
+            self.assertEqual(summary.order_intents, 0)
+            conn = sqlite3.connect(db_path)
+            row = conn.execute("SELECT event_type, payload_json FROM events_log").fetchone()
+            conn.close()
+            self.assertEqual(row[0], "SpotPriceUpdate")
+            self.assertEqual(json.loads(row[1])["spot_price"], 75123.45)
+            self.assertEqual(runtime.latest_spot_by_asset["btc"], event)
+
     def test_touch_strategy_implements_market_event_contract(self) -> None:
         strategy = ShortHorizon15mTouchStrategy(config=ShortHorizonConfig())
         strategy.on_market_event(

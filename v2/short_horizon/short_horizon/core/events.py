@@ -21,6 +21,7 @@ from .ids import (
 class EventType(StrEnum):
     BOOK_UPDATE = "BookUpdate"
     TRADE_TICK = "TradeTick"
+    SPOT_PRICE_UPDATE = "SpotPriceUpdate"
     MARKET_STATE_UPDATE = "MarketStateUpdate"
     TIMER_EVENT = "TimerEvent"
     ORDER_INTENT = "OrderIntent"
@@ -94,6 +95,22 @@ class TradeTick:
     venue_seq: int | None = None
     run_id: RunId | None = None
     event_type: EventType = field(default=EventType.TRADE_TICK, init=False)
+
+
+@dataclass(frozen=True)
+class SpotPriceUpdate:
+    event_time_ms: EventTime
+    ingest_time_ms: IngestTime
+    source: str
+    asset_slug: str
+    spot_price: float
+    bid: float | None = None
+    ask: float | None = None
+    staleness_ms: int | None = None
+    currency: str = "USD"
+    venue: str | None = None
+    run_id: RunId | None = None
+    event_type: EventType = field(default=EventType.SPOT_PRICE_UPDATE, init=False)
 
 
 @dataclass(frozen=True)
@@ -274,6 +291,7 @@ class MarketResolvedWithInventory:
 NormalizedEvent: TypeAlias = (
     BookUpdate
     | TradeTick
+    | SpotPriceUpdate
     | MarketStateUpdate
     | TimerEvent
     | OrderIntentEvent

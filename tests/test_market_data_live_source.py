@@ -11,7 +11,7 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
-from short_horizon.core import EventType, MarketStateUpdate, MarketStatus, OrderAccepted, OrderSide
+from short_horizon.core import EventType, MarketStateUpdate, MarketStatus, OrderAccepted, OrderSide, SpotPriceUpdate
 from short_horizon.market_data import LiveEventSource, expand_market_state_update, extract_market_token_ids
 
 
@@ -294,6 +294,35 @@ class LiveEventSourceTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(event.market_id == "m1" for event in emitted))
         self.assertTrue(all(event.token_id == "tok_yes" for event in emitted))
         self.assertTrue(all(event.ingest_time_ms == 9000 for event in emitted))
+
+    async def test_live_event_source_forwards_optional_spot_feed_events(self) -> None:
+        spot = SpotPriceUpdate(
+            event_time_ms=1250,
+            ingest_time_ms=1251,
+            source="coinbase.spot",
+            asset_slug="btc",
+            spot_price=75123.45,
+            bid=75123.40,
+            ask=75123.50,
+            staleness_ms=10,
+            venue="coinbase",
+        )
+        source = LiveEventSource(
+            market_refresh=_AsyncEventStream([]),
+            fee_refresh=_AsyncEventStream([]),
+            websocket=_FakeWebsocket(messages=[]),
+            spot_feed=_AsyncEventStream([spot]),
+            clock_ms=lambda: 5000,
+        )
+
+        await source.start()
+        try:
+            emitted = [await asyncio.wait_for(source.__anext__(), timeout=1.0)]
+        finally:
+            await source.stop()
+
+        self.assertEqual(emitted, [spot])
+        self.assertEqual(emitted[0].event_type, EventType.SPOT_PRICE_UPDATE)
 
     async def test_live_event_source_forwards_optional_user_stream_events(self) -> None:
         market_events = [

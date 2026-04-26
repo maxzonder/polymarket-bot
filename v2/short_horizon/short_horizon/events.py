@@ -9,6 +9,7 @@ from .core.events import (
     OrderIntentEvent,
     OrderRejected,
     SkipDecisionEvent,
+    SpotPriceUpdate,
     TimerEvent,
     TradeTick,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "OrderIntentEvent",
     "OrderRejected",
     "SkipDecisionEvent",
+    "SpotPriceUpdate",
     "TimerEvent",
     "TradeTick",
 ]
