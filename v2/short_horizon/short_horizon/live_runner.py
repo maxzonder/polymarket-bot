@@ -11,11 +11,11 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
 from typing import Callable
 
-from .config import RiskConfig, ShortHorizonConfig
+from .config import RiskConfig, ShortHorizonConfig, SpotDislocationConfig
 from .core.clock import SystemClock
 from .core.runtime import StrategyRuntime
 from .execution import ExecutionEngine, ExecutionMode, LiveSubmitGuard, LiveSubmitGuardRejected
-from .market_data import LiveEventSource, MarketDataSource
+from .market_data import BinanceSpotPriceFeed, BinanceSpotSymbol, LiveEventSource, MarketDataSource
 from .probe import assert_min_book_updates_per_minute, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from .replay import ReplayCaptureWriter
 from .runner import RunnerSummary, drive_runtime_event_stream, drive_runtime_events
@@ -257,7 +257,7 @@ async def run_live(
             client = capture_writer.wrap_execution_client(client)
         client.startup()
         reconcile_runtime_orders(runtime=runtime, execution_client=client, execution_mode=resolved_mode)
-    source = source or build_live_source(execution_mode=resolved_mode, execution_client=client)
+    source = source or build_live_source(execution_mode=resolved_mode, execution_client=client, config=config)
     redeem_sweeper = None
     if resolved_mode is ExecutionMode.LIVE and resolved_redeem_interval_seconds is not None:
         if client is None:
@@ -302,16 +302,40 @@ def build_live_source(
     *,
     execution_mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
     execution_client: PolymarketExecutionClient | None = None,
+    config: ShortHorizonConfig | None = None,
 ) -> LiveEventSource:
     resolved_mode = ExecutionMode(str(execution_mode))
+    spot_feed = _build_spot_feed(config)
     if resolved_mode is not ExecutionMode.LIVE:
-        return LiveEventSource()
+        return LiveEventSource(spot_feed=spot_feed) if spot_feed is not None else LiveEventSource()
     if execution_client is None:
         raise ValueError("execution_client is required for live execution mode")
     credentials = getattr(execution_client, "api_credentials", None)
     if not callable(credentials):
         raise TypeError("live execution mode requires execution_client.api_credentials() for authenticated user stream")
-    return LiveEventSource(user_stream=PolymarketUserStream(auth=credentials()))
+    user_stream = PolymarketUserStream(auth=credentials())
+    return LiveEventSource(user_stream=user_stream, spot_feed=spot_feed) if spot_feed is not None else LiveEventSource(user_stream=user_stream)
+
+
+def _build_spot_feed(config: ShortHorizonConfig | None) -> BinanceSpotPriceFeed | None:
+    spot_cfg = getattr(config, "spot_dislocation", None) if config is not None else None
+    if spot_cfg is None or not bool(getattr(spot_cfg, "enabled", False)):
+        return None
+    symbols = tuple(
+        BinanceSpotSymbol(asset_slug=_spot_asset_slug(asset), symbol=_spot_symbol_for_asset(asset))
+        for asset in getattr(spot_cfg, "asset_allowlist", ())
+        if _spot_symbol_for_asset(asset) is not None
+    )
+    return BinanceSpotPriceFeed(symbols=symbols) if symbols else BinanceSpotPriceFeed()
+
+
+def _spot_asset_slug(asset: str) -> str:
+    text = str(asset).strip().lower()
+    return {"bitcoin": "btc", "ethereum": "eth", "solana": "sol", "ripple": "xrp"}.get(text, text)
+
+
+def _spot_symbol_for_asset(asset: str) -> str | None:
+    return {"btc": "BTCUSDT", "bitcoin": "BTCUSDT", "eth": "ETHUSDT", "ethereum": "ETHUSDT", "sol": "SOLUSDT", "solana": "SOLUSDT", "xrp": "XRPUSDT", "ripple": "XRPUSDT"}.get(str(asset).strip().lower())
 
 
 def reconcile_runtime_orders(
@@ -414,6 +438,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Fail the live probe if observed BookUpdate throughput falls below this rate over the probe window; set 0 to disable",
     )
+    parser.add_argument("--enable-spot-dislocation-v3", action="store_true", help="Enable the DOWN/NO spot-dislocation v3 runtime gate")
+    parser.add_argument("--spot-dislocation-assets", default="btc,eth,sol,xrp", help="Comma-separated asset allowlist for v3 gate")
+    parser.add_argument("--spot-dislocation-directions", default="DOWN/NO", help="Comma-separated direction allowlist for v3 gate")
+    parser.add_argument("--spot-dislocation-min-lifecycle", type=float, default=0.60)
+    parser.add_argument("--spot-dislocation-min-gap", type=float, default=0.06)
+    parser.add_argument("--spot-dislocation-edge-buffer-bps", type=float, default=200.0)
     return parser
 
 
@@ -503,9 +533,28 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
 
 def apply_cli_config_overrides(config: ShortHorizonConfig | None, args: argparse.Namespace) -> ShortHorizonConfig | None:
     base = config or ShortHorizonConfig()
-    if not getattr(args, "safe_mode", False):
-        return config
-    return replace(base, risk=replace(base.risk, global_safe_mode=True))
+    updated = base
+    if getattr(args, "target_trade_size_usdc", None) is not None:
+        updated = replace(updated, execution=replace(updated.execution, target_trade_size_usdc=float(args.target_trade_size_usdc)))
+    if getattr(args, "safe_mode", False):
+        updated = replace(updated, risk=replace(updated.risk, global_safe_mode=True))
+    if getattr(args, "enable_spot_dislocation_v3", False):
+        updated = replace(
+            updated,
+            spot_dislocation=SpotDislocationConfig(
+                enabled=True,
+                asset_allowlist=tuple(_parse_csv_arg(getattr(args, "spot_dislocation_assets", "btc,eth,sol,xrp"))),
+                direction_allowlist=tuple(_parse_csv_arg(getattr(args, "spot_dislocation_directions", "DOWN/NO"))),
+                min_lifecycle_fraction=float(getattr(args, "spot_dislocation_min_lifecycle", 0.60)),
+                min_spot_gap=float(getattr(args, "spot_dislocation_min_gap", 0.06)),
+                edge_buffer_bps=float(getattr(args, "spot_dislocation_edge_buffer_bps", 200.0)),
+            ),
+        )
+    return updated if updated != base else config
+
+
+def _parse_csv_arg(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
 def execute_kill_switch(

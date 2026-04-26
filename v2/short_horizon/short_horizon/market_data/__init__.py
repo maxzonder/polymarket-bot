@@ -5,6 +5,7 @@ from pathlib import Path
 from ..core.events import NormalizedEvent
 from ..replay import ReplayEventSource
 from .live_source import LiveEventSource, expand_market_state_update, extract_market_token_ids
+from .spot_feed import BinanceSpotPriceFeed, BinanceSpotSymbol, DEFAULT_BINANCE_SPOT_SYMBOLS
 
 
 class MarketDataSource:
@@ -24,4 +25,12 @@ class MarketDataSource:
         return None
 
 
-__all__ = ["LiveEventSource", "MarketDataSource", "expand_market_state_update", "extract_market_token_ids"]
+__all__ = [
+    "BinanceSpotPriceFeed",
+    "BinanceSpotSymbol",
+    "DEFAULT_BINANCE_SPOT_SYMBOLS",
+    "LiveEventSource",
+    "MarketDataSource",
+    "expand_market_state_update",
+    "extract_market_token_ids",
+]
