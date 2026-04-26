@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from ..core.events import FeeInfo
+
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 
@@ -47,6 +49,7 @@ class MarketMetadata:
     series_slug: str | None = None
     yes_outcome_name: str | None = None
     no_outcome_name: str | None = None
+    fee_info: FeeInfo | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +198,7 @@ def parse_market_discovery_rows(
         tick_size = _parse_float(raw.get("orderPriceMinTickSize"))
         min_order_size = _parse_float(raw.get("orderMinSize"))
         fee_rate_bps = _extract_fee_rate_bps(raw)
+        fee_info = _extract_fee_info(raw, fee_rate_bps=fee_rate_bps)
         token_yes_id, token_no_id, yes_outcome_name, no_outcome_name = _select_yes_no_tokens(token_ids, outcomes)
         markets.append(
             MarketMetadata(
@@ -216,6 +220,7 @@ def parse_market_discovery_rows(
                 series_slug=str(series_slug) if series_slug is not None else None,
                 yes_outcome_name=yes_outcome_name,
                 no_outcome_name=no_outcome_name,
+                fee_info=fee_info,
             )
         )
         stats["eligible_markets"] += 1
@@ -337,6 +342,27 @@ def _extract_fee_rate_bps(raw: dict[str, Any]) -> float | None:
     if raw.get("takerBaseFee") is not None:
         return _parse_float(raw.get("takerBaseFee"))
     return None
+
+
+def _extract_fee_info(raw: dict[str, Any], *, fee_rate_bps: float | None) -> FeeInfo | None:
+    """Extract V2 dynamic-fee descriptor (`fd`) if Gamma surfaces it.
+
+    Until the venue adapter calls `getClobMarketInfo` directly, Gamma may
+    expose `fd: {r, e}` for V2 markets. When absent, this returns None and
+    consumers fall back to `fee_rate_bps`.
+    """
+    fd = raw.get("fd")
+    if not isinstance(fd, dict):
+        return None
+    rate = _parse_float(fd.get("r")) or 0.0
+    exponent = _parse_float(fd.get("e")) or 0.0
+    base_fee_bps = int(round(float(fee_rate_bps))) if fee_rate_bps is not None else 0
+    return FeeInfo(
+        base_fee_bps=base_fee_bps,
+        rate=float(rate),
+        exponent=float(exponent),
+        source="gamma.fd",
+    )
 
 
 def _duration_metric_value(*, duration_metric: str, remaining_seconds: int, duration_seconds: int | None, implied_duration_seconds: int | None) -> int | None:

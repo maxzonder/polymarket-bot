@@ -403,6 +403,7 @@ class SQLiteRuntimeStore:
     def upsert_market_state(self, event: MarketStateUpdate) -> None:
         self._latest_market_state_by_id[event.market_id] = event
         market_status = "active" if event.is_active else "closed"
+        fee_info_json = json.dumps(asdict(event.fee_info), sort_keys=True) if event.fee_info is not None else None
         self.conn.execute(
             """
             INSERT INTO markets (
@@ -416,8 +417,9 @@ class SQLiteRuntimeStore:
                 fee_rate_bps_latest,
                 fee_fetched_at,
                 fees_enabled,
+                fee_info_json,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id) DO UPDATE SET
                 condition_id = excluded.condition_id,
                 question = excluded.question,
@@ -428,6 +430,7 @@ class SQLiteRuntimeStore:
                 fee_rate_bps_latest = excluded.fee_rate_bps_latest,
                 fee_fetched_at = excluded.fee_fetched_at,
                 fees_enabled = excluded.fees_enabled,
+                fee_info_json = excluded.fee_info_json,
                 updated_at = excluded.updated_at
             """,
             (
@@ -441,6 +444,7 @@ class SQLiteRuntimeStore:
                 event.fee_rate_bps,
                 iso_from_ms(event.ingest_time_ms) if event.fee_rate_bps is not None else None,
                 1 if event.fee_rate_bps is not None else None,
+                fee_info_json,
                 iso_from_ms(event.ingest_time_ms),
             ),
         )
@@ -715,7 +719,21 @@ class SQLiteRuntimeStore:
         self._migrate_orders_schema(precreate=True)
         self.conn.executescript(schema_path.read_text())
         self._migrate_orders_schema(precreate=False)
+        self._migrate_markets_schema()
         self.conn.commit()
+
+    def _migrate_markets_schema(self) -> None:
+        table_exists = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'markets'"
+        ).fetchone() is not None
+        if not table_exists:
+            return
+        columns = {
+            str(row[1])
+            for row in self.conn.execute("PRAGMA table_info(markets)").fetchall()
+        }
+        if "fee_info_json" not in columns:
+            self.conn.execute("ALTER TABLE markets ADD COLUMN fee_info_json TEXT")
 
     def _migrate_orders_schema(self, *, precreate: bool) -> None:
         table_exists = self.conn.execute(

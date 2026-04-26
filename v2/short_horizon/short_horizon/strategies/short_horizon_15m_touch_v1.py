@@ -6,7 +6,7 @@ from typing import Iterable
 from ..config import ShortHorizonConfig
 from ..core.clock import Clock, SystemClock
 from ..core.order_state import OrderState
-from ..core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, SpotPriceUpdate, TimerEvent, TradeTick
+from ..core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, SpotPriceUpdate, TimerEvent, TradeTick, effective_fee_rate_bps
 from ..core.lifecycle import compute_lifecycle_fraction
 from ..core.models import MarketState, OrderIntent, SkipDecision, TouchSignal
 from ..risk import gate_touch
@@ -175,6 +175,7 @@ class ShortHorizon15mTouchStrategy:
             token_yes_id=event.token_yes_id,
             token_no_id=event.token_no_id,
             tick_size=event.tick_size,
+            fee_info=event.fee_info,
         )
         if not event.is_active or event.event_time_ms >= event.end_time_ms:
             self.active_inventory_by_market.pop(event.market_id, None)
@@ -285,7 +286,8 @@ class ShortHorizon15mTouchStrategy:
         spot_gap = spot_prob - entry
         if spot_gap < float(getattr(cfg, "min_spot_gap", 0.0)):
             return _skip("spot_dislocation_gap_below_min", event=event, level=event.best_ask or 0.0, details=f"{spot_gap:.6f}")
-        fee_gap = _break_even_fee_gap(entry, state.fee_rate_bps or 0.0)
+        effective_fee_bps = effective_fee_rate_bps(fee_info=state.fee_info, fee_rate_bps=state.fee_rate_bps)
+        fee_gap = _break_even_fee_gap(entry, effective_fee_bps or 0.0)
         required_gap = fee_gap + float(getattr(cfg, "edge_buffer_bps", 0.0)) / 10000.0
         if spot_gap < required_gap:
             return _skip("spot_dislocation_edge_below_required_gap", event=event, level=event.best_ask or 0.0, details=f"{spot_gap:.6f}<{required_gap:.6f}")

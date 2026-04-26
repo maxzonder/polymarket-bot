@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .events import FeeInfo
 from .ids import EventTime, MarketId, StrategyId, TokenId
 
 
@@ -22,6 +23,7 @@ class MarketState:
     token_yes_id: str | None = None
     token_no_id: str | None = None
     tick_size: float | None = None
+    fee_info: FeeInfo | None = None
 
 
 @dataclass(frozen=True)

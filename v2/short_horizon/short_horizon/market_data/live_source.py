@@ -299,6 +299,7 @@ def expand_market_state_update(event: MarketStateUpdate) -> list[MarketStateUpda
                 token_yes_id=event.token_yes_id,
                 token_no_id=event.token_no_id,
                 fee_rate_bps=event.fee_rate_bps,
+                fee_info=event.fee_info,
                 tick_size=event.tick_size,
                 min_order_size=event.min_order_size,
                 fee_fetched_at_ms=event.fee_fetched_at_ms,
