@@ -28,14 +28,19 @@ class EdgeTrade:
     filled_size: float
     cost_usdc: float
     fee_paid_usdc: float
+    fee_rate_bps: float
+    gross_pnl_usdc: float
+    estimated_fee_usdc: float
+    net_pnl_after_estimated_fees: float
     outcome_price: float
     pnl_usdc: float
     pnl_per_usdc: float | None
+    break_even_hit_rate: float | None
     resolved_at: str | None
 
     @property
     def win(self) -> bool:
-        return self.pnl_usdc > 0
+        return self.net_pnl_after_estimated_fees > 0
 
 
 @dataclass(frozen=True)
@@ -45,9 +50,13 @@ class EdgeBucket:
     wins: int
     hit_rate: float | None
     pnl_usdc: float
+    gross_pnl_usdc: float
+    estimated_fee_usdc: float
+    net_pnl_after_estimated_fees: float
     cost_usdc: float
     ev_per_trade_usdc: float | None
     ev_per_usdc: float | None
+    break_even_hit_rate: float | None
     ci95_low_usdc: float | None
     ci95_high_usdc: float | None
 
@@ -94,22 +103,26 @@ class EdgeReport:
             f"- **{self.recommendation}**",
             f"- Resolved trades analyzed: `{self.overall.trades}` / required `{self.min_trades_for_go}`",
             f"- Total cost: `{self.overall.cost_usdc:.4f} USDC`",
-            f"- Total PnL: `{self.overall.pnl_usdc:.4f} USDC`",
-            f"- EV/trade: `{_fmt_optional(self.overall.ev_per_trade_usdc)} USDC`",
+            f"- Gross PnL before estimated taker fees: `{self.overall.gross_pnl_usdc:.4f} USDC`",
+            f"- Estimated taker fees: `{self.overall.estimated_fee_usdc:.4f} USDC`",
+            f"- Net PnL after estimated fees: `{self.overall.net_pnl_after_estimated_fees:.4f} USDC`",
+            f"- Net EV/trade: `{_fmt_optional(self.overall.ev_per_trade_usdc)} USDC`",
             f"- EV/trade 95% CI: `{_fmt_optional(self.overall.ci95_low_usdc)} .. {_fmt_optional(self.overall.ci95_high_usdc)} USDC`",
             f"- EV per 1 USDC deployed: `{_fmt_optional(self.overall.ev_per_usdc)}`",
             f"- Hit rate: `{_fmt_rate(self.overall.hit_rate)}`",
+            f"- Break-even hit rate: `{_fmt_rate(self.overall.break_even_hit_rate)}`",
             "",
             "Interpretation:",
         ]
         if self.overall.trades < self.min_trades_for_go:
             lines.append("- This is not enough for a formal P6-1 GO, but it is enough to block stake scaling while selection is investigated.")
-        if self.overall.pnl_usdc < 0:
+        if self.overall.net_pnl_after_estimated_fees < 0:
             lines.append("- The observed live sample is materially negative; do not run the stake ramp from this baseline.")
         elif self.overall.ci95_low_usdc is not None and self.overall.ci95_low_usdc <= 0:
             lines.append("- Aggregate PnL is non-negative, but the confidence interval does not clear the P6-1 GO bar.")
         lines.extend([
             "- Costs use actual filled notional, so venue min-size upscaling is reflected in EV/capital efficiency.",
+            "- Estimated fees are computed from stored `fee_rate_bps_latest`; missing fee metadata is a hard analyzer error.",
             "",
             "## Input DBs",
         ])
@@ -130,7 +143,8 @@ class EdgeReport:
             lines.append(
                 f"- `{trade.run_id}` `{trade.market_id}` {trade.asset}/{trade.direction} "
                 f"level=`{_fmt_optional(trade.price_level)}` lifecycle=`{_fmt_optional(trade.lifecycle_fraction)}` "
-                f"cost=`{trade.cost_usdc:.4f}` outcome=`{trade.outcome_price:.4f}` pnl=`{trade.pnl_usdc:.4f}` "
+                f"cost=`{trade.cost_usdc:.4f}` fee=`{trade.estimated_fee_usdc:.4f}` outcome=`{trade.outcome_price:.4f}` "
+                f"gross_pnl=`{trade.gross_pnl_usdc:.4f}` net_pnl=`{trade.net_pnl_after_estimated_fees:.4f}` "
                 f"question={trade.question!r}"
             )
         return "\n".join(lines)
@@ -184,14 +198,17 @@ def _extract_trades(db_path: Path) -> list[EdgeTrade]:
         if entry_price is None:
             entry_price = 0.0
         filled_size = _float_or_none(item.get("size")) or float(fill.get("size") or 0.0)
+        fee_rate_bps = _fee_rate_bps_for_market(market=market, state_meta=state_meta, market_id=market_id, db_path=db_path)
         fee_paid = float(fill.get("fee_paid_usdc") or 0.0)
         cost = float(fill.get("cost_usdc") or 0.0)
         if cost <= 0 and filled_size > 0:
-            cost = filled_size * entry_price + fee_paid
-        pnl = _float_or_none(item.get("estimated_pnl_usdc"))
+            cost = filled_size * entry_price
+        gross_pnl = _float_or_none(item.get("estimated_pnl_usdc"))
         outcome = _float_or_none(item.get("outcome_price"))
-        if pnl is None:
-            pnl = ((outcome or 0.0) * filled_size) - cost
+        if gross_pnl is None:
+            gross_pnl = ((outcome or 0.0) * filled_size) - cost
+        estimated_fee = cost * fee_rate_bps / 10000.0
+        net_pnl = gross_pnl - estimated_fee
         question = str(market["question"]) if market is not None and market["question"] is not None else None
         trades.append(
             EdgeTrade(
@@ -209,9 +226,14 @@ def _extract_trades(db_path: Path) -> list[EdgeTrade]:
                 filled_size=filled_size,
                 cost_usdc=cost,
                 fee_paid_usdc=fee_paid,
+                fee_rate_bps=fee_rate_bps,
+                gross_pnl_usdc=gross_pnl,
+                estimated_fee_usdc=estimated_fee,
+                net_pnl_after_estimated_fees=net_pnl,
                 outcome_price=outcome or 0.0,
-                pnl_usdc=pnl,
-                pnl_per_usdc=(pnl / cost) if cost > 0 else None,
+                pnl_usdc=net_pnl,
+                pnl_per_usdc=(net_pnl / cost) if cost > 0 else None,
+                break_even_hit_rate=((cost + estimated_fee) / filled_size) if filled_size > 0 else None,
                 resolved_at=str(item.get("event_time") or "") or None,
             )
         )
@@ -248,7 +270,7 @@ def _fill_costs(conn: sqlite3.Connection, run_id: str) -> dict[tuple[str, str], 
     result: dict[tuple[str, str], dict[str, float]] = defaultdict(lambda: {"cost_usdc": 0.0, "size": 0.0, "fee_paid_usdc": 0.0})
     for row in conn.execute("SELECT * FROM fills WHERE run_id = ?", (run_id,)):
         key = (str(row["market_id"]), str(row["token_id"]))
-        result[key]["cost_usdc"] += float(row["price"] or 0.0) * float(row["size"] or 0.0) + float(row["fee_paid_usdc"] or 0.0)
+        result[key]["cost_usdc"] += float(row["price"] or 0.0) * float(row["size"] or 0.0)
         result[key]["size"] += float(row["size"] or 0.0)
         result[key]["fee_paid_usdc"] += float(row["fee_paid_usdc"] or 0.0)
     return dict(result)
@@ -275,10 +297,13 @@ def _summarize_group(trades: list[EdgeTrade], key_func) -> list[EdgeBucket]:
 
 def _summarize_bucket(name: str, trades: list[EdgeTrade]) -> EdgeBucket:
     n = len(trades)
-    pnl_values = [trade.pnl_usdc for trade in trades]
+    pnl_values = [trade.net_pnl_after_estimated_fees for trade in trades]
     wins = sum(1 for trade in trades if trade.win)
-    pnl = sum(pnl_values)
+    gross_pnl = sum(trade.gross_pnl_usdc for trade in trades)
+    estimated_fee = sum(trade.estimated_fee_usdc for trade in trades)
+    net_pnl = sum(pnl_values)
     cost = sum(trade.cost_usdc for trade in trades)
+    filled_size = sum(trade.filled_size for trade in trades)
     avg = mean(pnl_values) if pnl_values else None
     ci_low: float | None = None
     ci_high: float | None = None
@@ -294,10 +319,14 @@ def _summarize_bucket(name: str, trades: list[EdgeTrade]) -> EdgeBucket:
         trades=n,
         wins=wins,
         hit_rate=(wins / n) if n else None,
-        pnl_usdc=pnl,
+        pnl_usdc=net_pnl,
+        gross_pnl_usdc=gross_pnl,
+        estimated_fee_usdc=estimated_fee,
+        net_pnl_after_estimated_fees=net_pnl,
         cost_usdc=cost,
         ev_per_trade_usdc=avg,
-        ev_per_usdc=(pnl / cost) if cost > 0 else None,
+        ev_per_usdc=(net_pnl / cost) if cost > 0 else None,
+        break_even_hit_rate=((cost + estimated_fee) / filled_size) if filled_size > 0 else None,
         ci95_low_usdc=ci_low,
         ci95_high_usdc=ci_high,
     )
@@ -311,6 +340,18 @@ def _loads(value: str | bytes | None) -> dict[str, Any]:
     except Exception:
         return {}
     return item if isinstance(item, dict) else {}
+
+
+def _fee_rate_bps_for_market(*, market: sqlite3.Row | None, state_meta: dict[str, Any], market_id: str, db_path: Path) -> float:
+    value: Any = None
+    if market is not None and "fee_rate_bps_latest" in market.keys():
+        value = market["fee_rate_bps_latest"]
+    if value is None:
+        value = state_meta.get("fee_rate_bps")
+    fee_rate_bps = _float_or_none(value)
+    if fee_rate_bps is None:
+        raise ValueError(f"missing fee_rate_bps_latest for market_id={market_id} in {db_path}")
+    return fee_rate_bps
 
 
 def _asset_from_question(question: str | None, *, state_meta: dict[str, Any] | None = None) -> str:
@@ -385,9 +426,10 @@ def _bucket_lines(buckets: list[EdgeBucket]) -> list[str]:
         lines.append(
             f"- `{bucket.name}`: trades=`{bucket.trades}`, wins=`{bucket.wins}`, "
             f"hit=`{_fmt_rate(bucket.hit_rate)}`, cost=`{bucket.cost_usdc:.4f}`, "
-            f"pnl=`{bucket.pnl_usdc:.4f}`, EV/trade=`{_fmt_optional(bucket.ev_per_trade_usdc)}`, "
+            f"gross_pnl=`{bucket.gross_pnl_usdc:.4f}`, fee=`{bucket.estimated_fee_usdc:.4f}`, "
+            f"net_pnl=`{bucket.net_pnl_after_estimated_fees:.4f}`, EV/trade=`{_fmt_optional(bucket.ev_per_trade_usdc)}`, "
             f"CI95=`{_fmt_optional(bucket.ci95_low_usdc)}..{_fmt_optional(bucket.ci95_high_usdc)}`, "
-            f"EV/USDC=`{_fmt_optional(bucket.ev_per_usdc)}`"
+            f"EV/USDC=`{_fmt_optional(bucket.ev_per_usdc)}`, break_even_hit=`{_fmt_rate(bucket.break_even_hit_rate)}`"
         )
     return lines
 
