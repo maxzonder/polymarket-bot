@@ -19,6 +19,9 @@ class MarketState:
     fee_rate_bps: float | None
     fee_fetched_at_ms: int | None
     fee_metadata_age_ms: int | None
+    token_yes_id: str | None = None
+    token_no_id: str | None = None
+    tick_size: float | None = None
 
 
 @dataclass(frozen=True)

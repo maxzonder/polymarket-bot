@@ -131,6 +131,9 @@ class StrategyRuntime:
 
     def on_spot_price_update(self, event: SpotPriceUpdate) -> None:
         self.latest_spot_by_asset[event.asset_slug] = event
+        on_strategy_spot = getattr(self.strategy, "on_spot_price_update", None)
+        if callable(on_strategy_spot):
+            on_strategy_spot(event)
         self.logger.bind(**event_log_fields(event)).info(
             "spot_price_update_ingested",
             asset_slug=event.asset_slug,

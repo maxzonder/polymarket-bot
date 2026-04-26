@@ -56,6 +56,20 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class SpotDislocationConfig:
+    enabled: bool = False
+    asset_allowlist: tuple[str, ...] = ("btc", "eth", "sol", "xrp")
+    direction_allowlist: tuple[str, ...] = ("DOWN/NO",)
+    min_lifecycle_fraction: float = 0.60
+    min_spot_gap: float = 0.06
+    edge_buffer_bps: float = 200.0
+    max_spot_staleness_ms: int = 5_000
+    max_start_spot_latency_ms: int = 5_000
+    min_vol_lookback_points: int = 5
+    fit_10_allowlist: tuple[str, ...] = ("+0_tick", "+1_tick")
+
+
+@dataclass(frozen=True)
 class ShortHorizonConfig:
     strategy_id: str = "short_horizon_15m_touch_v1"
     implementation_language: str = "python"
@@ -66,3 +80,4 @@ class ShortHorizonConfig:
     fees: FeesConfig = field(default_factory=FeesConfig)
     market_discovery: MarketDiscoveryConfig = field(default_factory=MarketDiscoveryConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    spot_dislocation: SpotDislocationConfig = field(default_factory=SpotDislocationConfig)

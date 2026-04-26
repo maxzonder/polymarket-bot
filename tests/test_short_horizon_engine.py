@@ -16,11 +16,11 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
-from short_horizon.config import ExecutionConfig, RiskConfig, ShortHorizonConfig
+from short_horizon.config import ExecutionConfig, RiskConfig, ShortHorizonConfig, SpotDislocationConfig
 from short_horizon.core import EventType, MarketResolvedWithInventory, OrderSide, OrderState, ReplayClock, SpotPriceUpdate
 from short_horizon.engine import ShortHorizonEngine
 from short_horizon.execution import ExecutionEngine, ExecutionMode, ExecutionTransitionError, ExecutionValidationError, SyntheticFillRequest, estimate_fee_usdc, is_valid_tick_size
-from short_horizon.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
+from short_horizon.events import BookLevel, BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanceled, OrderFilled, TimerEvent
 from short_horizon.live_runner import AllowanceApprovalSummary, KillSwitchSummary, OperatorConfirmLiveOrderGuard, PolygonUsdcBridgeSummary, ResolvedRedeemSummary, build_live_source, build_live_runtime, build_live_submit_guard, build_parser, execute_allowance_approve, execute_kill_switch, execute_polygon_usdc_bridge, execute_resolved_redeem, main, reconcile_runtime_orders, run_live, run_stub_live, validate_cli_args
 from short_horizon.probe import assert_min_book_updates_per_minute, cross_validate_probe_against_collector, maybe_cross_validate_probe_against_collector, summarize_probe_db
 from short_horizon.models import OrderIntent, SkipDecision
@@ -672,6 +672,9 @@ class StrategyApiContractTest(unittest.TestCase):
             is_active=False,
             metadata_is_fresh=True,
             fee_rate_bps=10.0,
+            tick_size=0.01,
+            token_yes_id="tok_yes",
+            token_no_id="tok_no",
             fee_metadata_age_ms=1_000,
         )
 
@@ -707,6 +710,9 @@ class ShortHorizonEngineTest(unittest.TestCase):
             is_active=is_active,
             metadata_is_fresh=True,
             fee_rate_bps=10.0,
+            tick_size=0.01,
+            token_yes_id="tok_yes",
+            token_no_id="tok_no",
             fee_metadata_age_ms=1_000,
         )
 
@@ -733,6 +739,93 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(self.store.intents[0].level, 0.55)
         self.assertEqual(len(self.store.events), 4)
         self.assertIn(("m1", "tok_yes", "first_touch_fired:0.55"), self.store.strategy_state)
+
+    def test_spot_dislocation_v3_accepts_down_no_touch(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                execution=ExecutionConfig(target_trade_size_usdc=5.0),
+                lifecycle=type(self.engine.strategy.config.lifecycle)(bucket_start_fraction=0.0, bucket_end_fraction=1.0),
+                spot_dislocation=SpotDislocationConfig(enabled=True),
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_spot_price_update(SpotPriceUpdate(event_time_ms=0, ingest_time_ms=0, source="binance.ticker", asset_slug="btc", spot_price=100.0))
+        engine.on_spot_price_update(SpotPriceUpdate(event_time_ms=300_000, ingest_time_ms=300_000, source="binance.ticker", asset_slug="btc", spot_price=95.0))
+        engine.on_spot_price_update(SpotPriceUpdate(event_time_ms=629_000, ingest_time_ms=629_000, source="binance.ticker", asset_slug="btc", spot_price=90.0))
+        engine.on_market_state(self._market_state(token_id="tok_no", event_time_ms=620_000))
+        engine.on_book_update(self._book(event_time_ms=629_000, token_id="tok_no", best_ask=0.64))
+        outputs = engine.on_book_update(
+            BookUpdate(
+                event_time_ms=630_000,
+                ingest_time_ms=630_020,
+                market_id="m1",
+                token_id="tok_no",
+                best_bid=0.64,
+                best_ask=0.65,
+                ask_levels=(BookLevel(price=0.65, size=10.0),),
+            )
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], OrderIntent)
+        self.assertEqual(outputs[0].token_id, "tok_no")
+        self.assertEqual(outputs[0].entry_price, 0.65)
+
+    def test_spot_dislocation_v3_skips_up_yes_direction(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                execution=ExecutionConfig(target_trade_size_usdc=5.0),
+                lifecycle=type(self.engine.strategy.config.lifecycle)(bucket_start_fraction=0.0, bucket_end_fraction=1.0),
+                spot_dislocation=SpotDislocationConfig(enabled=True),
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_spot_price_update(SpotPriceUpdate(event_time_ms=0, ingest_time_ms=0, source="binance.ticker", asset_slug="btc", spot_price=100.0))
+        engine.on_spot_price_update(SpotPriceUpdate(event_time_ms=629_000, ingest_time_ms=629_000, source="binance.ticker", asset_slug="btc", spot_price=90.0))
+        engine.on_market_state(self._market_state(token_id="tok_yes", event_time_ms=620_000))
+        engine.on_book_update(self._book(event_time_ms=629_000, token_id="tok_yes", best_ask=0.64))
+        outputs = engine.on_book_update(
+            BookUpdate(
+                event_time_ms=630_000,
+                ingest_time_ms=630_020,
+                market_id="m1",
+                token_id="tok_yes",
+                best_bid=0.64,
+                best_ask=0.65,
+                ask_levels=(BookLevel(price=0.65, size=10.0),),
+            )
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "spot_dislocation_direction_not_allowed")
+
+    def test_spot_dislocation_v3_skips_touch_only_without_spot(self) -> None:
+        engine = ShortHorizonEngine(
+            config=ShortHorizonConfig(
+                execution=ExecutionConfig(target_trade_size_usdc=5.0),
+                lifecycle=type(self.engine.strategy.config.lifecycle)(bucket_start_fraction=0.0, bucket_end_fraction=1.0),
+                spot_dislocation=SpotDislocationConfig(enabled=True),
+            ),
+            intent_store=InMemoryIntentStore(),
+        )
+        engine.on_market_state(self._market_state(token_id="tok_no", event_time_ms=620_000))
+        engine.on_book_update(self._book(event_time_ms=629_000, token_id="tok_no", best_ask=0.64))
+        outputs = engine.on_book_update(
+            BookUpdate(
+                event_time_ms=630_000,
+                ingest_time_ms=630_020,
+                market_id="m1",
+                token_id="tok_no",
+                best_bid=0.64,
+                best_ask=0.65,
+                ask_levels=(BookLevel(price=0.65, size=10.0),),
+            )
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertIsInstance(outputs[0], SkipDecision)
+        self.assertEqual(outputs[0].reason, "spot_dislocation_missing_spot")
 
     def test_non_btc_eth_touch_is_skipped(self) -> None:
         self.engine.on_market_state(self._market_state(asset_slug="dogecoin"))
