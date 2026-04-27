@@ -17,8 +17,10 @@ from short_horizon.venue_polymarket import (
     DEFAULT_DATA_API_HOST,
     POLYGON_NATIVE_USDC_TOKEN,
     POLYMARKET_CTF_TOKEN,
+    POLYMARKET_PUSD_TOKEN,
     POLYMARKET_SPENDER_ADDRESSES,
     POLYMARKET_USDC_TOKEN,
+    POLYMARKET_V2_SPENDER_ADDRESSES,
     ExecutionClientConfigError,
     PolymarketExecutionClient,
     PolygonUsdcBridgeResult,
@@ -579,6 +581,60 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertEqual(results[1].condition_id, "0x2222222222222222222222222222222222222222222222222222222222222222")
         self.assertEqual(results[2].proxy_wallet, "0x0000000000000000000000000000000000000def")
         self.assertEqual(len(sent_raw), 1)
+
+    def test_approve_v2_allowances_uses_pusd_and_v2_spenders(self) -> None:
+        client = PolymarketExecutionClient(
+            client_factory=lambda **kwargs: _FakeVenueClient(**kwargs),
+            order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
+        )
+        sent_raw: list[dict] = []
+        tx_counter = 0
+
+        def sign_transaction(tx):
+            nonlocal tx_counter
+            tx_counter += 1
+            sent_raw.append(tx)
+            return f"0xsigned{tx_counter}"
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return "0x0"
+            if method == "eth_getTransactionCount":
+                return hex(len(sent_raw))
+            if method == "eth_gasPrice":
+                return hex(100)
+            if method == "eth_estimateGas":
+                return hex(50_000)
+            if method == "eth_sendRawTransaction":
+                return f"0xhash{len(sent_raw)}"
+            if method == "eth_getTransactionReceipt":
+                return {"status": "0x1"}
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            results = client.approve_v2_allowances(
+                rpc_call=rpc_call,
+                sign_transaction=sign_transaction,
+                signer_address="0x0000000000000000000000000000000000000abc",
+                sleep_func=lambda _: None,
+            )
+
+        # 3 V2 spenders × (collateral approval + CTF setApprovalForAll)
+        self.assertEqual(len(results), 6)
+        self.assertTrue(all(result.status == "approved" for result in results))
+        self.assertEqual(
+            [result.spender for result in results],
+            [spender for spender in POLYMARKET_V2_SPENDER_ADDRESSES for _ in (0, 1)],
+        )
+        # First tx should be a pUSD approve (collateral=pUSD, not USDC.e)
+        self.assertEqual(sent_raw[0]["to"], POLYMARKET_PUSD_TOKEN)
+        # Second tx should be CTF setApprovalForAll
+        self.assertEqual(sent_raw[1]["to"], POLYMARKET_CTF_TOKEN)
+        # USDC.e must NOT be approved by the V2 path
+        for tx in sent_raw:
+            self.assertNotEqual(tx["to"], POLYMARKET_USDC_TOKEN)
 
     def test_wrap_polygon_usdc_to_pusd_approves_then_calls_onramp(self) -> None:
         client = PolymarketExecutionClient(

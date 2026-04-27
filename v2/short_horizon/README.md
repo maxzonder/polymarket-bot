@@ -30,7 +30,9 @@ It is **separate** from:
 
 For real `--execution-mode live` runs with an EOA/private key wallet, Polymarket needs one-time Polygon approvals before the first real order can succeed.
 
-- The short-horizon live runner now has a dedicated flag: `--approve-allowances`
+- The short-horizon live runner has two allowance flags:
+  - `--approve-allowances` — V1 path: approves USDC.e + CTF on V1 spenders. Deprecated post-cutover.
+  - `--approve-v2-allowances` — V2 path: approves pUSD + CTF on V2 spenders (V2 CTF Exchange `0xE111180000d2663C0091e4f400237545B87B996B`, V2 Neg Risk `0xe2222d279d744050d28e00520010520000310F59`, Neg Risk Adapter `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296`). Required after the 2026-04-28 cutover.
 - The live runner also supports pre-run and periodic resolved-position settlement via:
   - `--redeem-resolved`
   - optional `--redeem-resolved-interval-seconds 900` to keep sweeping regular resolved positions during a long live run

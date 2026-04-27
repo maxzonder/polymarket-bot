@@ -19,10 +19,19 @@ PRIVATE_KEY_ENV_VAR = "POLY_PRIVATE_KEY"
 POLYGON_NATIVE_USDC_TOKEN = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 POLYMARKET_USDC_TOKEN = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 POLYMARKET_CTF_TOKEN = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+POLYMARKET_PUSD_TOKEN = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 COLLATERAL_ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+COLLATERAL_OFFRAMP_ADDRESS = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854"
+# V1 spenders. Deprecated post 2026-04-28 cutover; kept for replay only.
 POLYMARKET_SPENDER_ADDRESSES = (
     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
     "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+)
+# V2 spenders. CTF Exchange + Neg Risk CTF Exchange + Neg Risk Adapter.
+POLYMARKET_V2_SPENDER_ADDRESSES = (
+    "0xE111180000d2663C0091e4f400237545B87B996B",
+    "0xe2222d279d744050d28e00520010520000310F59",
     "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
 )
 MAX_UINT256 = (1 << 256) - 1
@@ -250,16 +259,61 @@ class PolymarketExecutionClient:
         wait_timeout_seconds: float = 300.0,
         sleep_func: Callable[[float], None] = time.sleep,
     ) -> list[AllowanceApprovalResult]:
+        return self._approve_allowances_for(
+            collateral_token=POLYMARKET_USDC_TOKEN,
+            spenders=POLYMARKET_SPENDER_ADDRESSES,
+            rpc_url=rpc_url,
+            rpc_call=rpc_call,
+            sign_transaction=sign_transaction,
+            signer_address=signer_address,
+            wait_timeout_seconds=wait_timeout_seconds,
+            sleep_func=sleep_func,
+        )
+
+    def approve_v2_allowances(
+        self,
+        *,
+        rpc_url: str = DEFAULT_POLYGON_RPC_URL,
+        rpc_call: Callable[[str, list[Any]], Any] | None = None,
+        sign_transaction: Callable[[dict[str, Any]], str] | None = None,
+        signer_address: str | None = None,
+        wait_timeout_seconds: float = 300.0,
+        sleep_func: Callable[[float], None] = time.sleep,
+    ) -> list[AllowanceApprovalResult]:
+        """V2 allowance refresh: pUSD spend + CTF setApprovalForAll on V2 spenders."""
+        return self._approve_allowances_for(
+            collateral_token=POLYMARKET_PUSD_TOKEN,
+            spenders=POLYMARKET_V2_SPENDER_ADDRESSES,
+            rpc_url=rpc_url,
+            rpc_call=rpc_call,
+            sign_transaction=sign_transaction,
+            signer_address=signer_address,
+            wait_timeout_seconds=wait_timeout_seconds,
+            sleep_func=sleep_func,
+        )
+
+    def _approve_allowances_for(
+        self,
+        *,
+        collateral_token: str,
+        spenders: tuple[str, ...],
+        rpc_url: str,
+        rpc_call: Callable[[str, list[Any]], Any] | None,
+        sign_transaction: Callable[[dict[str, Any]], str] | None,
+        signer_address: str | None,
+        wait_timeout_seconds: float,
+        sleep_func: Callable[[float], None],
+    ) -> list[AllowanceApprovalResult]:
         private_key = self._resolve_private_key()
         rpc = rpc_call or _build_rpc_call(rpc_url)
         resolved_signer_address = signer_address or _address_from_private_key(private_key)
         resolved_sign_transaction = sign_transaction or (lambda tx: _sign_transaction(tx, private_key))
 
         results: list[AllowanceApprovalResult] = []
-        for spender in POLYMARKET_SPENDER_ADDRESSES:
+        for spender in spenders:
             allowance = _read_erc20_allowance(
                 rpc,
-                token_address=POLYMARKET_USDC_TOKEN,
+                token_address=collateral_token,
                 owner=resolved_signer_address,
                 spender=spender,
             )
@@ -271,7 +325,7 @@ class PolymarketExecutionClient:
                     signer_address=resolved_signer_address,
                     sign_transaction=resolved_sign_transaction,
                     chain_id=self.chain_id,
-                    to=POLYMARKET_USDC_TOKEN,
+                    to=collateral_token,
                     data=_encode_approve_calldata(spender, MAX_UINT256),
                     wait_timeout_seconds=wait_timeout_seconds,
                     sleep_func=sleep_func,
@@ -1121,6 +1175,7 @@ def _as_optional_int(value: Any) -> int | None:
 
 __all__ = [
     "AllowanceApprovalResult",
+    "COLLATERAL_OFFRAMP_ADDRESS",
     "COLLATERAL_ONRAMP_ADDRESS",
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
@@ -1133,8 +1188,10 @@ __all__ = [
     "PolymarketExecutionClient",
     "POLYGON_NATIVE_USDC_TOKEN",
     "POLYMARKET_CTF_TOKEN",
+    "POLYMARKET_PUSD_TOKEN",
     "POLYMARKET_SPENDER_ADDRESSES",
     "POLYMARKET_USDC_TOKEN",
+    "POLYMARKET_V2_SPENDER_ADDRESSES",
     "PolygonUsdcBridgeResult",
     "PolygonUsdcWrapResult",
     "PRIVATE_KEY_ENV_VAR",

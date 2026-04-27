@@ -3565,7 +3565,7 @@ class ReplayRunnerTest(unittest.TestCase):
             execution_client=client,
             amount_base_unit=2_050_000,
         )
-        approve_mock.assert_called_once_with(None, execution_client=client)
+        approve_mock.assert_called_once_with(None, execution_client=client, venue_version="v1")
         self.assertEqual(run_live_mock.call_args.kwargs["execution_client"], client)
         self.assertEqual(run_live_mock.call_args.kwargs["resolved_redeem_interval_seconds"], 60.0)
 
