@@ -34,9 +34,13 @@ For real `--execution-mode live` runs with an EOA/private key wallet, Polymarket
 - The live runner also supports pre-run and periodic resolved-position settlement via:
   - `--redeem-resolved`
   - optional `--redeem-resolved-interval-seconds 900` to keep sweeping regular resolved positions during a long live run
-- For the current v1 collateral path, the live runner also supports scripted Polygon native `USDC -> USDC.e` conversion via Polymarket's bridge deposit flow:
-  - `--bridge-polygon-usdc-to-usdce`
-  - optional `--bridge-polygon-usdc-amount 2.05` to bridge a specific native USDC amount, otherwise the runner sends the wallet's full native Polygon USDC balance
+- For the V2 collateral path (post 2026-04-28 cutover), the live runner wraps existing `USDC.e` into pUSD via the V2 Collateral Onramp `wrap()` call:
+  - `--wrap-polygon-usdc-to-pusd`
+  - optional `--wrap-polygon-usdc-amount 2.05` to wrap a specific USDC.e amount, otherwise the runner wraps the wallet's full USDC.e balance
+  - the onramp address is `0x93070a847efEf7F70739046A929D47a521F5B8ee`; pUSD is minted 1:1 to the signer's wallet
+- The deprecated V1 path (Polygon native `USDC -> USDC.e` via Polymarket's bridge HTTP API) is still wired for pre-cutover replay/historical use only:
+  - `--bridge-polygon-usdc-to-usdce` (deprecated, will fail post-cutover when the bridge endpoint is decommissioned)
+  - optional `--bridge-polygon-usdc-amount 2.05`
 - That flag sends Polygon mainnet approvals for:
   - USDC collateral spend
   - conditional-token `setApprovalForAll`
@@ -90,7 +94,7 @@ POLYMARKET_DATA_DIR=/home/polybot/.polybot ./.venv/bin/python v2/short_horizon/b
   --max-runtime-seconds 3600
 ```
 
-Example bounded live smoke that first converts native Polygon USDC into `USDC.e`, then refreshes allowances:
+Example bounded live smoke that first wraps existing `USDC.e` into pUSD (V2 path), then refreshes allowances:
 
 ```bash
 POLYMARKET_DATA_DIR=/home/polybot/.polybot ./.venv/bin/python v2/short_horizon/bin/live_runner \
@@ -98,7 +102,7 @@ POLYMARKET_DATA_DIR=/home/polybot/.polybot ./.venv/bin/python v2/short_horizon/b
   --mode live \
   --execution-mode live \
   --allow-live-execution \
-  --bridge-polygon-usdc-to-usdce \
+  --wrap-polygon-usdc-to-pusd \
   --approve-allowances \
   --confirm-live-order \
   --max-live-orders-total 1 \

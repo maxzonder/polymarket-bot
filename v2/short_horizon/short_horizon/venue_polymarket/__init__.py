@@ -3,6 +3,7 @@
 from .book_channel import BookNormalizer
 from .execution_client import (
     AllowanceApprovalResult,
+    COLLATERAL_ONRAMP_ADDRESS,
     DEFAULT_BRIDGE_HOST,
     DEFAULT_CHAIN_ID,
     DEFAULT_CLOB_HOST,
@@ -17,6 +18,7 @@ from .execution_client import (
     POLYMARKET_SPENDER_ADDRESSES,
     POLYMARKET_USDC_TOKEN,
     PolygonUsdcBridgeResult,
+    PolygonUsdcWrapResult,
     RedeemResult,
     ResolvedPosition,
     VenueApiCredentials,
@@ -53,6 +55,7 @@ class PolymarketVenueAdapter:
 __all__ = [
     "AllowanceApprovalResult",
     "BookNormalizer",
+    "COLLATERAL_ONRAMP_ADDRESS",
     "DEFAULT_BRIDGE_HOST",
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
@@ -72,6 +75,7 @@ __all__ = [
     "POLYMARKET_SPENDER_ADDRESSES",
     "POLYMARKET_USDC_TOKEN",
     "PolygonUsdcBridgeResult",
+    "PolygonUsdcWrapResult",
     "RedeemResult",
     "PolymarketUserStream",
     "PolymarketVenueAdapter",
