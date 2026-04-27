@@ -412,7 +412,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--approve-allowances",
         action="store_true",
-        help="Send Polygon approval transactions for Polymarket USDC + conditional-token spend before the live run",
+        help="Send Polygon approval transactions for V1 USDC.e + conditional-token spend before the live run (deprecated; use --approve-v2-allowances post-cutover)",
+    )
+    parser.add_argument(
+        "--approve-v2-allowances",
+        action="store_true",
+        help="Send Polygon approval transactions for V2 pUSD + conditional-token spend on V2 spenders before the live run; required after the 2026-04-28 V1->V2 cutover",
     )
     parser.add_argument(
         "--redeem-resolved",
@@ -498,6 +503,8 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if kill_switch:
         if getattr(args, "approve_allowances", False):
             parser.error("--approve-allowances cannot be combined with --kill-switch")
+        if getattr(args, "approve_v2_allowances", False):
+            parser.error("--approve-v2-allowances cannot be combined with --kill-switch")
         if getattr(args, "redeem_resolved", False):
             parser.error("--redeem-resolved cannot be combined with --kill-switch")
         if getattr(args, "redeem_resolved_interval_seconds", None) is not None:
@@ -535,6 +542,11 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
     if getattr(args, "approve_allowances", False):
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
             parser.error("--approve-allowances requires --mode live and --execution-mode live")
+    if getattr(args, "approve_v2_allowances", False):
+        if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
+            parser.error("--approve-v2-allowances requires --mode live and --execution-mode live")
+        if getattr(args, "approve_allowances", False):
+            parser.error("--approve-v2-allowances cannot be combined with --approve-allowances")
     redeem_requested = bool(getattr(args, "redeem_resolved", False))
     redeem_interval = getattr(args, "redeem_resolved_interval_seconds", None)
     if redeem_requested:
@@ -686,12 +698,16 @@ def execute_allowance_approve(
     run_id: str | None = None,
     *,
     execution_client: PolymarketExecutionClient | None = None,
+    venue_version: str = "v1",
 ) -> AllowanceApprovalSummary:
     logger = get_logger("short_horizon.live_runner", run_id=run_id or "allowance_approve")
     client = execution_client or PolymarketExecutionClient()
     if not _client_is_started(client):
         client.startup()
-    results = client.approve_allowances()
+    if venue_version == "v2":
+        results = client.approve_v2_allowances()
+    else:
+        results = client.approve_allowances()
     approved_count = 0
     already_approved_count = 0
     for result in results:
@@ -910,6 +926,7 @@ def main(argv: list[str] | None = None) -> None:
         redeem_resolved_interval_seconds=getattr(args, "redeem_resolved_interval_seconds", None),
         no_final_redeem=bool(getattr(args, "no_final_redeem", False)),
         approve_allowances=bool(getattr(args, "approve_allowances", False)),
+        approve_v2_allowances=bool(getattr(args, "approve_v2_allowances", False)),
         bridge_polygon_usdc_to_usdce=bool(getattr(args, "bridge_polygon_usdc_to_usdce", False)),
         bridge_polygon_usdc_amount=getattr(args, "bridge_polygon_usdc_amount", None),
         wrap_polygon_usdc_to_pusd=bool(getattr(args, "wrap_polygon_usdc_to_pusd", False)),
@@ -938,6 +955,7 @@ def main(argv: list[str] | None = None) -> None:
         if execution_mode is ExecutionMode.LIVE and (
             getattr(args, "redeem_resolved", False)
             or getattr(args, "approve_allowances", False)
+            or getattr(args, "approve_v2_allowances", False)
             or getattr(args, "bridge_polygon_usdc_to_usdce", False)
             or getattr(args, "wrap_polygon_usdc_to_pusd", False)
             or final_redeem_enabled
@@ -972,7 +990,9 @@ def main(argv: list[str] | None = None) -> None:
                 amount_base_unit=wrap_amount_base_unit,
             )
         if execution_mode is ExecutionMode.LIVE and getattr(args, "approve_allowances", False):
-            execute_allowance_approve(args.run_id, execution_client=execution_client)
+            execute_allowance_approve(args.run_id, execution_client=execution_client, venue_version="v1")
+        if execution_mode is ExecutionMode.LIVE and getattr(args, "approve_v2_allowances", False):
+            execute_allowance_approve(args.run_id, execution_client=execution_client, venue_version="v2")
         summary = None
         run_error: BaseException | None = None
         try:
