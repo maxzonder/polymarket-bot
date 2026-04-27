@@ -221,6 +221,9 @@ def evaluate_pre_touch_maker(
 
 
 def default_configs() -> list[MakerConfig]:
+    # Keep the first T3 pass deliberately bounded. The capture bundles are large
+    # and BBO-only; broader momentum/spread sweeps can be a follow-up if this
+    # simple pre-touch maker geometry shows life.
     return [
         MakerConfig(
             stake_usdc=stake,
@@ -232,12 +235,12 @@ def default_configs() -> list[MakerConfig]:
             require_mid_momentum=momentum,
             require_spread_compression=spread,
         )
-        for stake in (1.0, 5.0)
+        for stake in (1.0,)
         for q in (1.0, 2.0, 5.0)
         for lookback in (60_000, 120_000)
         for cancel in (60_000, 120_000)
-        for momentum in (False, True)
-        for spread in (False, True)
+        for momentum in (False,)
+        for spread in (False,)
     ]
 
 
@@ -362,14 +365,13 @@ def replay_pre_touch(
     if trigger.best_ask is not None and trigger.best_ask <= touch.touch_level + 1e-9:
         return _replay(touch, config, bundle_name, bucket, "post_only_would_cross", trigger, False, order_shares, required_sell_volume, 0.0, 0.0, 0.0)
     cancel_ms = trigger.ts_ms + config.cancel_after_ms
-    ask_reached = any(book.best_ask is not None and book.best_ask <= touch.touch_level + 1e-9 for book in books if trigger.ts_ms <= book.ts_ms <= cancel_ms)
+    ask_reached = any(
+        book.best_ask is not None and book.best_ask <= touch.touch_level + 1e-9
+        for book in books_between(books, trigger.ts_ms, cancel_ms)
+    )
     observed_sell_volume = 0.0
     if ask_reached:
-        for trade in trades:
-            if trade.ts_ms < trigger.ts_ms:
-                continue
-            if trade.ts_ms > cancel_ms:
-                break
+        for trade in trades_between(trades, trigger.ts_ms, cancel_ms):
             if trade.aggressor_side == "sell" and trade.price <= touch.touch_level + 1e-9:
                 observed_sell_volume += trade.size
     if ask_reached and observed_sell_volume >= required_sell_volume:
@@ -385,8 +387,7 @@ def find_trigger_book(touch: TouchRow, books: Sequence[BookPoint], config: Maker
     start_ms = touch.touch_ms - config.trigger_lookback_ms
     tick = touch.tick_size if touch.tick_size and touch.tick_size > 0 else 0.01
     max_ask = touch.touch_level + config.max_ticks_from_level * tick + 1e-9
-    window = [book for book in books if start_ms <= book.ts_ms < touch.touch_ms and book.best_ask is not None]
-    for book in window:
+    for book in books_between(books, start_ms, touch.touch_ms - 1):
         if book.best_ask is None:
             continue
         if not (touch.touch_level + 1e-9 < book.best_ask <= max_ask):
@@ -397,6 +398,24 @@ def find_trigger_book(touch: TouchRow, books: Sequence[BookPoint], config: Maker
             continue
         return book
     return None
+
+
+def books_between(books: Sequence[BookPoint], start_ms: int, end_ms: int) -> Sequence[BookPoint]:
+    if not books or end_ms < start_ms:
+        return ()
+    times = [book.ts_ms for book in books]
+    left = bisect.bisect_left(times, start_ms)
+    right = bisect.bisect_right(times, end_ms)
+    return books[left:right]
+
+
+def trades_between(trades: Sequence[TradePoint], start_ms: int, end_ms: int) -> Sequence[TradePoint]:
+    if not trades or end_ms < start_ms:
+        return ()
+    times = [trade.ts_ms for trade in trades]
+    left = bisect.bisect_left(times, start_ms)
+    right = bisect.bisect_right(times, end_ms)
+    return trades[left:right]
 
 
 def has_positive_mid_momentum(books: Sequence[BookPoint], ts_ms: int, lookback_ms: int) -> bool:
