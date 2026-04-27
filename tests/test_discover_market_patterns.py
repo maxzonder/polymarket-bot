@@ -13,6 +13,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from discover_market_patterns import (
     classify_pattern,
+    classify_trigger_event,
     discover_market_patterns,
     feature_for_token,
     TokenMeta,
@@ -82,6 +83,22 @@ class DiscoverMarketPatternsTest(unittest.TestCase):
         self.assertGreater(feature.fee_per_share, 0.0)
         self.assertLess(feature.net_pnl_per_share, feature.gross_pnl_per_share)
 
+    def test_classifies_point_in_time_trigger_events(self) -> None:
+        label, tags = classify_trigger_event(
+            prefix_return=0.08,
+            recent_return=0.07,
+            previous_return=0.01,
+            acceleration=0.06,
+            prefix_efficiency=0.55,
+            prefix_range=0.09,
+            prefix_volatility=0.01,
+            distance_from_prefix_high=0.0,
+            distance_from_prefix_low=0.08,
+            crossing_count=1,
+        )
+        self.assertEqual(label, "compression_breakout_up")
+        self.assertIn("positive_acceleration", tags)
+
     def test_discovery_writes_features_aggregates_and_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -101,27 +118,36 @@ class DiscoverMarketPatternsTest(unittest.TestCase):
                 assets={"btc", "eth"},
                 time_grid=(0.0, 0.5, 1.0),
                 decision_fraction=0.40,
+                trigger_fractions=(0.50,),
+                trigger_lookback_fraction=0.40,
                 bootstrap_samples=25,
             )
 
             self.assertEqual(summary.eligible_tokens, 4)
             self.assertEqual(summary.processed_tokens, 4)
+            self.assertGreater(summary.processed_triggers, 0)
             self.assertTrue(report.exists())
             text = report.read_text(encoding="utf-8")
             self.assertIn("Pattern discovery report", text)
+            self.assertIn("Trigger discovery leaderboard", text)
+            self.assertIn("Trading-day / UTC session view", text)
             self.assertIn("BTC vs ETH", text)
 
             conn = sqlite3.connect(output_db)
             try:
                 feature_count = conn.execute("SELECT COUNT(*) FROM pattern_features").fetchone()[0]
+                trigger_count = conn.execute("SELECT COUNT(*) FROM trigger_features").fetchone()[0]
                 aggregate_count = conn.execute("SELECT COUNT(*) FROM pattern_aggregates").fetchone()[0]
+                trigger_aggregate_count = conn.execute("SELECT COUNT(*) FROM trigger_aggregates").fetchone()[0]
                 best = conn.execute(
                     "SELECT group_key FROM pattern_aggregates WHERE group_type='pattern' ORDER BY avg_net_pnl_per_share DESC LIMIT 1"
                 ).fetchone()[0]
             finally:
                 conn.close()
             self.assertEqual(feature_count, 4)
+            self.assertGreater(trigger_count, 0)
             self.assertGreater(aggregate_count, 0)
+            self.assertGreater(trigger_aggregate_count, 0)
             self.assertIsInstance(best, str)
 
 
