@@ -207,6 +207,7 @@ Current hard requirements:
   - `--redeem-resolved`
   - `--redeem-resolved-interval-seconds`
   - `--bridge-polygon-usdc-to-usdce`
+  - `--wrap-polygon-usdc-to-pusd`
 
 Current behavior:
 1. startup/auth healthcheck
@@ -240,14 +241,17 @@ Why these matter:
 
 These are part of the current real execution path even though they were not in the earliest Phase 3 sketch:
 - `--approve-allowances`
-- `--bridge-polygon-usdc-to-usdce`
+- `--bridge-polygon-usdc-to-usdce` (deprecated post-2026-04-28 cutover)
 - `--bridge-polygon-usdc-amount`
+- `--wrap-polygon-usdc-to-pusd` (V2 collateral path)
+- `--wrap-polygon-usdc-amount`
 - `--redeem-resolved`
 - `--redeem-resolved-interval-seconds`
 
 Operational intent:
 - allowances = one-time or recovery maintenance
-- bridge = current v1 collateral prep from native Polygon `USDC` into `USDC.e`
+- bridge = legacy V1 collateral prep from native Polygon `USDC` into `USDC.e` (kept for pre-cutover replays only)
+- wrap = V2 collateral prep — convert existing `USDC.e` into `pUSD` via the Collateral Onramp `wrap()` call (`0x93070a847efEf7F70739046A929D47a521F5B8ee`)
 - redeem = wallet-level resolved-position cleanup before/during a live run
 
 ## 9. Telemetry and audit trail truth
@@ -267,7 +271,7 @@ If someone starts from Phase 4, the important truths to keep in mind are:
 - execution identity is three-layered: immutable local `order_id`, stable `client_order_id`, nullable `venue_order_id`
 - live execution is websocket-first, but not websocket-only
 - Gamma still provides market metadata, fee snapshots, and `orderMinSize`
-- the current prod collateral reality is still v1-flavored `USDC.e`, with an explicit bridge helper for native Polygon `USDC`
+- collateral is migrating from V1 `USDC.e` (deprecated) to V2 `pUSD` at the 2026-04-28 cutover; the live runner now exposes `--wrap-polygon-usdc-to-pusd` for the V2 Collateral Onramp `wrap()` flow alongside the legacy bridge helper
 - resolved-position settlement is intentionally outside strategy logic
 - operational launch hygiene matters as much as pure code correctness for prod reproducibility
 

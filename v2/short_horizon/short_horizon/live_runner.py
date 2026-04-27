@@ -25,7 +25,12 @@ from .telemetry import configure_logging, get_logger
 from .telemetry.alerting import create_telegram_alert_handler
 import os
 from .venue_polymarket import PolymarketUserStream
-from .venue_polymarket.execution_client import PRIVATE_KEY_ENV_VAR, PolymarketExecutionClient, PolygonUsdcBridgeResult
+from .venue_polymarket.execution_client import (
+    PRIVATE_KEY_ENV_VAR,
+    PolymarketExecutionClient,
+    PolygonUsdcBridgeResult,
+    PolygonUsdcWrapResult,
+)
 
 
 # Polymarket's documented minimum for resting (non-marketable) limit orders is
@@ -62,6 +67,16 @@ class PolygonUsdcBridgeSummary:
     bridge_tx_hash: str | None
     quoted_target_amount_base_unit: int | None
     collateral_delta_base_unit: int
+
+
+@dataclass(frozen=True)
+class PolygonUsdcWrapSummary:
+    source_amount_base_unit: int
+    usdce_token_address: str
+    onramp_address: str
+    recipient_address: str
+    approval_tx_hash: str | None
+    wrap_tx_hash: str
 
 
 @dataclass(frozen=True)
@@ -418,12 +433,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bridge-polygon-usdc-to-usdce",
         action="store_true",
-        help="Use the Polymarket bridge deposit flow to convert Polygon native USDC into Polygon USDC.e before the live run",
+        help="DEPRECATED (V1 path): use --wrap-polygon-usdc-to-pusd instead. Polymarket V2 cutover (2026-04-28) replaces USDC.e collateral with pUSD via the Collateral Onramp wrap() call.",
     )
     parser.add_argument(
         "--bridge-polygon-usdc-amount",
         default=None,
         help="Optional Polygon native USDC amount to bridge, in decimal token units; defaults to the wallet's full native USDC balance",
+    )
+    parser.add_argument(
+        "--wrap-polygon-usdc-to-pusd",
+        action="store_true",
+        help="Wrap existing Polygon USDC.e into pUSD via the V2 Collateral Onramp wrap() call before the live run; required after the 2026-04-28 V1->V2 cutover",
+    )
+    parser.add_argument(
+        "--wrap-polygon-usdc-amount",
+        default=None,
+        help="Optional USDC.e amount to wrap, in decimal token units; defaults to the wallet's full USDC.e balance",
     )
     parser.add_argument("--stub-event-log-path", default=None, help="Path to a JSONL file of normalized stub events for --mode stub")
     parser.add_argument("--run-id", default=None, help="Optional explicit run_id; defaults to a fresh live_<suffix>")
@@ -479,6 +504,8 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
             parser.error("--redeem-resolved-interval-seconds cannot be combined with --kill-switch")
         if getattr(args, "bridge_polygon_usdc_to_usdce", False):
             parser.error("--bridge-polygon-usdc-to-usdce cannot be combined with --kill-switch")
+        if getattr(args, "wrap_polygon_usdc_to_pusd", False):
+            parser.error("--wrap-polygon-usdc-to-pusd cannot be combined with --kill-switch")
         if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
             parser.error("--kill-switch requires --mode live and --execution-mode live")
         if not args.allow_live_execution:
@@ -526,6 +553,17 @@ def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace)
             _parse_usdc_amount_to_base_units(parser, "--bridge-polygon-usdc-amount", bridge_amount)
     elif bridge_amount is not None:
         parser.error("--bridge-polygon-usdc-amount requires --bridge-polygon-usdc-to-usdce")
+    wrap_requested = bool(getattr(args, "wrap_polygon_usdc_to_pusd", False))
+    wrap_amount = getattr(args, "wrap_polygon_usdc_amount", None)
+    if wrap_requested:
+        if args.mode != "live" or execution_mode is not ExecutionMode.LIVE:
+            parser.error("--wrap-polygon-usdc-to-pusd requires --mode live and --execution-mode live")
+        if bridge_requested:
+            parser.error("--wrap-polygon-usdc-to-pusd cannot be combined with --bridge-polygon-usdc-to-usdce")
+        if wrap_amount is not None:
+            _parse_usdc_amount_to_base_units(parser, "--wrap-polygon-usdc-amount", wrap_amount)
+    elif wrap_amount is not None:
+        parser.error("--wrap-polygon-usdc-amount requires --wrap-polygon-usdc-to-pusd")
     if getattr(args, "confirm_live_order", False) and not sys.stdin.isatty():
         parser.error("--confirm-live-order requires an interactive TTY")
     return execution_mode
@@ -714,6 +752,35 @@ def execute_polygon_usdc_bridge(
     return summary
 
 
+def execute_polygon_usdc_wrap(
+    run_id: str | None = None,
+    *,
+    execution_client: PolymarketExecutionClient | None = None,
+    amount_base_unit: int | None = None,
+) -> PolygonUsdcWrapSummary:
+    logger = get_logger("short_horizon.live_runner", run_id=run_id or "wrap_polygon_usdc")
+    client = execution_client or PolymarketExecutionClient()
+    result: PolygonUsdcWrapResult = client.wrap_polygon_usdc_to_pusd(amount_base_unit=amount_base_unit)
+    summary = PolygonUsdcWrapSummary(
+        source_amount_base_unit=result.source_amount_base_unit,
+        usdce_token_address=result.usdce_token_address,
+        onramp_address=result.onramp_address,
+        recipient_address=result.recipient_address,
+        approval_tx_hash=result.approval_tx_hash,
+        wrap_tx_hash=result.wrap_tx_hash,
+    )
+    logger.info(
+        "live_wrap_completed",
+        source_amount_base_unit=summary.source_amount_base_unit,
+        usdce_token_address=summary.usdce_token_address,
+        onramp_address=summary.onramp_address,
+        recipient_address=summary.recipient_address,
+        approval_tx_hash=summary.approval_tx_hash,
+        wrap_tx_hash=summary.wrap_tx_hash,
+    )
+    return summary
+
+
 def execute_resolved_redeem(
     run_id: str | None = None,
     *,
@@ -845,6 +912,8 @@ def main(argv: list[str] | None = None) -> None:
         approve_allowances=bool(getattr(args, "approve_allowances", False)),
         bridge_polygon_usdc_to_usdce=bool(getattr(args, "bridge_polygon_usdc_to_usdce", False)),
         bridge_polygon_usdc_amount=getattr(args, "bridge_polygon_usdc_amount", None),
+        wrap_polygon_usdc_to_pusd=bool(getattr(args, "wrap_polygon_usdc_to_pusd", False)),
+        wrap_polygon_usdc_amount=getattr(args, "wrap_polygon_usdc_amount", None),
         confirm_live_order=bool(getattr(args, "confirm_live_order", False)),
         max_live_orders_total=getattr(args, "max_live_orders_total", None),
         db_path=str(args.db_path),
@@ -870,6 +939,7 @@ def main(argv: list[str] | None = None) -> None:
             getattr(args, "redeem_resolved", False)
             or getattr(args, "approve_allowances", False)
             or getattr(args, "bridge_polygon_usdc_to_usdce", False)
+            or getattr(args, "wrap_polygon_usdc_to_pusd", False)
             or final_redeem_enabled
         ):
             execution_client = PolymarketExecutionClient()
@@ -887,6 +957,19 @@ def main(argv: list[str] | None = None) -> None:
                 args.run_id,
                 execution_client=execution_client,
                 amount_base_unit=amount_base_unit,
+            )
+        if execution_mode is ExecutionMode.LIVE and getattr(args, "wrap_polygon_usdc_to_pusd", False):
+            wrap_amount_base_unit = None
+            if getattr(args, "wrap_polygon_usdc_amount", None) is not None:
+                wrap_amount_base_unit = _parse_usdc_amount_to_base_units(
+                    parser,
+                    "--wrap-polygon-usdc-amount",
+                    str(args.wrap_polygon_usdc_amount),
+                )
+            execute_polygon_usdc_wrap(
+                args.run_id,
+                execution_client=execution_client,
+                amount_base_unit=wrap_amount_base_unit,
             )
         if execution_mode is ExecutionMode.LIVE and getattr(args, "approve_allowances", False):
             execute_allowance_approve(args.run_id, execution_client=execution_client)

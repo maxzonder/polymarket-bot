@@ -12,6 +12,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.venue_polymarket import (
+    COLLATERAL_ONRAMP_ADDRESS,
     MAX_UINT256,
     DEFAULT_DATA_API_HOST,
     POLYGON_NATIVE_USDC_TOKEN,
@@ -21,6 +22,7 @@ from short_horizon.venue_polymarket import (
     ExecutionClientConfigError,
     PolymarketExecutionClient,
     PolygonUsdcBridgeResult,
+    PolygonUsdcWrapResult,
     ZERO_BYTES32,
     VenueApiCredentials,
     VenueOrderRequest,
@@ -577,6 +579,161 @@ class VenuePolymarketExecutionClientTest(unittest.TestCase):
         self.assertEqual(results[1].condition_id, "0x2222222222222222222222222222222222222222222222222222222222222222")
         self.assertEqual(results[2].proxy_wallet, "0x0000000000000000000000000000000000000def")
         self.assertEqual(len(sent_raw), 1)
+
+    def test_wrap_polygon_usdc_to_pusd_approves_then_calls_onramp(self) -> None:
+        client = PolymarketExecutionClient(
+            client_factory=lambda **kwargs: _FakeVenueClient(**kwargs),
+            order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
+        )
+        signer_address = "0x0000000000000000000000000000000000000abc"
+        usdce_balance_base_unit = 50_000_000  # 50 USDC.e
+        sent_raw: list[dict] = []
+        eth_call_responses: list[str] = [
+            hex(usdce_balance_base_unit),  # balanceOf for amount calc
+            "0x0",  # allowance < amount → approve
+        ]
+
+        def sign_transaction(tx):
+            sent_raw.append(tx)
+            return f"0xsigned{len(sent_raw)}"
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return eth_call_responses.pop(0)
+            if method == "eth_getTransactionCount":
+                return hex(len(sent_raw))
+            if method == "eth_gasPrice":
+                return hex(100)
+            if method == "eth_estimateGas":
+                return hex(60_000)
+            if method == "eth_sendRawTransaction":
+                return f"0xhash{len(sent_raw)}"
+            if method == "eth_getTransactionReceipt":
+                return {"status": "0x1"}
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            result = client.wrap_polygon_usdc_to_pusd(
+                rpc_call=rpc_call,
+                sign_transaction=sign_transaction,
+                signer_address=signer_address,
+                sleep_func=lambda _: None,
+            )
+
+        self.assertIsInstance(result, PolygonUsdcWrapResult)
+        self.assertEqual(result.source_amount_base_unit, usdce_balance_base_unit)
+        self.assertEqual(result.usdce_token_address, POLYMARKET_USDC_TOKEN)
+        self.assertEqual(result.onramp_address, COLLATERAL_ONRAMP_ADDRESS)
+        self.assertEqual(result.recipient_address, signer_address)
+        self.assertIsNotNone(result.approval_tx_hash)
+        self.assertIsNotNone(result.wrap_tx_hash)
+        self.assertEqual(len(sent_raw), 2)
+        # First tx: approve onramp on USDC.e
+        self.assertEqual(sent_raw[0]["to"], POLYMARKET_USDC_TOKEN)
+        self.assertIn(COLLATERAL_ONRAMP_ADDRESS.lower().lstrip("0x"), sent_raw[0]["data"].lower())
+        # Second tx: onramp.wrap(USDC.e, recipient, amount) — selector 0x62355638
+        self.assertEqual(sent_raw[1]["to"], COLLATERAL_ONRAMP_ADDRESS)
+        self.assertTrue(sent_raw[1]["data"].lower().startswith("0x62355638"))
+        self.assertIn(POLYMARKET_USDC_TOKEN.lower().lstrip("0x"), sent_raw[1]["data"].lower())
+        self.assertIn(signer_address.lower().lstrip("0x"), sent_raw[1]["data"].lower())
+        self.assertIn(hex(usdce_balance_base_unit)[2:], sent_raw[1]["data"].lower())
+
+    def test_wrap_polygon_usdc_to_pusd_skips_approval_when_already_approved(self) -> None:
+        client = PolymarketExecutionClient(
+            client_factory=lambda **kwargs: _FakeVenueClient(**kwargs),
+            order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
+        )
+        sent_raw: list[dict] = []
+        eth_call_responses: list[str] = [
+            hex(10_000_000),  # balanceOf
+            hex(MAX_UINT256),  # allowance >= amount → skip approval
+        ]
+
+        def sign_transaction(tx):
+            sent_raw.append(tx)
+            return f"0xsigned{len(sent_raw)}"
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return eth_call_responses.pop(0)
+            if method == "eth_getTransactionCount":
+                return hex(len(sent_raw))
+            if method == "eth_gasPrice":
+                return hex(100)
+            if method == "eth_estimateGas":
+                return hex(60_000)
+            if method == "eth_sendRawTransaction":
+                return f"0xhash{len(sent_raw)}"
+            if method == "eth_getTransactionReceipt":
+                return {"status": "0x1"}
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            result = client.wrap_polygon_usdc_to_pusd(
+                amount_base_unit=10_000_000,
+                rpc_call=rpc_call,
+                sign_transaction=sign_transaction,
+                signer_address="0x0000000000000000000000000000000000000abc",
+                sleep_func=lambda _: None,
+            )
+
+        self.assertIsNone(result.approval_tx_hash)
+        self.assertIsNotNone(result.wrap_tx_hash)
+        self.assertEqual(len(sent_raw), 1)
+        self.assertEqual(sent_raw[0]["to"], COLLATERAL_ONRAMP_ADDRESS)
+
+    def test_wrap_polygon_usdc_to_pusd_rejects_zero_balance(self) -> None:
+        client = PolymarketExecutionClient(
+            client_factory=lambda **kwargs: _FakeVenueClient(**kwargs),
+            order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
+        )
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return "0x0"  # zero balance
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            with self.assertRaises(ExecutionClientConfigError) as ctx:
+                client.wrap_polygon_usdc_to_pusd(
+                    rpc_call=rpc_call,
+                    sign_transaction=lambda tx: (_ for _ in ()).throw(AssertionError("should not sign")),
+                    signer_address="0x0000000000000000000000000000000000000abc",
+                    sleep_func=lambda _: None,
+                )
+
+        self.assertIn("balance is zero", str(ctx.exception))
+
+    def test_wrap_polygon_usdc_to_pusd_rejects_amount_above_balance(self) -> None:
+        client = PolymarketExecutionClient(
+            client_factory=lambda **kwargs: _FakeVenueClient(**kwargs),
+            order_args_factory=_FakeOrderArgs,
+            cancel_payload_factory=_FakeOrderPayload,
+            open_order_params_factory=_FakeOpenOrderParams,
+        )
+
+        def rpc_call(method, params):
+            if method == "eth_call":
+                return hex(5_000_000)  # 5 USDC.e
+            raise AssertionError(f"unexpected rpc method: {method}")
+
+        with patch.dict(os.environ, {"POLY_PRIVATE_KEY": "env-secret"}, clear=False):
+            with self.assertRaises(ExecutionClientConfigError) as ctx:
+                client.wrap_polygon_usdc_to_pusd(
+                    amount_base_unit=10_000_000,
+                    rpc_call=rpc_call,
+                    sign_transaction=lambda tx: (_ for _ in ()).throw(AssertionError("should not sign")),
+                    signer_address="0x0000000000000000000000000000000000000abc",
+                    sleep_func=lambda _: None,
+                )
+
+        self.assertIn("exceeds wallet balance", str(ctx.exception))
 
     @unittest.skipUnless(os.getenv("POLYMARKET_RUN_VENUE_TESTS") == "1", "set POLYMARKET_RUN_VENUE_TESTS=1 to hit real venue")
     def test_startup_and_list_open_orders_against_real_venue(self) -> None:

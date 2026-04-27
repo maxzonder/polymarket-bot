@@ -19,6 +19,7 @@ PRIVATE_KEY_ENV_VAR = "POLY_PRIVATE_KEY"
 POLYGON_NATIVE_USDC_TOKEN = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 POLYMARKET_USDC_TOKEN = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 POLYMARKET_CTF_TOKEN = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+COLLATERAL_ONRAMP_ADDRESS = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 POLYMARKET_SPENDER_ADDRESSES = (
     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
     "0xC5d563A36AE78145C45a50134d48A1215220f80a",
@@ -63,6 +64,16 @@ class PolygonUsdcBridgeResult:
     bridge_tx_hash: str | None
     initial_target_balance_base_unit: int
     final_target_balance_base_unit: int
+
+
+@dataclass(frozen=True)
+class PolygonUsdcWrapResult:
+    source_amount_base_unit: int
+    usdce_token_address: str
+    onramp_address: str
+    recipient_address: str
+    approval_tx_hash: str | None
+    wrap_tx_hash: str
 
 
 @dataclass(frozen=True)
@@ -511,6 +522,84 @@ class PolymarketExecutionClient:
             sleep_func=sleep_func,
         )
 
+    def wrap_polygon_usdc_to_pusd(
+        self,
+        *,
+        amount_base_unit: int | None = None,
+        rpc_url: str = DEFAULT_POLYGON_RPC_URL,
+        rpc_call: Callable[[str, list[Any]], Any] | None = None,
+        sign_transaction: Callable[[dict[str, Any]], str] | None = None,
+        signer_address: str | None = None,
+        wait_timeout_seconds: float = 300.0,
+        sleep_func: Callable[[float], None] = time.sleep,
+    ) -> PolygonUsdcWrapResult:
+        """Wrap USDC.e into pUSD via the V2 Collateral Onramp `wrap()` call.
+
+        Replaces the V1 USDC.e bridge flow. The onramp expects an ERC-20
+        approval on USDC.e, then `wrap(asset, recipient, amount)` mints
+        pUSD 1:1 to the recipient (the signer's wallet).
+        """
+        private_key = self._resolve_private_key()
+        rpc = rpc_call or _build_rpc_call(rpc_url)
+        resolved_signer_address = signer_address or _address_from_private_key(private_key)
+        resolved_sign_transaction = sign_transaction or (lambda tx: _sign_transaction(tx, private_key))
+
+        usdce_balance = _read_erc20_balance(
+            rpc,
+            token_address=POLYMARKET_USDC_TOKEN,
+            owner=resolved_signer_address,
+        )
+        resolved_amount = usdce_balance if amount_base_unit is None else int(amount_base_unit)
+        if resolved_amount <= 0:
+            raise ExecutionClientConfigError("Polygon USDC.e balance is zero, nothing to wrap")
+        if resolved_amount > usdce_balance:
+            raise ExecutionClientConfigError(
+                f"requested USDC.e wrap amount exceeds wallet balance: requested={resolved_amount} balance={usdce_balance}"
+            )
+
+        allowance = _read_erc20_allowance(
+            rpc,
+            token_address=POLYMARKET_USDC_TOKEN,
+            owner=resolved_signer_address,
+            spender=COLLATERAL_ONRAMP_ADDRESS,
+        )
+        approval_tx_hash: str | None = None
+        if allowance < resolved_amount:
+            approval_tx_hash = _send_contract_transaction(
+                rpc,
+                signer_address=resolved_signer_address,
+                sign_transaction=resolved_sign_transaction,
+                chain_id=self.chain_id,
+                to=POLYMARKET_USDC_TOKEN,
+                data=_encode_approve_calldata(COLLATERAL_ONRAMP_ADDRESS, MAX_UINT256),
+                wait_timeout_seconds=wait_timeout_seconds,
+                sleep_func=sleep_func,
+            )
+
+        wrap_tx_hash = _send_contract_transaction(
+            rpc,
+            signer_address=resolved_signer_address,
+            sign_transaction=resolved_sign_transaction,
+            chain_id=self.chain_id,
+            to=COLLATERAL_ONRAMP_ADDRESS,
+            data=_encode_wrap_calldata(
+                asset=POLYMARKET_USDC_TOKEN,
+                recipient=resolved_signer_address,
+                amount=resolved_amount,
+            ),
+            wait_timeout_seconds=wait_timeout_seconds,
+            sleep_func=sleep_func,
+        )
+
+        return PolygonUsdcWrapResult(
+            source_amount_base_unit=resolved_amount,
+            usdce_token_address=POLYMARKET_USDC_TOKEN,
+            onramp_address=COLLATERAL_ONRAMP_ADDRESS,
+            recipient_address=resolved_signer_address,
+            approval_tx_hash=approval_tx_hash,
+            wrap_tx_hash=wrap_tx_hash,
+        )
+
     def redeem_resolved_positions(
         self,
         *,
@@ -860,6 +949,16 @@ def _encode_set_approval_for_all_calldata(operator: str, approved: bool) -> str:
     return "0x" + _selector("setApprovalForAll(address,bool)") + _encode_address(operator) + _encode_bool(approved)
 
 
+def _encode_wrap_calldata(*, asset: str, recipient: str, amount: int) -> str:
+    return (
+        "0x"
+        + _selector("wrap(address,address,uint256)")
+        + _encode_address(asset)
+        + _encode_address(recipient)
+        + _encode_uint(amount)
+    )
+
+
 def _encode_redeem_positions_calldata(
     *,
     collateral_token: str,
@@ -1022,6 +1121,7 @@ def _as_optional_int(value: Any) -> int | None:
 
 __all__ = [
     "AllowanceApprovalResult",
+    "COLLATERAL_ONRAMP_ADDRESS",
     "DEFAULT_CHAIN_ID",
     "DEFAULT_CLOB_HOST",
     "DEFAULT_BRIDGE_HOST",
@@ -1036,6 +1136,7 @@ __all__ = [
     "POLYMARKET_SPENDER_ADDRESSES",
     "POLYMARKET_USDC_TOKEN",
     "PolygonUsdcBridgeResult",
+    "PolygonUsdcWrapResult",
     "PRIVATE_KEY_ENV_VAR",
     "RedeemResult",
     "ResolvedPosition",
