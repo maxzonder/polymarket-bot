@@ -29,6 +29,8 @@ DEFAULT_OUTPUT_DB_PATH = DATA_DIR / "pattern_discovery.sqlite3"
 DEFAULT_REPORT_PATH = DATA_DIR / "pattern_discovery_report.md"
 DEFAULT_GRID = tuple(float(x) / 100.0 for x in range(0, 101, 10))
 DEFAULT_DECISION_FRACTION = 0.40
+DEFAULT_TRIGGER_FRACTIONS = tuple(float(x) / 100.0 for x in range(20, 81, 10))
+DEFAULT_TRIGGER_LOOKBACK_FRACTION = 0.10
 DEFAULT_BOOTSTRAP_SAMPLES = 1000
 DEFAULT_VALIDATION_TRAIN_FRACTION = 0.70
 CATEGORY_FEE_RATE_V2 = {
@@ -117,6 +119,48 @@ class PatternFeature:
 
 
 @dataclass(frozen=True)
+class TriggerFeature:
+    token_id: str
+    market_id: str
+    question: str
+    asset_slug: str
+    direction: str
+    split: str
+    category: str
+    utc_hour: int
+    day_of_week: int
+    trading_session: str
+    start_ts: int
+    closed_ts: int
+    trigger_ts: int
+    trigger_fraction: float
+    lookback_fraction: float
+    n_trades_prefix: int
+    n_trades_lookback: int
+    start_price: float
+    lookback_price: float
+    trigger_price: float
+    prefix_return: float
+    recent_return: float
+    previous_return: float
+    acceleration: float
+    prefix_efficiency: float
+    prefix_range: float
+    prefix_volatility: float
+    prefix_min_price: float
+    prefix_max_price: float
+    distance_from_prefix_high: float
+    distance_from_prefix_low: float
+    crossing_count_05: int
+    trigger_label: str
+    trigger_tags: str
+    is_winner: int
+    gross_pnl_per_share: float
+    fee_per_share: float
+    net_pnl_per_share: float
+
+
+@dataclass(frozen=True)
 class DiscoverySummary:
     dataset_db_path: str
     tape_db_path: str
@@ -124,8 +168,10 @@ class DiscoverySummary:
     report_path: str
     eligible_tokens: int
     processed_tokens: int
+    processed_triggers: int
     skipped_no_trades: int
     decision_fraction: float
+    trigger_fractions: tuple[float, ...]
     grid: tuple[float, ...]
 
     def as_json(self) -> dict:
@@ -144,6 +190,8 @@ def discover_market_patterns(
     end_date: str | None = None,
     time_grid: Sequence[float] = DEFAULT_GRID,
     decision_fraction: float = DEFAULT_DECISION_FRACTION,
+    trigger_fractions: Sequence[float] = DEFAULT_TRIGGER_FRACTIONS,
+    trigger_lookback_fraction: float = DEFAULT_TRIGGER_LOOKBACK_FRACTION,
     bootstrap_samples: int = DEFAULT_BOOTSTRAP_SAMPLES,
     validation_train_fraction: float = DEFAULT_VALIDATION_TRAIN_FRACTION,
 ) -> DiscoverySummary:
@@ -163,14 +211,19 @@ def discover_market_patterns(
         start_ts=_parse_date_start(start_date),
         end_ts=_parse_date_end(end_date),
     )
-    features, skipped_no_trades = build_pattern_features(
+    trigger_fractions = _normalize_trigger_fractions(trigger_fractions)
+    features, trigger_features, skipped_no_trades = build_pattern_and_trigger_features(
         tape_db_path,
         metas,
         grid=grid,
         decision_fraction=decision_fraction,
+        trigger_fractions=trigger_fractions,
+        trigger_lookback_fraction=trigger_lookback_fraction,
     )
     features = assign_time_splits(features, train_fraction=validation_train_fraction)
-    write_output_db(output_db_path, features, summary_meta={
+    split_by_token = {feature.token_id: feature.split for feature in features}
+    trigger_features = [replace(item, split=split_by_token.get(item.token_id, item.split)) for item in trigger_features]
+    write_output_db(output_db_path, features, trigger_features, summary_meta={
         "dataset_db_path": str(dataset_db_path),
         "tape_db_path": str(tape_db_path),
         "market_duration_minutes": market_duration_minutes,
@@ -179,11 +232,15 @@ def discover_market_patterns(
         "end_date": end_date,
         "time_grid": list(grid),
         "decision_fraction": decision_fraction,
+        "trigger_fractions": list(trigger_fractions),
+        "trigger_lookback_fraction": trigger_lookback_fraction,
         "validation_train_fraction": validation_train_fraction,
     })
     aggregates = aggregate_features(features, bootstrap_samples=bootstrap_samples)
     insert_aggregates(output_db_path, aggregates)
-    report_path.write_text(render_report(features, aggregates, summary_meta={
+    trigger_aggregates = aggregate_trigger_features(trigger_features, bootstrap_samples=bootstrap_samples)
+    insert_trigger_aggregates(output_db_path, trigger_aggregates)
+    report_path.write_text(render_report(features, aggregates, trigger_features=trigger_features, trigger_aggregates=trigger_aggregates, summary_meta={
         "dataset_db_path": str(dataset_db_path),
         "tape_db_path": str(tape_db_path),
         "output_db_path": str(output_db_path),
@@ -192,6 +249,8 @@ def discover_market_patterns(
         "start_date": start_date or "all",
         "end_date": end_date or "all",
         "decision_fraction": decision_fraction,
+        "trigger_fractions": ",".join(f"{x:.2f}" for x in trigger_fractions),
+        "trigger_lookback_fraction": trigger_lookback_fraction,
         "validation_train_fraction": validation_train_fraction,
         "grid": ",".join(f"{x:.2f}" for x in grid),
     }), encoding="utf-8")
@@ -203,8 +262,10 @@ def discover_market_patterns(
         report_path=str(report_path),
         eligible_tokens=len(metas),
         processed_tokens=len(features),
+        processed_triggers=len(trigger_features),
         skipped_no_trades=skipped_no_trades,
         decision_fraction=float(decision_fraction),
+        trigger_fractions=tuple(trigger_fractions),
         grid=tuple(grid),
     )
     return summary
@@ -286,9 +347,30 @@ def build_pattern_features(
     grid: Sequence[float],
     decision_fraction: float,
 ) -> tuple[list[PatternFeature], int]:
+    features, _trigger_features, skipped_no_trades = build_pattern_and_trigger_features(
+        tape_db_path,
+        metas,
+        grid=grid,
+        decision_fraction=decision_fraction,
+        trigger_fractions=(),
+        trigger_lookback_fraction=DEFAULT_TRIGGER_LOOKBACK_FRACTION,
+    )
+    return features, skipped_no_trades
+
+
+def build_pattern_and_trigger_features(
+    tape_db_path: Path,
+    metas: dict[str, TokenMeta],
+    *,
+    grid: Sequence[float],
+    decision_fraction: float,
+    trigger_fractions: Sequence[float],
+    trigger_lookback_fraction: float,
+) -> tuple[list[PatternFeature], list[TriggerFeature], int]:
     conn = sqlite3.connect(tape_db_path)
     conn.row_factory = sqlite3.Row
     features: list[PatternFeature] = []
+    trigger_features: list[TriggerFeature] = []
     skipped_no_trades = 0
     current_token_id: str | None = None
     token_trades: list[TradePoint] = []
@@ -308,6 +390,14 @@ def build_pattern_features(
             skipped_no_trades += 1
             return
         features.append(feature)
+        trigger_features.extend(
+            trigger_features_for_token(
+                meta=meta,
+                trades=trades,
+                trigger_fractions=trigger_fractions,
+                lookback_fraction=trigger_lookback_fraction,
+            )
+        )
 
     try:
         rows = conn.execute(
@@ -337,7 +427,7 @@ def build_pattern_features(
         flush(current_token_id, token_trades)
     finally:
         conn.close()
-    return features, skipped_no_trades
+    return features, trigger_features, skipped_no_trades
 
 
 def feature_for_token(*, meta: TokenMeta, trades: Sequence[TradePoint], grid: Sequence[float], decision_fraction: float) -> PatternFeature | None:
@@ -425,6 +515,108 @@ def feature_for_token(*, meta: TokenMeta, trades: Sequence[TradePoint], grid: Se
     )
 
 
+def trigger_features_for_token(
+    *,
+    meta: TokenMeta,
+    trades: Sequence[TradePoint],
+    trigger_fractions: Sequence[float],
+    lookback_fraction: float,
+) -> list[TriggerFeature]:
+    if not trigger_fractions:
+        return []
+    in_window = [t for t in trades if meta.start_ts <= int(t.timestamp) <= meta.closed_ts]
+    if len(in_window) < 3:
+        return []
+    in_window.sort(key=lambda t: (t.timestamp, t.source_file_id, t.seq))
+    start_price = float(in_window[0].price)
+    fee_rate = _fee_rate_for_category(meta.category, fees_enabled=meta.fees_enabled)
+    market_start = datetime.fromtimestamp(meta.start_ts, tz=timezone.utc)
+    rows: list[TriggerFeature] = []
+    for fraction in trigger_fractions:
+        trigger_ts = int(round(meta.start_ts + (meta.closed_ts - meta.start_ts) * float(fraction)))
+        lookback_ts = int(round(meta.start_ts + (meta.closed_ts - meta.start_ts) * max(0.0, float(fraction) - float(lookback_fraction))))
+        previous_ts = int(round(meta.start_ts + (meta.closed_ts - meta.start_ts) * max(0.0, float(fraction) - 2.0 * float(lookback_fraction))))
+        trigger_price = price_at_or_before(in_window, trigger_ts)
+        lookback_price = price_at_or_before(in_window, lookback_ts)
+        previous_price = price_at_or_before(in_window, previous_ts)
+        if trigger_price is None or lookback_price is None or previous_price is None:
+            continue
+        prefix = [t for t in in_window if int(t.timestamp) <= trigger_ts]
+        lookback_trades = [t for t in in_window if lookback_ts <= int(t.timestamp) <= trigger_ts]
+        if len(prefix) < 2 or len(lookback_trades) < 2:
+            continue
+        prefix_prices = [float(t.price) for t in prefix]
+        returns = [prefix_prices[idx] - prefix_prices[idx - 1] for idx in range(1, len(prefix_prices))]
+        abs_path = sum(abs(x) for x in returns)
+        prefix_return = float(trigger_price) - start_price
+        recent_return = float(trigger_price) - float(lookback_price)
+        previous_return = float(lookback_price) - float(previous_price)
+        acceleration = recent_return - previous_return
+        prefix_min = min(prefix_prices)
+        prefix_max = max(prefix_prices)
+        prefix_range = prefix_max - prefix_min
+        prefix_efficiency = abs(prefix_return) / abs_path if abs_path > 1e-12 else 0.0
+        volatility = pstdev(returns) if len(returns) > 1 else 0.0
+        crossing_count = _count_crossings(prefix_prices, step=0.05)
+        label, tags = classify_trigger_event(
+            prefix_return=prefix_return,
+            recent_return=recent_return,
+            previous_return=previous_return,
+            acceleration=acceleration,
+            prefix_efficiency=prefix_efficiency,
+            prefix_range=prefix_range,
+            prefix_volatility=volatility,
+            distance_from_prefix_high=prefix_max - float(trigger_price),
+            distance_from_prefix_low=float(trigger_price) - prefix_min,
+            crossing_count=crossing_count,
+        )
+        gross = (1.0 - float(trigger_price)) if meta.is_winner else -float(trigger_price)
+        fee = _entry_fee_per_share(float(trigger_price), fee_rate, fees_enabled=meta.fees_enabled)
+        rows.append(
+            TriggerFeature(
+                token_id=meta.token_id,
+                market_id=meta.market_id,
+                question=meta.question,
+                asset_slug=meta.asset_slug,
+                direction=meta.direction,
+                split="all",
+                category=meta.category,
+                utc_hour=market_start.hour,
+                day_of_week=market_start.weekday(),
+                trading_session=_trading_session_for_hour(market_start.hour),
+                start_ts=meta.start_ts,
+                closed_ts=meta.closed_ts,
+                trigger_ts=trigger_ts,
+                trigger_fraction=float(fraction),
+                lookback_fraction=float(lookback_fraction),
+                n_trades_prefix=len(prefix),
+                n_trades_lookback=len(lookback_trades),
+                start_price=start_price,
+                lookback_price=float(lookback_price),
+                trigger_price=float(trigger_price),
+                prefix_return=prefix_return,
+                recent_return=recent_return,
+                previous_return=previous_return,
+                acceleration=acceleration,
+                prefix_efficiency=prefix_efficiency,
+                prefix_range=prefix_range,
+                prefix_volatility=volatility,
+                prefix_min_price=prefix_min,
+                prefix_max_price=prefix_max,
+                distance_from_prefix_high=prefix_max - float(trigger_price),
+                distance_from_prefix_low=float(trigger_price) - prefix_min,
+                crossing_count_05=crossing_count,
+                trigger_label=label,
+                trigger_tags=",".join(tags),
+                is_winner=int(meta.is_winner),
+                gross_pnl_per_share=gross,
+                fee_per_share=fee,
+                net_pnl_per_share=gross - fee,
+            )
+        )
+    return rows
+
+
 def sample_prices(trades: Sequence[TradePoint], *, start_ts: int, closed_ts: int, grid: Sequence[float]) -> list[float]:
     values: list[float] = []
     idx = 0
@@ -499,6 +691,72 @@ def classify_pattern(
     return labels
 
 
+def classify_trigger_event(
+    *,
+    prefix_return: float,
+    recent_return: float,
+    previous_return: float,
+    acceleration: float,
+    prefix_efficiency: float,
+    prefix_range: float,
+    prefix_volatility: float,
+    distance_from_prefix_high: float,
+    distance_from_prefix_low: float,
+    crossing_count: int,
+) -> tuple[str, list[str]]:
+    """Classify a point-in-time entry trigger using only information available at that point.
+
+    These labels are candidate trigger families, not trade rules. They are meant to replace
+    a single hand-built ASC touch with a broader sweep over transitions: compression breaks,
+    acceleration, reclaim/fade, and late directional continuation.
+    """
+
+    tags: list[str] = []
+    if prefix_efficiency >= 0.65:
+        tags.append("directional_prefix")
+    if crossing_count >= 4 or (prefix_volatility >= 0.04 and prefix_efficiency < 0.45):
+        tags.append("choppy_prefix")
+    if prefix_range >= 0.20:
+        tags.append("wide_range")
+    if acceleration >= 0.04:
+        tags.append("positive_acceleration")
+    elif acceleration <= -0.04:
+        tags.append("negative_acceleration")
+
+    strong_recent = 0.06
+    medium_recent = 0.04
+    trend = 0.10
+    reclaim = 0.06
+    compression = 0.035
+
+    if abs(previous_return) <= compression and recent_return >= strong_recent:
+        label = "compression_breakout_up"
+    elif abs(previous_return) <= compression and recent_return <= -strong_recent:
+        label = "compression_breakout_down"
+    elif recent_return >= strong_recent and acceleration >= medium_recent:
+        label = "acceleration_up"
+    elif recent_return <= -strong_recent and acceleration <= -medium_recent:
+        label = "acceleration_down"
+    elif distance_from_prefix_high >= reclaim and previous_return >= medium_recent and recent_return <= -medium_recent:
+        label = "spike_rejection_down"
+    elif distance_from_prefix_low >= reclaim and previous_return <= -medium_recent and recent_return >= medium_recent:
+        label = "dip_reclaim_up"
+    elif prefix_return >= trend and prefix_efficiency >= 0.60 and recent_return >= 0.0:
+        label = "trend_continuation_up"
+    elif prefix_return <= -trend and prefix_efficiency >= 0.60 and recent_return <= 0.0:
+        label = "trend_continuation_down"
+    elif prefix_efficiency < 0.35 and recent_return >= strong_recent:
+        label = "chop_to_directional_up"
+    elif prefix_efficiency < 0.35 and recent_return <= -strong_recent:
+        label = "chop_to_directional_down"
+    elif abs(recent_return) < 0.02 and prefix_range >= 0.12:
+        label = "range_stall"
+    else:
+        label = "no_clear_trigger"
+
+    return label, tags
+
+
 def assign_time_splits(features: Sequence[PatternFeature], *, train_fraction: float) -> list[PatternFeature]:
     if not features:
         return []
@@ -530,6 +788,29 @@ def aggregate_features(features: Sequence[PatternFeature], *, bootstrap_samples:
     return rows
 
 
+def aggregate_trigger_features(features: Sequence[TriggerFeature], *, bootstrap_samples: int) -> list[dict]:
+    groupers = {
+        "trigger": lambda f: (f.trigger_label,),
+        "asset_trigger": lambda f: (f.asset_slug, f.trigger_label),
+        "asset_direction_trigger": lambda f: (f.asset_slug, f.direction, f.trigger_label),
+        "fraction_trigger": lambda f: (f"{f.trigger_fraction:.2f}", f.trigger_label),
+        "split_trigger": lambda f: (f.split, f.trigger_label),
+        "utc_hour_trigger": lambda f: (str(f.utc_hour), f.trigger_label),
+        "trading_session": lambda f: (f.trading_session,),
+        "trading_session_trigger": lambda f: (f.trading_session, f.trigger_label),
+        "asset_trading_session": lambda f: (f.asset_slug, f.trading_session),
+    }
+    rows: list[dict] = []
+    for group_type, key_fn in groupers.items():
+        buckets: dict[tuple[str, ...], list[TriggerFeature]] = defaultdict(list)
+        for feature in features:
+            buckets[key_fn(feature)].append(feature)
+        for key, items in buckets.items():
+            rows.append(_aggregate_trigger_row(group_type, key, items, bootstrap_samples=bootstrap_samples))
+    rows.sort(key=lambda r: (r["group_type"], -int(r["n"]), str(r["group_key"])))
+    return rows
+
+
 def _aggregate_row(group_type: str, key: tuple[str, ...], items: Sequence[PatternFeature], *, bootstrap_samples: int) -> dict:
     pnls = [float(item.net_pnl_per_share) for item in items]
     wins = sum(int(item.is_winner) for item in items)
@@ -554,6 +835,30 @@ def _aggregate_row(group_type: str, key: tuple[str, ...], items: Sequence[Patter
     }
 
 
+def _aggregate_trigger_row(group_type: str, key: tuple[str, ...], items: Sequence[TriggerFeature], *, bootstrap_samples: int) -> dict:
+    pnls = [float(item.net_pnl_per_share) for item in items]
+    wins = sum(int(item.is_winner) for item in items)
+    avg_entry = mean(float(item.trigger_price) for item in items)
+    avg_gross = mean(float(item.gross_pnl_per_share) for item in items)
+    avg_fee = mean(float(item.fee_per_share) for item in items)
+    avg_net = mean(pnls) if pnls else 0.0
+    ci_low, ci_high = bootstrap_mean_ci(pnls, samples=bootstrap_samples)
+    return {
+        "group_type": group_type,
+        "group_key": "|".join(key),
+        "n": len(items),
+        "wins": wins,
+        "win_rate": wins / len(items) if items else 0.0,
+        "avg_entry_price": avg_entry,
+        "avg_gross_pnl_per_share": avg_gross,
+        "avg_fee_per_share": avg_fee,
+        "avg_net_pnl_per_share": avg_net,
+        "ci95_low": ci_low,
+        "ci95_high": ci_high,
+        "frequency_per_day": _trigger_frequency_per_day(items),
+    }
+
+
 def bootstrap_mean_ci(values: Sequence[float], *, samples: int) -> tuple[float | None, float | None]:
     if not values:
         return None, None
@@ -574,7 +879,7 @@ def bootstrap_mean_ci(values: Sequence[float], *, samples: int) -> tuple[float |
     return lo, hi
 
 
-def write_output_db(path: Path, features: Sequence[PatternFeature], *, summary_meta: dict) -> None:
+def write_output_db(path: Path, features: Sequence[PatternFeature], trigger_features: Sequence[TriggerFeature] = (), *, summary_meta: dict) -> None:
     if path.exists():
         path.unlink()
     conn = sqlite3.connect(path)
@@ -625,6 +930,50 @@ def write_output_db(path: Path, features: Sequence[PatternFeature], *, summary_m
             CREATE INDEX idx_pattern_features_label ON pattern_features(primary_label);
             CREATE INDEX idx_pattern_features_asset_label ON pattern_features(asset_slug, primary_label);
             CREATE INDEX idx_pattern_features_hour ON pattern_features(utc_hour);
+            CREATE TABLE trigger_features(
+                token_id TEXT NOT NULL,
+                market_id TEXT NOT NULL,
+                question TEXT,
+                asset_slug TEXT,
+                direction TEXT,
+                split TEXT,
+                category TEXT,
+                utc_hour INTEGER,
+                day_of_week INTEGER,
+                trading_session TEXT,
+                start_ts INTEGER,
+                closed_ts INTEGER,
+                trigger_ts INTEGER,
+                trigger_fraction REAL,
+                lookback_fraction REAL,
+                n_trades_prefix INTEGER,
+                n_trades_lookback INTEGER,
+                start_price REAL,
+                lookback_price REAL,
+                trigger_price REAL,
+                prefix_return REAL,
+                recent_return REAL,
+                previous_return REAL,
+                acceleration REAL,
+                prefix_efficiency REAL,
+                prefix_range REAL,
+                prefix_volatility REAL,
+                prefix_min_price REAL,
+                prefix_max_price REAL,
+                distance_from_prefix_high REAL,
+                distance_from_prefix_low REAL,
+                crossing_count_05 INTEGER,
+                trigger_label TEXT,
+                trigger_tags TEXT,
+                is_winner INTEGER,
+                gross_pnl_per_share REAL,
+                fee_per_share REAL,
+                net_pnl_per_share REAL,
+                PRIMARY KEY(token_id, trigger_fraction)
+            );
+            CREATE INDEX idx_trigger_features_label ON trigger_features(trigger_label);
+            CREATE INDEX idx_trigger_features_asset_label ON trigger_features(asset_slug, trigger_label);
+            CREATE INDEX idx_trigger_features_session ON trigger_features(trading_session);
             """
         )
         for key, value in summary_meta.items():
@@ -641,6 +990,22 @@ def write_output_db(path: Path, features: Sequence[PatternFeature], *, summary_m
             )
             """,
             [asdict(feature) for feature in features],
+        )
+        conn.executemany(
+            """
+            INSERT INTO trigger_features VALUES (
+                :token_id, :market_id, :question, :asset_slug, :direction, :split, :category,
+                :utc_hour, :day_of_week, :trading_session, :start_ts, :closed_ts, :trigger_ts,
+                :trigger_fraction, :lookback_fraction, :n_trades_prefix, :n_trades_lookback,
+                :start_price, :lookback_price, :trigger_price, :prefix_return, :recent_return,
+                :previous_return, :acceleration, :prefix_efficiency, :prefix_range,
+                :prefix_volatility, :prefix_min_price, :prefix_max_price,
+                :distance_from_prefix_high, :distance_from_prefix_low, :crossing_count_05,
+                :trigger_label, :trigger_tags, :is_winner, :gross_pnl_per_share,
+                :fee_per_share, :net_pnl_per_share
+            )
+            """,
+            [asdict(feature) for feature in trigger_features],
         )
         conn.commit()
     finally:
@@ -685,7 +1050,52 @@ def insert_aggregates(path: Path, aggregates: Sequence[dict]) -> None:
         conn.close()
 
 
-def render_report(features: Sequence[PatternFeature], aggregates: Sequence[dict], *, summary_meta: dict) -> str:
+def insert_trigger_aggregates(path: Path, aggregates: Sequence[dict]) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS trigger_aggregates;
+            CREATE TABLE trigger_aggregates(
+                group_type TEXT NOT NULL,
+                group_key TEXT NOT NULL,
+                n INTEGER NOT NULL,
+                wins INTEGER NOT NULL,
+                win_rate REAL NOT NULL,
+                avg_entry_price REAL NOT NULL,
+                avg_gross_pnl_per_share REAL NOT NULL,
+                avg_fee_per_share REAL NOT NULL,
+                avg_net_pnl_per_share REAL NOT NULL,
+                ci95_low REAL,
+                ci95_high REAL,
+                frequency_per_day REAL,
+                PRIMARY KEY(group_type, group_key)
+            );
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO trigger_aggregates VALUES (
+                :group_type, :group_key, :n, :wins, :win_rate, :avg_entry_price,
+                :avg_gross_pnl_per_share, :avg_fee_per_share, :avg_net_pnl_per_share,
+                :ci95_low, :ci95_high, :frequency_per_day
+            )
+            """,
+            list(aggregates),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def render_report(
+    features: Sequence[PatternFeature],
+    aggregates: Sequence[dict],
+    *,
+    trigger_features: Sequence[TriggerFeature] = (),
+    trigger_aggregates: Sequence[dict] = (),
+    summary_meta: dict,
+) -> str:
     lines: list[str] = []
     lines.append("# Pattern discovery report")
     lines.append("")
@@ -699,8 +1109,30 @@ def render_report(features: Sequence[PatternFeature], aggregates: Sequence[dict]
     lines.append("## Read me first")
     lines.append("- Labels are heuristic and based only on the trajectory prefix up to the configured decision fraction.")
     lines.append("- PnL is a fee-aware per-share hold-to-resolution estimate at the decision price; it is not a live execution claim.")
+    lines.append("- Trigger rows are point-in-time transition events swept across lifecycle fractions; they are candidate replacements for hand-built ASC touch triggers, not final trade rules.")
     lines.append("- Promising groups need collector/live-like validation before any trading use.")
     lines.append("")
+    if trigger_features:
+        lines.append("## Trigger discovery leaderboard")
+        lines.append("Candidate trigger families are scored at the trigger price and hold-to-resolution. Prefer groups with enough n, positive CI, and split stability before any executable overlay.")
+        _append_aggregate_section(lines, trigger_aggregates, group_type="trigger", limit=20, min_n=50)
+        lines.append("")
+        lines.append("## Asset + direction + trigger candidates")
+        _append_aggregate_section(lines, trigger_aggregates, group_type="asset_direction_trigger", limit=35, min_n=25)
+        lines.append("")
+        lines.append("## Trigger lifecycle sweep")
+        _append_aggregate_section(lines, trigger_aggregates, group_type="fraction_trigger", limit=35, min_n=50)
+        lines.append("")
+        lines.append("## Trading-day / UTC session view")
+        lines.append("UTC sessions are coarse activity buckets: asia_00_06utc, europe_07_12utc, us_morning_13_16utc, us_afternoon_17_21utc, late_us_22_23utc.")
+        _append_aggregate_section(lines, trigger_aggregates, group_type="trading_session", limit=10, min_n=50)
+        lines.append("")
+        lines.append("## Trading session + trigger view")
+        _append_aggregate_section(lines, trigger_aggregates, group_type="trading_session_trigger", limit=35, min_n=50)
+        lines.append("")
+        lines.append("## Asset + trading session view")
+        _append_aggregate_section(lines, trigger_aggregates, group_type="asset_trading_session", limit=30, min_n=50)
+        lines.append("")
     lines.append("## Pattern leaderboard")
     _append_aggregate_section(lines, aggregates, group_type="pattern", limit=20)
     lines.append("")
@@ -722,16 +1154,20 @@ def render_report(features: Sequence[PatternFeature], aggregates: Sequence[dict]
         lines.append(f"- `{label}`: `{count}`")
     lines.append("")
     lines.append("## Next checks")
-    lines.append("- Compare top historical patterns with collector/touch_dataset executable filters.")
+    lines.append("- Promote trigger candidates, not whole-market labels: compare top trigger groups with collector/touch_dataset executable filters.")
+    lines.append("- Re-run trigger sweep across fresh holdout windows and require date/session stability.")
     lines.append("- Add spot-regime features when a spot cache is available for the same date range.")
     lines.append("- Require date-split stability before promoting any pattern to a candidate rule.")
     lines.append("")
     return "\n".join(lines)
 
 
-def _append_aggregate_section(lines: list[str], aggregates: Sequence[dict], *, group_type: str, limit: int) -> None:
-    rows = [row for row in aggregates if row["group_type"] == group_type]
+def _append_aggregate_section(lines: list[str], aggregates: Sequence[dict], *, group_type: str, limit: int, min_n: int = 1) -> None:
+    rows = [row for row in aggregates if row["group_type"] == group_type and int(row["n"]) >= int(min_n)]
     rows.sort(key=lambda r: (float(r["avg_net_pnl_per_share"]), int(r["n"])), reverse=True)
+    if not rows:
+        lines.append(f"- no groups with n >= {min_n}")
+        return
     for row in rows[:limit]:
         ci = "n/a" if row["ci95_low"] is None else f"{row['ci95_low']:+.4f}..{row['ci95_high']:+.4f}"
         lines.append(
@@ -748,6 +1184,28 @@ def _frequency_per_day(items: Sequence[PatternFeature]) -> float | None:
     end = max(item.closed_ts for item in items)
     days = max(1.0 / 24.0, (end - start) / 86400.0)
     return len(items) / days
+
+
+def _trigger_frequency_per_day(items: Sequence[TriggerFeature]) -> float | None:
+    if not items:
+        return None
+    start = min(item.start_ts for item in items)
+    end = max(item.closed_ts for item in items)
+    days = max(1.0 / 24.0, (end - start) / 86400.0)
+    return len(items) / days
+
+
+def _trading_session_for_hour(hour: int) -> str:
+    hour = int(hour) % 24
+    if 0 <= hour <= 6:
+        return "asia_00_06utc"
+    if 7 <= hour <= 12:
+        return "europe_07_12utc"
+    if 13 <= hour <= 16:
+        return "us_morning_13_16utc"
+    if 17 <= hour <= 21:
+        return "us_afternoon_17_21utc"
+    return "late_us_22_23utc"
 
 
 def _count_crossings(prices: Sequence[float], *, step: float) -> int:
@@ -825,6 +1283,10 @@ def _normalize_grid(values: Sequence[float]) -> tuple[float, ...]:
     return tuple(cleaned)
 
 
+def _normalize_trigger_fractions(values: Sequence[float]) -> tuple[float, ...]:
+    return tuple(sorted({round(float(v), 6) for v in values if 0.0 < float(v) < 1.0}))
+
+
 def _parse_date_start(value: str | None) -> int | None:
     if not value:
         return None
@@ -851,6 +1313,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--time-grid", default=",".join(str(int(x * 100)) for x in DEFAULT_GRID), help="Comma-separated lifecycle percent grid, e.g. 0,10,...,100")
     parser.add_argument("--decision-fraction", type=float, default=DEFAULT_DECISION_FRACTION)
+    parser.add_argument("--trigger-fractions", default=",".join(str(int(x * 100)) for x in DEFAULT_TRIGGER_FRACTIONS), help="Comma-separated lifecycle percent trigger sweep, e.g. 20,30,...,80")
+    parser.add_argument("--trigger-lookback-fraction", type=float, default=DEFAULT_TRIGGER_LOOKBACK_FRACTION)
     parser.add_argument("--bootstrap-samples", type=int, default=DEFAULT_BOOTSTRAP_SAMPLES)
     parser.add_argument("--validation-train-fraction", type=float, default=DEFAULT_VALIDATION_TRAIN_FRACTION)
     return parser.parse_args()
@@ -859,6 +1323,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     grid = tuple(float(item.strip()) / 100.0 for item in str(args.time_grid).split(",") if item.strip())
+    trigger_fractions = tuple(float(item.strip()) / 100.0 for item in str(args.trigger_fractions).split(",") if item.strip())
     summary = discover_market_patterns(
         args.db,
         args.tape_db,
@@ -870,6 +1335,8 @@ def main() -> None:
         end_date=args.end_date,
         time_grid=grid,
         decision_fraction=float(args.decision_fraction),
+        trigger_fractions=trigger_fractions,
+        trigger_lookback_fraction=float(args.trigger_lookback_fraction),
         bootstrap_samples=int(args.bootstrap_samples),
         validation_train_fraction=float(args.validation_train_fraction),
     )
