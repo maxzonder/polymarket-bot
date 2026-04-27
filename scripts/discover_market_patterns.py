@@ -865,6 +865,14 @@ def bootstrap_mean_ci(values: Sequence[float], *, samples: int) -> tuple[float |
     if len(values) == 1 or samples <= 0:
         value = float(mean(values))
         return value, value
+    if len(values) * int(samples) > 2_000_000:
+        # Trigger discovery can produce hundreds of thousands of rows. A naive
+        # bootstrap over large buckets is needlessly expensive for an exploratory
+        # report, so use a deterministic normal-approximation CI for large groups.
+        avg = float(mean(values))
+        sigma = float(pstdev(values))
+        half_width = 1.96 * sigma / math.sqrt(len(values))
+        return avg - half_width, avg + half_width
     # Deterministic lightweight bootstrap without importing random state into reports.
     import random
 
