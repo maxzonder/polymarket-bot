@@ -1,6 +1,10 @@
 # swan_analyzer.py
 
-Детектор событий «чёрного лебедя» v2. Читает сырые трейды из `database/`, пишет в таблицу `swans_v2` в `polymarket_dataset.db`.
+Детектор swan-событий v2. Читает сырые трейды из `database/`, пишет в `swans_v2` в `polymarket_dataset.db`.
+
+Важное разделение:
+- базовый `swan` = токен дал достаточный исторический икс от executable low-zone;
+- строгий `black_swan=1` = winner-токен можно было купить за копейки, затем рынок резко переоценил исход, и токен зарезолвился в $1.
 
 ## Использование
 
@@ -15,91 +19,150 @@ python3 analyzer/swan_analyzer.py --date-from 2026-03-19 --date-to 2026-03-28
 python3 analyzer/swan_analyzer.py --date 2026-03-28
 ```
 
-## Параметры
+## Основные параметры swan layer
 
 | Флаг | По умолчанию | Источник | Описание |
 |------|-------------|----------|----------|
-| `--buy-price-threshold` | `SWAN_BUY_PRICE_THRESHOLD` | `config.py` — `max(entry_price_levels)` по всем режимам (0.20) | Порог цены дна — токен должен торговаться ниже этого значения |
-| `--min-buy-volume` | `SWAN_MIN_BUY_VOLUME` | `config.py` (1.0) | Мин. объём сделок в зоне дна (можно войти) |
-| `--min-sell-volume` | `SWAN_MIN_SELL_VOLUME` | `config.py` (30.0) | Мин. объём сделок на выходе >= buy_min_price * min_real_x (можно продать) |
-| `--min-real-x` | `SWAN_MIN_REAL_X` | `config.py` (5.0) | Минимальный реальный икс для записи в таблицу |
+| `--buy-price-threshold` | `SWAN_BUY_PRICE_THRESHOLD` | `config.py` — `max(entry_price_levels)` по всем режимам (обычно 0.20) | Верхняя граница low-zone |
+| `--min-buy-volume` | `SWAN_MIN_BUY_VOLUME` | `config.py` | Мин. объём сделок в low-zone (можно войти) |
+| `--min-sell-volume` | `SWAN_MIN_SELL_VOLUME` | `config.py` | Мин. объём сделок на выходе для non-winner |
+| `--min-real-x` | `SWAN_MIN_REAL_X` | `config.py` | Минимальный итоговый икс для записи в `swans_v2` |
 | `--recompute` | — | — | Дропнуть и пересоздать `swans_v2`, затем заполнить |
 
+## Параметры strict black_swan layer
+
+| Флаг | По умолчанию | Описание |
+|------|-------------|----------|
+| `--black-swan-buy-price-max` | `0.05` | Winner должен быть покупаемым в low-zone не дороже этой цены |
+| `--black-swan-min-shock-x` | `5.0` | Минимальный repricing multiple от `buy_min_price` до shock |
+| `--black-swan-breakout-price` | `0.20` | Абсолютный порог shock; целевой shock price = `max(breakout_price, buy_min_price × min_shock_x)` |
+| `--black-swan-max-shock-delay-s` | `21600` | Shock должен прийти не позже 6h после low-zone |
+| `--black-swan-shock-window-s` | `900` | Окно подтверждения shock-volume после первого shock print |
+| `--black-swan-min-shock-volume` | `30.0` | Мин. USDC объём по shock-price или выше внутри окна подтверждения |
+| `--black-swan-min-buy-time-to-close-s` | `300` | Не ставить `black_swan=1`, если купить можно было только ближе чем за 5m до close/resolution |
+
 ---
 
-## Алгоритм (на один токен)
+## Алгоритм на один токен
 
-1. **Загрузить трейды** из `database/{date}/{market_id}_trades/{token_id}.json`, отсортировать по timestamp.
-   Каждый трейд: `{price, size, side, timestamp}`. Объём в USDC = `price × size`.
+1. **Загрузить trades** из `database/{date}/{market_id}_trades/{token_id}.json`, отсортировать по timestamp.
+   Объём сделки в USDC = `price × size`.
 
-2. **Найти глобальный минимум цены** — самую низкую цену за всю историю токена среди всех трейдов.
+2. **Найти все contiguous low-zones**, где `price <= buy_price_threshold`.
+   Зоны сортируются по минимальной цене: сначала самый глубокий floor.
 
-3. **Проверить порог**: если `buy_min_price >= buy_price_threshold` (сейчас 0.20) → не лебедь, пропустить.
-   Смысл: нас интересуют только токены, которые в какой-то момент торговались очень дёшево.
+3. **Выбрать первую executable low-zone**:
+   - `buy_volume >= min_buy_volume`;
+   - micro-print без ликвидности не блокирует поиск следующей, более реальной зоны.
 
-4. **Построить зону дна** (buy zone): от трейда с глобальным минимумом расширяем в обе стороны по времени,
-   захватывая все соседние трейды пока их цена < `buy_price_threshold`.
-   Это непрерывный временной отрезок, когда токен был "на полу".
-   Записываем: `buy_ts_first`, `buy_ts_last`, `buy_volume` (сумма USDC в зоне), `buy_trade_count`.
+4. **Записать buy analytics**:
+   - `buy_min_price`;
+   - `buy_volume`;
+   - `buy_trade_count`;
+   - `buy_ts_first`, `buy_ts_last`;
+   - `buy_window_s`;
+   - `buy_time_to_close_s`;
+   - `buy_time_from_start_s`;
+   - `buy_position_pct`;
+   - `buy_phase`.
 
-5. **Проверить ликвидность покупки**: если `buy_volume < min_buy_volume` (1.0 USDC) → пропустить.
-   Смысл: убедиться что на уровне дна реально были сделки, а не единичная аномалия.
+5. **Классифицировать фазу покупки** (`buy_phase`):
+   - `final_seconds` — <=30s до close;
+   - `final_minute` — <=60s;
+   - `final_5m` — <=5m;
+   - `final_15m` — <=15m;
+   - `final_hour` — <=1h;
+   - `final_6h` — <=6h;
+   - `opening_10pct` — первые 10% жизни рынка;
+   - `late` — последние 25% жизни рынка;
+   - `middle` — всё между ними;
+   - `unknown` — нет `start_date`/`end_date`.
 
-6. **Проверить ликвидность продажи** (только для не-победителей):
-   - берём все трейды *после* зоны дна с ценой >= `buy_min_price × min_real_x` (целевой уровень выхода)
-   - суммируем объём → `sell_volume`
-   - если `sell_volume < min_sell_volume` (5.0 USDC) → пропустить
-   - для победителей (`is_winner=1`) этот шаг пропускается: Polymarket выплачивает $1 за каждый токен
-     при резолюции через смарт-контракт, контрагент не нужен.
+6. **Проверить выход / итоговый икс**:
+   - winner: `max_traded_x = 1.0 / buy_min_price`, `sell_volume=0`, потому что выход — payout $1;
+   - non-winner: `max_traded_x = max_price_after_floor / buy_min_price`, и нужен `sell_volume >= min_sell_volume` на уровне `buy_min_price × min_real_x` или выше.
 
-7. **Рассчитать max_traded_x** — фактический максимальный икс относительно цены входа:
-   - победитель: `max_traded_x = 1.0 / buy_min_price` (гарантированная выплата $1)
-   - не победитель: `max_traded_x = max_price_after_floor / buy_min_price` (максимум цены после зоны дна)
+7. **Найти первый regime shock после low-zone**.
+   Shock price threshold:
+   ```text
+   shock_target = max(black_swan_breakout_price,
+                      buy_min_price × black_swan_min_shock_x)
+   ```
 
-   Пример: купил на дне по 0.01 → max_traded_x = 100x для победителя, или цена поднялась до 0.50 → max_traded_x = 50x для не-победителя.
+   Пишутся:
+   - `shock_ts`;
+   - `shock_price`;
+   - `shock_time_to_close_s`;
+   - `shock_delay_s` — сколько секунд от конца buy-zone до shock;
+   - `shock_x` — `shock_price / buy_min_price`;
+   - `shock_delta_logit` — скачок в logit-space;
+   - `shock_volume` — USDC объём по shock-target или выше внутри confirmation window;
+   - `shock_trade_count`;
+   - `shock_phase`.
 
-8. **Проверить минимальный икс**: если `max_traded_x < min_real_x` (5.0) → пропустить.
-   Отсекаем незначительные отскоки.
+8. **Поставить strict label `black_swan`**.
+   `black_swan=1`, только если выполнено всё:
+   - токен winner (`is_winner=1`);
+   - `buy_min_price <= black_swan_buy_price_max`;
+   - low-zone executable: достаточно объёма и не единичный мусорный print;
+   - buy-zone не только в последние секунды/минуты (`buy_time_to_close_s >= min_buy_time_to_close_s`);
+   - найден shock;
+   - shock пришёл достаточно быстро (`shock_delay_s <= max_shock_delay_s`);
+   - shock подтверждён объёмом и минимум двумя trades внутри confirmation window.
+
+   Если label не поставлен, причина пишется в `black_swan_reason`, например:
+   - `failed:winner`;
+   - `failed:penny_buy`;
+   - `failed:not_last_seconds`;
+   - `failed:shock_found`;
+   - `failed:sharp_reprice`;
+   - `failed:shock_confirmed`.
 
 9. **Записать UPSERT в `swans_v2`** по ключу `(token_id, date)`.
-   При повторном прогоне того же диапазона обновляет `max_traded_x`, `is_winner`, `payout_x`, `sell_volume`.
-
-### Ключевые отличия от старого `analyzer.py` (zigzag)
-
-| | `token_swans` (старый) | `swans_v2` (новый) |
-|---|---|---|
-| Событий на токен | Много (каждый зигзаг) | Одно (глобальный минимум) |
-| Фильтр по времени | Есть (`min_duration_minutes`) | Нет |
-| Знает победителя | Нет (`possible_x` — оценочный) | Да (`is_winner` из DB) |
-| Учёт выплаты $1 | Нет | Да (`max_traded_x = 1/buy_min_price` для winner) |
-| Записей в таблице | ~88k (Dec–Mar) | ~4k (Aug–Mar) |
+   Старые таблицы без новых колонок мигрируются через `ALTER TABLE` при запуске.
 
 ---
 
-## Таблица `swans_v2`
+## Таблица `swans_v2`: основные поля
 
 | Поле | Тип | Описание |
 |------|-----|----------|
 | `token_id` | TEXT | ID токена |
 | `market_id` | TEXT | ID рынка |
 | `date` | TEXT | Дата папки коллектора (YYYY-MM-DD) |
-| `buy_price_threshold` | REAL | Порог входа использованный при анализе |
-| `min_buy_volume` | REAL | Мин. ликвидность входа при анализе |
-| `min_sell_volume` | REAL | Мин. ликвидность выхода при анализе |
-| `min_real_x` | REAL | Мин. max_traded_x при анализе |
-| `buy_min_price` | REAL | Глобальный минимум цены в зоне дна |
-| `buy_volume` | REAL | Объём сделок в зоне дна (USDC) |
-| `buy_trade_count` | INTEGER | Количество сделок в зоне дна |
-| `buy_ts_first` | INTEGER | Первый timestamp зоны дна |
-| `buy_ts_last` | INTEGER | Последний timestamp зоны дна |
-| `sell_volume` | REAL | Объём сделок на выходе >= buy_min_price * min_real_x (0 для победителей) |
-| `max_price_in_history` | REAL | Максимальная цена за всю историю токена |
+| `buy_min_price` | REAL | Минимальная цена выбранной executable low-zone |
+| `buy_volume` | REAL | Объём сделок в low-zone (USDC) |
+| `buy_trade_count` | INTEGER | Количество сделок в low-zone |
+| `buy_ts_first` | INTEGER | Первый timestamp low-zone |
+| `buy_ts_last` | INTEGER | Последний timestamp low-zone |
+| `sell_volume` | REAL | Объём выхода для non-winner; 0 для winner payout |
+| `max_price_in_history` | REAL | Максимальная цена за историю токена |
 | `last_price_in_history` | REAL | Последняя цена в истории |
-| `is_winner` | INTEGER | 1 если токен выиграл (outcomePrices >= 0.99) |
-| `max_traded_x` | REAL | Итоговый иkс с учётом выплаты $1 |
+| `is_winner` | INTEGER | 1 если токен выиграл |
+| `max_traded_x` | REAL | Итоговый икс с учётом payout $1 для winner |
 | `payout_x` | REAL | `1/buy_min_price` для winner, иначе = `max_traded_x` |
 
-Уникальный ключ: `(token_id, date)`. UPSERT обновляет `max_traded_x`, `is_winner`, `payout_x`, `sell_volume`.
+## Таблица `swans_v2`: black_swan analytics
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `black_swan` | INTEGER | 1 если это strict black swan: penny buy → sharp repricing → winner payout |
+| `black_swan_reason` | TEXT | `pass` или список failed checks |
+| `black_swan_score` | REAL | Мягкий rank-score для near-misses, не label |
+| `buy_time_to_close_s` | INTEGER | Секунд от конца buy-zone до close/resolution |
+| `buy_time_from_start_s` | INTEGER | Секунд от старта рынка до конца buy-zone |
+| `buy_position_pct` | REAL | Позиция buy-zone внутри жизни рынка: 0=start, 1=close |
+| `buy_phase` | TEXT | `final_seconds`, `final_5m`, `middle`, `late`, etc. |
+| `buy_window_s` | INTEGER | Длительность executable low-zone |
+| `shock_ts` | INTEGER | Первый timestamp резкой переоценки |
+| `shock_price` | REAL | Цена первого shock print |
+| `shock_time_to_close_s` | INTEGER | Секунд от shock до close/resolution |
+| `shock_delay_s` | INTEGER | Секунд от buy-zone до shock |
+| `shock_x` | REAL | `shock_price / buy_min_price` |
+| `shock_delta_logit` | REAL | Скачок цены в logit-space |
+| `shock_volume` | REAL | Объём подтверждения shock внутри window |
+| `shock_trade_count` | INTEGER | Кол-во подтверждающих shock trades |
+| `shock_phase` | TEXT | Фаза рынка на момент shock |
 
 ---
 
@@ -107,30 +170,21 @@ python3 analyzer/swan_analyzer.py --date 2026-03-28
 
 | Компонент | Как |
 |-----------|-----|
-| `strategy/market_scorer.py` | runtime market-level scorer; `swans_v2` используется только в офлайн-анализе и research pipeline |
-| `analyzer/market_level_features_v1_1.py` | Источник позитивов для `feature_mart_v1_1` |
+| `analyzer/market_level_features_v1_1.py` | Источник позитивов для `feature_mart_v1_1`; может дополнительно фильтровать/анализировать `black_swan=1` |
 | `scripts/build_rejected_outcomes.py` | Ground truth для пропущенных возможностей |
 | `scripts/daily_pipeline.py` | `--date-from {start} --date-to {end}` для новых дат |
+| research scripts | Сегментация по `buy_phase`, `shock_delay_s`, `black_swan_score`, near-misses |
 
 ---
 
-## Глобальный порог — SWAN_BUY_PRICE_THRESHOLD
+## Интерпретация
 
-Порог `--buy-price-threshold` вынесен в `config.py` как:
+`swans_v2` больше не надо читать как “всё это настоящие чёрные лебеди”.
 
-```python
-SWAN_BUY_PRICE_THRESHOLD = max(max(m.entry_price_levels) for m in MODES.values())
-```
+Правильная семантика:
+- `max_traded_x` / `payout_x` — потенциальный исторический икс;
+- `black_swan=1` — строгий subset, где была реальная смена позы рынка;
+- `buy_phase` показывает, где была возможность купить: последние секунды, минуты, часы, middle, late;
+- `shock_*` показывает момент, скорость и подтверждение переоценки.
 
-Автоматически равен максимальному уровню входа среди всех режимов бота. При добавлении нового режима с более высокими уровнями — порог обновится автоматически.
-
-`check_swan_buy_price_threshold(threshold)` — возвращает список предупреждений если порог не покрывает уровни какого-либо режима. Вызывается при старте `swan_analyzer.py`.
-
----
-
-## Текущее состояние
-
-После миграции с `token_swans` → `swans_v2` и пересчёта с `threshold=0.20` (Mar 29 2026):
-- **32,056 событий** в `swans_v2` (Aug 2025 – Mar 2026)
-- Было 3,943 при старом threshold=0.02
-- `token_swans` (88k строк) сохранена в БД как архив, ни один активный скрипт её не читает
+Так слой сохраняет полезность старого x-анализатора, но добавляет отдельный аналитический ответ на вопрос: “где рынок реально резко поменял мнение, а winner можно было купить за копейки заранее?”.
