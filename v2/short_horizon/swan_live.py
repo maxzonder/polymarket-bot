@@ -209,14 +209,24 @@ async def run_swan_live(
         max_seconds_to_end=7 * 24 * 3600,
     )
 
+    # Swan does not use BookUpdate events (detect_touches returns []), so we
+    # stub out the WebSocket to avoid subscribing to potentially thousands of
+    # markets in the wide-universe discovery pass.
+    class _NoopWebsocket:
+        messages: asyncio.Queue = asyncio.Queue()
+        async def connect(self) -> None: pass
+        async def close(self) -> None: pass
+        async def subscribe(self, token_ids) -> None: pass
+        async def unsubscribe(self, token_ids) -> None: pass
+
     if resolved_mode is ExecutionMode.LIVE:
         if execution_client is None:
             raise RuntimeError("execution_client required for live mode")
         credentials = execution_client.api_credentials()
         user_stream = PolymarketUserStream(auth=credentials)
-        source = LiveEventSource(user_stream=user_stream)
+        source = LiveEventSource(user_stream=user_stream, websocket=_NoopWebsocket())
     else:
-        source = LiveEventSource()
+        source = LiveEventSource(websocket=_NoopWebsocket())
 
     # Override market discovery with swan's wide universe.
     from short_horizon.venue_polymarket import MarketRefreshLoop, FeeMetadataRefreshLoop, SharedMarketDiscovery
