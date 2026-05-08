@@ -746,6 +746,11 @@ class PolymarketExecutionClient:
             raise ExecutionClientNotStartedError("Execution client API credentials unavailable before startup()")
         return self._api_credentials
 
+    def clob_client(self) -> Any:
+        if self._client is None:
+            raise ExecutionClientNotStartedError("Execution client SDK client unavailable before startup()")
+        return self._client
+
     def _build_order_args(self, order_request: VenueOrderRequest):
         order_args_factory = self._order_args_factory
         if order_args_factory is None:

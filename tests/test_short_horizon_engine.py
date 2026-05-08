@@ -4661,8 +4661,9 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                     captured["auth"] = auth
 
             class _PatchedLiveEventSource(_AsyncNormalizedSource):
-                def __init__(self, *, user_stream=None):
+                def __init__(self, *, user_stream=None, fee_info_fetcher=None, **_kwargs):
                     captured["user_stream"] = user_stream
+                    captured["fee_info_fetcher"] = fee_info_fetcher
                     super().__init__(events)
 
             with patch("short_horizon.live_runner.PolymarketUserStream", _PatchedUserStream), patch(
