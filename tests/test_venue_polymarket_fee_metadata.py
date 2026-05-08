@@ -11,6 +11,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.core import EventType, MarketStatus
+from short_horizon.core.events import FeeInfo
 from short_horizon.venue_polymarket import FeeMetadataRefreshLoop, MarketMetadata
 
 
@@ -114,6 +115,142 @@ class FeeMetadataRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 2)
         self.assertEqual(event.market_id, "m1")
         self.assertFalse(loop.failed())
+
+
+    async def test_fee_refresh_loop_overrides_with_v2_fee_info_fetcher(self) -> None:
+        snapshots = [[self._market("m1", fee_rate_bps=35.0)]]
+        clock_values = iter([1_776_694_000_000])
+
+        async def fake_discovery(*_args, **_kwargs):
+            return snapshots.pop(0)
+
+        fetched: list[str] = []
+
+        def fetcher(condition_id: str) -> dict[str, FeeInfo]:
+            fetched.append(condition_id)
+            return {
+                "m1_yes": FeeInfo(base_fee_bps=20, rate=0.002, exponent=1.5, source="v2.clob_market_info"),
+                "m1_no": FeeInfo(base_fee_bps=20, rate=0.002, exponent=1.5, source="v2.clob_market_info"),
+            }
+
+        loop = FeeMetadataRefreshLoop(
+            discovery_fn=fake_discovery,
+            clock_ms=lambda: next(clock_values),
+            fee_info_fetcher=fetcher,
+        )
+
+        events = await loop.refresh_once()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].fee_rate_bps, 20.0)
+        self.assertEqual(events[0].source, "polymarket.v2.clob_market_info")
+        self.assertIsNotNone(events[0].fee_info)
+        self.assertEqual(events[0].fee_info.base_fee_bps, 20)
+        self.assertEqual(events[0].fee_info.rate, 0.002)
+        self.assertEqual(fetched, ["cond_m1"])
+
+    async def test_fee_refresh_loop_falls_back_when_fetcher_returns_empty(self) -> None:
+        snapshots = [[self._market("m1", fee_rate_bps=35.0)]]
+        clock_values = iter([1_776_694_000_000])
+
+        async def fake_discovery(*_args, **_kwargs):
+            return snapshots.pop(0)
+
+        def fetcher(_condition_id: str) -> dict[str, FeeInfo]:
+            return {}
+
+        loop = FeeMetadataRefreshLoop(
+            discovery_fn=fake_discovery,
+            clock_ms=lambda: next(clock_values),
+            fee_info_fetcher=fetcher,
+        )
+
+        events = await loop.refresh_once()
+        self.assertEqual(events[0].fee_rate_bps, 35.0)
+        self.assertEqual(events[0].source, "polymarket.gamma.fee_refresh")
+
+    async def test_fee_refresh_loop_swallows_fetcher_exception(self) -> None:
+        snapshots = [[self._market("m1", fee_rate_bps=35.0)]]
+        clock_values = iter([1_776_694_000_000])
+
+        async def fake_discovery(*_args, **_kwargs):
+            return snapshots.pop(0)
+
+        def fetcher(_condition_id: str) -> dict[str, FeeInfo]:
+            raise RuntimeError("v2 sdk down")
+
+        loop = FeeMetadataRefreshLoop(
+            discovery_fn=fake_discovery,
+            clock_ms=lambda: next(clock_values),
+            fee_info_fetcher=fetcher,
+        )
+
+        events = await loop.refresh_once()
+        self.assertEqual(events[0].fee_rate_bps, 35.0)
+        self.assertEqual(events[0].source, "polymarket.gamma.fee_refresh")
+
+
+class V2FeeInfoCacheTest(unittest.TestCase):
+    def test_caches_within_ttl_and_refetches_after_expiry(self) -> None:
+        from short_horizon.venue_polymarket.v2_fees import V2FeeInfoCache
+
+        calls: list[str] = []
+
+        def fake_fetcher(_client, condition_id: str) -> dict[str, FeeInfo]:
+            calls.append(condition_id)
+            return {f"{condition_id}_yes": FeeInfo(base_fee_bps=10, rate=0.001, exponent=1.0)}
+
+        clock = [1000.0]
+        cache = V2FeeInfoCache(client=object(), ttl_seconds=60, fetcher=fake_fetcher, clock=lambda: clock[0])
+
+        cache.get("c1")
+        cache.get("c1")
+        self.assertEqual(calls, ["c1"])
+        clock[0] += 30.0
+        cache.get("c1")
+        self.assertEqual(calls, ["c1"])
+        clock[0] += 31.0
+        cache.get("c1")
+        self.assertEqual(calls, ["c1", "c1"])
+
+    def test_negative_result_uses_short_ttl(self) -> None:
+        from short_horizon.venue_polymarket.v2_fees import V2FeeInfoCache
+
+        calls = [0]
+
+        def fake_fetcher(_client, _condition_id: str) -> dict[str, FeeInfo]:
+            calls[0] += 1
+            return {}
+
+        clock = [1000.0]
+        cache = V2FeeInfoCache(
+            client=object(),
+            ttl_seconds=60,
+            negative_ttl_seconds=5,
+            fetcher=fake_fetcher,
+            clock=lambda: clock[0],
+        )
+
+        cache.get("c1")
+        cache.get("c1")
+        self.assertEqual(calls[0], 1)
+        clock[0] += 6.0
+        cache.get("c1")
+        self.assertEqual(calls[0], 2)
+
+    def test_swallows_fetcher_exception_and_caches_empty(self) -> None:
+        from short_horizon.venue_polymarket.v2_fees import V2FeeInfoCache
+
+        def fake_fetcher(_client, _condition_id: str) -> dict[str, FeeInfo]:
+            raise RuntimeError("400")
+
+        cache = V2FeeInfoCache(
+            client=object(),
+            ttl_seconds=60,
+            negative_ttl_seconds=5,
+            fetcher=fake_fetcher,
+            clock=lambda: 1000.0,
+        )
+        self.assertEqual(cache.get("c1"), {})
 
 
 if __name__ == "__main__":

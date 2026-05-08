@@ -35,6 +35,7 @@ class LiveEventSource:
         book_normalizer: BookNormalizer | None = None,
         trade_normalizer: TradeNormalizer | None = None,
         clock_ms: callable | None = None,
+        fee_info_fetcher: Any | None = None,
     ):
         discovery_config = MarketDiscoveryConfig()
         shared_discovery = SharedMarketDiscovery(
@@ -42,7 +43,11 @@ class LiveEventSource:
             max_rows=discovery_config.max_rows,
         )
         self.market_refresh = market_refresh or MarketRefreshLoop(discovery_fn=shared_discovery, max_rows=discovery_config.max_rows)
-        self.fee_refresh = fee_refresh or FeeMetadataRefreshLoop(discovery_fn=shared_discovery, max_rows=discovery_config.max_rows)
+        self.fee_refresh = fee_refresh or FeeMetadataRefreshLoop(
+            discovery_fn=shared_discovery,
+            max_rows=discovery_config.max_rows,
+            fee_info_fetcher=fee_info_fetcher,
+        )
         self.websocket = websocket or PolymarketWebsocket()
         self.user_stream = user_stream
         self.spot_feed = spot_feed

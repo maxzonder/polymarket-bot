@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from .config import RiskConfig, ShortHorizonConfig, SpotDislocationConfig
 from .core.clock import SystemClock
@@ -329,7 +329,27 @@ def build_live_source(
     if not callable(credentials):
         raise TypeError("live execution mode requires execution_client.api_credentials() for authenticated user stream")
     user_stream = PolymarketUserStream(auth=credentials())
-    return LiveEventSource(user_stream=user_stream, spot_feed=spot_feed) if spot_feed is not None else LiveEventSource(user_stream=user_stream)
+    fee_info_fetcher = _build_v2_fee_info_fetcher(execution_client)
+    kwargs: dict[str, Any] = {"user_stream": user_stream, "fee_info_fetcher": fee_info_fetcher}
+    if spot_feed is not None:
+        kwargs["spot_feed"] = spot_feed
+    return LiveEventSource(**kwargs)
+
+
+def _build_v2_fee_info_fetcher(execution_client: PolymarketExecutionClient) -> Any | None:
+    accessor = getattr(execution_client, "clob_client", None)
+    if not callable(accessor):
+        return None
+    try:
+        client = accessor()
+    except Exception:
+        return None
+    if client is None:
+        return None
+    from .venue_polymarket.v2_fees import V2FeeInfoCache
+
+    cache = V2FeeInfoCache(client)
+    return cache.get
 
 
 def _build_spot_feed(config: ShortHorizonConfig | None) -> BinanceSpotPriceFeed | None:

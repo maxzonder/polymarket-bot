@@ -4,15 +4,17 @@ import asyncio
 import contextlib
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 
 from ..config import FeesConfig, MarketDiscoveryConfig
-from ..core.events import MarketStateUpdate, MarketStatus
+from ..core.events import FeeInfo, MarketStateUpdate, MarketStatus
 from ..telemetry import get_logger
 from .markets import DurationWindow, MarketMetadata, UniverseFilter, discover_short_horizon_markets
 
 
 DiscoveryFn = Callable[[UniverseFilter | None, DurationWindow | None, int], Awaitable[list[MarketMetadata]]]
 ClockFn = Callable[[], int]
+FeeInfoFetcher = Callable[[str], dict[str, FeeInfo]]
 
 
 class FeeMetadataRefreshLoop:
@@ -31,9 +33,11 @@ class FeeMetadataRefreshLoop:
         retry_backoff_max_seconds: float = 120.0,
         max_consecutive_failures: int = 5,
         clock_ms: ClockFn | None = None,
+        fee_info_fetcher: FeeInfoFetcher | None = None,
     ):
         discovery_config = MarketDiscoveryConfig()
         self.discovery_fn = discovery_fn or discover_short_horizon_markets
+        self.fee_info_fetcher = fee_info_fetcher
         self.universe_filter = universe_filter or UniverseFilter()
         self.duration_window = duration_window or DurationWindow()
         self.fee_metadata_ttl_seconds = int(
@@ -141,9 +145,32 @@ class FeeMetadataRefreshLoop:
         now_ms = self.clock_ms()
         latest = await self.discovery_fn(self.universe_filter, self.duration_window, self.max_rows)
 
+        v2_overrides = 0
+        v2_misses = 0
         queued_events: list[MarketStateUpdate] = []
         for market in latest:
-            event = _to_fee_market_state_update(market, event_time_ms=now_ms, ingest_time_ms=now_ms)
+            override_market = market
+            if self.fee_info_fetcher is not None:
+                try:
+                    per_token = await asyncio.to_thread(self.fee_info_fetcher, market.condition_id)
+                except Exception as exc:
+                    self.logger.warning(
+                        "v2_fee_info_fetch_failed",
+                        condition_id=market.condition_id,
+                        error=str(exc),
+                    )
+                    per_token = {}
+                v2_fee_info = per_token.get(market.token_yes_id) or per_token.get(market.token_no_id)
+                if v2_fee_info is not None:
+                    override_market = replace(
+                        market,
+                        fee_info=v2_fee_info,
+                        fee_rate_bps=float(v2_fee_info.base_fee_bps),
+                    )
+                    v2_overrides += 1
+                else:
+                    v2_misses += 1
+            event = _to_fee_market_state_update(override_market, event_time_ms=now_ms, ingest_time_ms=now_ms)
             queued_events.append(event)
             await self._queue.put(event)
 
@@ -153,6 +180,9 @@ class FeeMetadataRefreshLoop:
             ttl_seconds=self.fee_metadata_ttl_seconds,
             refresh_interval_seconds=self.refresh_interval_seconds,
             emitted=len(queued_events),
+            v2_fee_info_overrides=v2_overrides,
+            v2_fee_info_misses=v2_misses,
+            v2_fee_info_enabled=self.fee_info_fetcher is not None,
         )
         return queued_events
 
@@ -181,7 +211,11 @@ def _to_fee_market_state_update(
         min_order_size=market.min_order_size,
         fee_fetched_at_ms=ingest_time_ms,
         fees_enabled=market.fees_enabled,
-        source="polymarket.gamma.fee_refresh",
+        source=(
+            "polymarket.v2.clob_market_info"
+            if market.fee_info is not None and market.fee_info.source == "v2.clob_market_info"
+            else "polymarket.gamma.fee_refresh"
+        ),
         asset_slug=market.asset_slug,
         is_active=market.is_active,
         metadata_is_fresh=True,

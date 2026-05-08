@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import time
+from typing import Any, Callable
 
 from ..core.events import FeeInfo
 
@@ -44,4 +45,51 @@ def fetch_fee_info(client: Any, condition_id: str) -> dict[str, FeeInfo]:
     return out
 
 
-__all__ = ["fetch_fee_info"]
+class V2FeeInfoCache:
+    """TTL cache over `fetch_fee_info` keyed by condition_id.
+
+    Avoids hammering the V2 CLOB `getClobMarketInfo` endpoint on every
+    market refresh tick. Negative results (empty dict, exception) are
+    cached for `negative_ttl_seconds` so a transient SDK 4xx doesn't
+    cause repeated calls inside a refresh interval.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        ttl_seconds: float = 60.0,
+        negative_ttl_seconds: float = 10.0,
+        fetcher: Callable[[Any, str], dict[str, FeeInfo]] | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._client = client
+        self._ttl_seconds = float(ttl_seconds)
+        self._negative_ttl_seconds = float(negative_ttl_seconds)
+        self._fetcher = fetcher or fetch_fee_info
+        self._clock = clock or time.monotonic
+        self._cache: dict[str, tuple[float, dict[str, FeeInfo]]] = {}
+
+    def get(self, condition_id: str) -> dict[str, FeeInfo]:
+        now = self._clock()
+        cached = self._cache.get(condition_id)
+        if cached is not None:
+            expires_at, value = cached
+            if now < expires_at:
+                return value
+        try:
+            value = self._fetcher(self._client, condition_id)
+        except Exception:
+            value = {}
+        ttl = self._ttl_seconds if value else self._negative_ttl_seconds
+        self._cache[condition_id] = (now + ttl, value)
+        return value
+
+    def invalidate(self, condition_id: str | None = None) -> None:
+        if condition_id is None:
+            self._cache.clear()
+        else:
+            self._cache.pop(condition_id, None)
+
+
+__all__ = ["fetch_fee_info", "V2FeeInfoCache"]
