@@ -27,6 +27,7 @@ import os
 from .venue_polymarket import PolymarketUserStream
 from .venue_polymarket.execution_client import (
     PRIVATE_KEY_ENV_VAR,
+    ExecutionClientConfigError,
     PolymarketExecutionClient,
     PolygonUsdcBridgeResult,
     PolygonUsdcWrapResult,
@@ -86,6 +87,8 @@ class ResolvedRedeemSummary:
     skipped_negative_risk_count: int
     skipped_proxy_wallet_count: int
     error_count: int
+    auto_wrap_status: str = "skipped_no_redeems"
+    auto_wrap_tx_hash: str | None = None
 
 
 class PeriodicResolvedRedeemSweeper:
@@ -847,12 +850,19 @@ def execute_resolved_redeem(
             proxy_wallet=result.proxy_wallet,
             reason=result.reason,
         )
+    auto_wrap_status, auto_wrap_tx_hash = _auto_wrap_after_redeem(
+        client=client,
+        redeemed_count=redeemed_count,
+        logger=logger,
+    )
     summary = ResolvedRedeemSummary(
         total_actions=len(results),
         redeemed_count=redeemed_count,
         skipped_negative_risk_count=skipped_negative_risk_count,
         skipped_proxy_wallet_count=skipped_proxy_wallet_count,
         error_count=error_count,
+        auto_wrap_status=auto_wrap_status,
+        auto_wrap_tx_hash=auto_wrap_tx_hash,
     )
     logger.info(
         "live_redeem_completed",
@@ -861,8 +871,45 @@ def execute_resolved_redeem(
         skipped_negative_risk_count=summary.skipped_negative_risk_count,
         skipped_proxy_wallet_count=summary.skipped_proxy_wallet_count,
         error_count=summary.error_count,
+        auto_wrap_status=summary.auto_wrap_status,
+        auto_wrap_tx_hash=summary.auto_wrap_tx_hash,
     )
     return summary
+
+
+def _auto_wrap_after_redeem(
+    *,
+    client: PolymarketExecutionClient,
+    redeemed_count: int,
+    logger: Any,
+) -> tuple[str, str | None]:
+    """Wrap any USDC.e returned by redeem back into pUSD so collateral is reusable.
+
+    Polymarket V2 CTF settles redeems in USDC.e (the underlying), but live trading
+    signs orders against pUSD. Without this auto-wrap, every redeem strands collateral
+    in USDC.e until the operator manually re-wraps.
+    """
+    if redeemed_count <= 0:
+        return "skipped_no_redeems", None
+    try:
+        result = client.wrap_polygon_usdc_to_pusd()
+    except ExecutionClientConfigError as exc:
+        message = str(exc).lower()
+        if "balance is zero" in message:
+            logger.info("auto_wrap_after_redeem_skipped", reason="usdce_balance_zero")
+            return "skipped_balance_zero", None
+        logger.warning("auto_wrap_after_redeem_failed", error=str(exc))
+        return "failed", None
+    except Exception as exc:
+        logger.warning("auto_wrap_after_redeem_failed", error=str(exc))
+        return "failed", None
+    logger.info(
+        "auto_wrap_after_redeem_completed",
+        source_amount_base_unit=result.source_amount_base_unit,
+        approval_tx_hash=result.approval_tx_hash,
+        wrap_tx_hash=result.wrap_tx_hash,
+    )
+    return "wrapped", result.wrap_tx_hash
 
 
 def _client_is_started(client: object) -> bool:

@@ -81,6 +81,8 @@ class _FakeLiveRunnerClient:
         self.api_credentials_calls = 0
         self.order_lookup_by_id = {}
         self.open_orders_by_market = {}
+        self.wrap_calls = 0
+        self.wrap_raises = None
 
     def startup(self) -> None:
         self.started = True
@@ -140,6 +142,20 @@ class _FakeLiveRunnerClient:
 
     def list_open_orders(self, market_id=None):
         return list(self.open_orders_by_market.get(market_id, []))
+
+    def wrap_polygon_usdc_to_pusd(self, *, amount_base_unit=None):
+        self.wrap_calls += 1
+        if self.wrap_raises is not None:
+            raise self.wrap_raises
+        from short_horizon.venue_polymarket.execution_client import PolygonUsdcWrapResult
+        return PolygonUsdcWrapResult(
+            source_amount_base_unit=amount_base_unit or 10_000_000,
+            usdce_token_address="0xusdce",
+            onramp_address="0xonramp",
+            recipient_address="0xrecipient",
+            approval_tx_hash=None,
+            wrap_tx_hash="0xwraptx",
+        )
 
 
 class ReplayCaptureWriterTest(unittest.TestCase):
@@ -3342,9 +3358,50 @@ class ReplayRunnerTest(unittest.TestCase):
                 skipped_negative_risk_count=1,
                 skipped_proxy_wallet_count=1,
                 error_count=0,
+                auto_wrap_status="wrapped",
+                auto_wrap_tx_hash="0xwraptx",
             ),
         )
         self.assertEqual(client.redeem_calls, 1)
+        self.assertEqual(client.wrap_calls, 1)
+
+    def test_execute_resolved_redeem_skips_wrap_when_no_redeems(self) -> None:
+        from short_horizon.venue_polymarket.execution_client import RedeemResult
+
+        client = _FakeLiveRunnerClient()
+        client.redeem_resolved_positions = lambda: [
+            RedeemResult(condition_id="0xc1", status="skipped_proxy_wallet", position_count=1, proxy_wallet="0xpx"),
+        ]
+
+        summary = execute_resolved_redeem("redeem_test_002", execution_client=client)
+
+        self.assertEqual(summary.redeemed_count, 0)
+        self.assertEqual(summary.auto_wrap_status, "skipped_no_redeems")
+        self.assertIsNone(summary.auto_wrap_tx_hash)
+        self.assertEqual(client.wrap_calls, 0)
+
+    def test_execute_resolved_redeem_skips_wrap_when_balance_zero(self) -> None:
+        from short_horizon.venue_polymarket.execution_client import ExecutionClientConfigError
+
+        client = _FakeLiveRunnerClient()
+        client.wrap_raises = ExecutionClientConfigError("Polygon USDC.e balance is zero, nothing to wrap")
+
+        summary = execute_resolved_redeem("redeem_test_003", execution_client=client)
+
+        self.assertEqual(summary.redeemed_count, 1)
+        self.assertEqual(summary.auto_wrap_status, "skipped_balance_zero")
+        self.assertIsNone(summary.auto_wrap_tx_hash)
+        self.assertEqual(client.wrap_calls, 1)
+
+    def test_execute_resolved_redeem_marks_wrap_failure_but_returns_summary(self) -> None:
+        client = _FakeLiveRunnerClient()
+        client.wrap_raises = RuntimeError("rpc connection refused")
+
+        summary = execute_resolved_redeem("redeem_test_004", execution_client=client)
+
+        self.assertEqual(summary.redeemed_count, 1)
+        self.assertEqual(summary.auto_wrap_status, "failed")
+        self.assertIsNone(summary.auto_wrap_tx_hash)
 
     def test_live_runner_cli_validation_for_polygon_usdc_bridge(self) -> None:
         parser = build_parser()
