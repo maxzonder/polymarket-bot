@@ -716,10 +716,37 @@ class SQLiteRuntimeStore:
 
     def _initialize_schema(self) -> None:
         schema_path = Path(__file__).resolve().parents[2] / "docs" / "phase0" / "storage_schema.sql"
+        self._migrate_runs_schema()
         self._migrate_orders_schema(precreate=True)
         self.conn.executescript(schema_path.read_text())
         self._migrate_orders_schema(precreate=False)
         self._migrate_markets_schema()
+        self.conn.commit()
+
+    def _migrate_runs_schema(self) -> None:
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='runs'"
+        ).fetchone()
+        if row is None or "'dry_run'" in row[0]:
+            return  # table missing (will be created) or already migrated
+        # Recreate runs with expanded mode CHECK; disable FK enforcement during rename
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS _runs_new (
+                run_id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                mode TEXT NOT NULL CHECK (mode IN ('replay', 'live', 'dry_run', 'synthetic')),
+                strategy_id TEXT NOT NULL,
+                git_sha TEXT,
+                config_hash TEXT NOT NULL,
+                notes TEXT
+            );
+            INSERT OR IGNORE INTO _runs_new SELECT * FROM runs;
+            DROP TABLE runs;
+            ALTER TABLE _runs_new RENAME TO runs;
+        """)
+        self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.commit()
 
     def _migrate_markets_schema(self) -> None:

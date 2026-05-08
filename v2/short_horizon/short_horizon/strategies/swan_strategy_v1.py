@@ -253,7 +253,11 @@ class SwanStrategyV1:
         self._positions[event.token_id] = self._positions.get(event.token_id, 0.0) + event.fill_size
 
     def _on_rejected(self, event: OrderRejected) -> None:
-        self._pending_place.pop(event.order_id, None)
-        bid = self._resting_bids.pop(event.order_id, None)
+        # OrderRejected has client_order_id (=intent_id), not order_id
+        key = event.client_order_id
+        if not key:
+            return
+        self._pending_place.pop(key, None)
+        bid = self._resting_bids.pop(key, None)
         if bid:
-            self._bids_by_market.get(bid.market_id, set()).discard(event.order_id)
+            self._bids_by_market.get(bid.market_id, set()).discard(key)

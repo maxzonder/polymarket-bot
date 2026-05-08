@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS runs (
     run_id TEXT PRIMARY KEY,
     started_at TEXT NOT NULL,
     finished_at TEXT,
-    mode TEXT NOT NULL CHECK (mode IN ('replay', 'live')),
+    mode TEXT NOT NULL CHECK (mode IN ('replay', 'live', 'dry_run', 'synthetic')),
     strategy_id TEXT NOT NULL,
     git_sha TEXT,
     config_hash TEXT NOT NULL,

@@ -218,6 +218,9 @@ async def run_swan_live(
         async def close(self) -> None: pass
         async def subscribe(self, token_ids) -> None: pass
         async def unsubscribe(self, token_ids) -> None: pass
+        async def recv(self) -> str:
+            await asyncio.sleep(3600)  # never yields messages
+            return ""
 
     if resolved_mode is ExecutionMode.LIVE:
         if execution_client is None:
@@ -234,9 +237,16 @@ async def run_swan_live(
         universe_filter=universe_filter,
         duration_window=duration_window,
     )
-    source.market_refresh = MarketRefreshLoop(discovery_fn=shared_discovery, max_rows=50_000)
+    source.market_refresh = MarketRefreshLoop(
+        discovery_fn=shared_discovery,
+        universe_filter=universe_filter,
+        duration_window=duration_window,
+        max_rows=50_000,
+    )
     source.fee_refresh = FeeMetadataRefreshLoop(
         discovery_fn=shared_discovery,
+        universe_filter=universe_filter,
+        duration_window=duration_window,
         max_rows=50_000,
         fee_info_fetcher=None,
     )
@@ -249,9 +259,9 @@ async def run_swan_live(
         db_path=str(_DB_DIR / "swan_screener_log.sqlite3"),
         market_scorer=market_scorer,
     )
-    # Per-level stake: the screener resolves this from market_score_tiers; use
-    # a safe default here and let the screener's suggested_entry_levels guide levels.
-    _stake_per_level = BIG_SWAN_MODE.stake_usdc
+    # Per-level stake: venue minimum is 1.0 USDC notional; BIG_SWAN_MODE.stake_usdc
+    # (0.05) is below that threshold so we use a floor of 5.0 USDC per level.
+    _stake_per_level = max(BIG_SWAN_MODE.stake_usdc, 5.0)
 
     # ── Redeem sweeper ────────────────────────────────────────────────────────
     redeem_sweeper: PeriodicResolvedRedeemSweeper | None = None
