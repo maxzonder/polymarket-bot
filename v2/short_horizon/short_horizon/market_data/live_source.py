@@ -63,6 +63,10 @@ class LiveEventSource:
         self._started = False
         self._terminal_error: BaseException | None = None
 
+    def inject(self, event: NormalizedEvent) -> None:
+        """Inject an event directly into the queue (e.g. TimerEvent from an external task)."""
+        self._queue.put_nowait(event)
+
     @property
     def events(self) -> AsyncIterator[NormalizedEvent]:
         return self
