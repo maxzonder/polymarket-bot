@@ -60,6 +60,14 @@ LEVEL_PRESETS = {
     "black_swan_low_tail": LOW_TAIL_LEVELS,
     "crypto_wide_low_tail": LOW_TAIL_LEVELS + WIDE_LEVELS,
 }
+UNIVERSE_MODES = (
+    "crypto_15m",
+    "crypto_multi_horizon",
+    "weather_temperature",
+    "sports_fast",
+    "black_swan_low_tail",
+    "mp_full_depth",
+)
 DEFAULT_NOTIONALS = (10.0, 50.0, 100.0)
 DEFAULT_MIN_SHARES = 5.0
 DEFAULT_DEPTH_LEVELS = 5
@@ -96,6 +104,12 @@ class MarketToken:
     category: Optional[str] = None
     event_slug: Optional[str] = None
     asset_slug: Optional[str] = None
+    universe_mode: Optional[str] = None
+    horizon_bucket: Optional[str] = None
+    event_subtype: Optional[str] = None
+    parent_event_slug: Optional[str] = None
+    rule_parse_status: Optional[str] = None
+    payoff_type: Optional[str] = None
 
 
 @dataclass
@@ -187,6 +201,12 @@ class CsvSink:
         "category",
         "event_slug",
         "asset_slug",
+        "universe_mode",
+        "horizon_bucket",
+        "event_subtype",
+        "parent_event_slug",
+        "rule_parse_status",
+        "payoff_type",
         "touch_level",
         "touch_time_iso",
         "duration_seconds",
@@ -310,8 +330,8 @@ class SqliteSink:
             """
             INSERT OR REPLACE INTO collection_runs(
                 run_id, schema_version, started_at, level_preset, levels_json, depth_levels, output_csv,
-                book_snapshot_interval_ms, stale_book_ms, wide_spread_threshold
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                universe_mode, book_snapshot_interval_ms, stale_book_ms, wide_spread_threshold
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -321,6 +341,7 @@ class SqliteSink:
                 json.dumps(list(args.levels)),
                 int(args.depth_levels),
                 str(args.output_csv),
+                str(getattr(args, "universe_mode", "crypto_15m")),
                 int(getattr(args, "book_snapshot_interval_ms", 0) or 0),
                 int(getattr(args, "stale_book_ms", DEFAULT_STALE_BOOK_MS)),
                 float(getattr(args, "wide_spread_threshold", DEFAULT_WIDE_SPREAD)),
@@ -339,6 +360,7 @@ class SqliteSink:
                 levels_json TEXT NOT NULL,
                 depth_levels INTEGER NOT NULL,
                 output_csv TEXT,
+                universe_mode TEXT,
                 book_snapshot_interval_ms INTEGER,
                 stale_book_ms INTEGER,
                 wide_spread_threshold REAL
@@ -356,6 +378,12 @@ class SqliteSink:
                 category TEXT,
                 event_slug TEXT,
                 asset_slug TEXT,
+                universe_mode TEXT,
+                horizon_bucket TEXT,
+                event_subtype TEXT,
+                parent_event_slug TEXT,
+                rule_parse_status TEXT,
+                payoff_type TEXT,
                 touch_level REAL,
                 touch_time_iso TEXT,
                 duration_seconds INTEGER,
@@ -483,7 +511,8 @@ class SqliteSink:
             """
             INSERT OR REPLACE INTO touch_events(
                 probe_id, run_id, schema_version, recorded_at, market_id, condition_id, token_id, outcome,
-                question, category, event_slug, asset_slug, touch_level, touch_time_iso, duration_seconds, start_time_iso,
+                question, category, event_slug, asset_slug, universe_mode, horizon_bucket, event_subtype,
+                parent_event_slug, rule_parse_status, payoff_type, touch_level, touch_time_iso, duration_seconds, start_time_iso,
                 end_time_iso, fees_enabled, fee_rate_bps, tick_size, best_bid_at_touch, best_ask_at_touch,
                 spread_at_touch, mid_price_at_touch, microprice_at_touch, imbalance_top1, imbalance_top3,
                 imbalance_top5, bid_levels_json, ask_levels_json, ask_size_at_touch_level, fit_5_shares,
@@ -502,7 +531,8 @@ class SqliteSink:
                 spot_return_1m, spot_return_3m, spot_return_5m, survived_ms, end_reason
             ) VALUES (
                 :probe_id, :run_id, :schema_version, :recorded_at, :market_id, :condition_id, :token_id, :outcome,
-                :question, :category, :event_slug, :asset_slug, :touch_level, :touch_time_iso, :duration_seconds, :start_time_iso,
+                :question, :category, :event_slug, :asset_slug, :universe_mode, :horizon_bucket, :event_subtype,
+                :parent_event_slug, :rule_parse_status, :payoff_type, :touch_level, :touch_time_iso, :duration_seconds, :start_time_iso,
                 :end_time_iso, :fees_enabled, :fee_rate_bps, :tick_size, :best_bid_at_touch, :best_ask_at_touch,
                 :spread_at_touch, :mid_price_at_touch, :microprice_at_touch, :imbalance_top1, :imbalance_top3,
                 :imbalance_top5, :bid_levels_json, :ask_levels_json, :ask_size_at_touch_level, :fit_5_shares,
@@ -795,6 +825,14 @@ class LiveDepthCollector:
                             category=_extract_category(raw, event0),
                             event_slug=str((event0 or {}).get("slug") or raw.get("slug") or "") or None,
                             asset_slug=_extract_asset_slug(raw, event0, question),
+                            universe_mode=self.args.universe_mode,
+                            horizon_bucket=_horizon_bucket(
+                                implied_duration_seconds if implied_duration_seconds is not None else duration_seconds
+                            ),
+                            event_subtype=_extract_event_subtype(raw, event0, question),
+                            parent_event_slug=_extract_parent_event_slug(raw, event0),
+                            rule_parse_status=_rule_parse_status(raw, event0, question),
+                            payoff_type=_extract_payoff_type(raw, event0, question),
                         )
                     )
                     stats["eligible_tokens"] += 1
@@ -1407,6 +1445,12 @@ def build_touch_row(probe: SurvivalProbe, book: BookState, *, run_id: str) -> di
         "category": probe.token.category,
         "event_slug": probe.token.event_slug,
         "asset_slug": probe.token.asset_slug,
+        "universe_mode": probe.token.universe_mode,
+        "horizon_bucket": probe.token.horizon_bucket,
+        "event_subtype": probe.token.event_subtype,
+        "parent_event_slug": probe.token.parent_event_slug,
+        "rule_parse_status": probe.token.rule_parse_status,
+        "payoff_type": probe.token.payoff_type,
         "touch_level": probe.level,
         "touch_time_iso": iso_from_ms(probe.started_at_ms),
         "duration_seconds": probe.token.duration_seconds,
@@ -1538,6 +1582,83 @@ def build_book_snapshot_row(
         "book_stale_flag": int(stale),
         "zero_size_level_flag": int(zero_size),
     }
+
+
+def _horizon_bucket(duration_seconds: Optional[int]) -> Optional[str]:
+    if duration_seconds is None:
+        return None
+    if duration_seconds <= 18 * 60:
+        return "15m-ish"
+    if duration_seconds <= 75 * 60:
+        return "1h-ish"
+    if duration_seconds <= 6 * 3600:
+        return "<=6h"
+    if duration_seconds <= 7 * 24 * 3600:
+        return "1-7d"
+    if duration_seconds <= 30 * 24 * 3600:
+        return "8-30d"
+    return ">30d"
+
+
+def _extract_parent_event_slug(raw: dict[str, Any], event0: Optional[dict[str, Any]]) -> Optional[str]:
+    for value in (
+        raw.get("parentEventSlug"),
+        raw.get("parent_event_slug"),
+        (event0 or {}).get("parentEventSlug"),
+        (event0 or {}).get("parent_event_slug"),
+        (event0 or {}).get("slug"),
+    ):
+        if value:
+            return str(value)
+    return None
+
+
+def _extract_event_subtype(raw: dict[str, Any], event0: Optional[dict[str, Any]], question: str) -> Optional[str]:
+    explicit = raw.get("eventSubtype") or raw.get("event_subtype") or (event0 or {}).get("eventSubtype")
+    if explicit:
+        return str(explicit).lower()
+    text = " ".join(str(x or "") for x in (raw.get("slug"), (event0 or {}).get("slug"), question)).lower()
+    subtype_patterns = (
+        ("spread", ("spread", " ats ", "-ats-", "against the spread")),
+        ("total", ("total", "over/under", " o/u ", "-ou-")),
+        ("winning_margin", ("winning margin", "margin of victory", "winning-margin")),
+        ("player_prop", ("player", "points", "rebounds", "assists", "touchdowns")),
+        ("temperature_exact", ("temperature", "highest temperature", "exact temperature")),
+        ("temperature_range", ("between", "temperature range")),
+    )
+    for subtype, needles in subtype_patterns:
+        if any(needle in text for needle in needles):
+            return subtype
+    return None
+
+
+def _extract_payoff_type(raw: dict[str, Any], event0: Optional[dict[str, Any]], question: str) -> Optional[str]:
+    explicit = raw.get("payoffType") or raw.get("payoff_type") or (event0 or {}).get("payoffType")
+    if explicit:
+        return str(explicit).lower()
+    text = " ".join(str(x or "") for x in (question, raw.get("slug"), (event0 or {}).get("slug"))).lower()
+    if " or higher" in text or " above " in text or " greater than" in text:
+        return "above"
+    if " or lower" in text or " below " in text or " less than" in text:
+        return "below"
+    if "between" in text or "range" in text:
+        return "range"
+    if "spread" in text or "against the spread" in text or "-ats-" in text:
+        return "spread"
+    if "total" in text or "over/under" in text:
+        return "total"
+    if "up or down" in text:
+        return "above_below_pair"
+    if "winner" in text or "win the" in text:
+        return "winner"
+    return "unknown"
+
+
+def _rule_parse_status(raw: dict[str, Any], event0: Optional[dict[str, Any]], question: str) -> str:
+    payoff_type = _extract_payoff_type(raw, event0, question)
+    if payoff_type and payoff_type != "unknown":
+        return "parsed"
+    return "unknown"
 
 
 def _extract_asset_slug(raw: dict[str, Any], event0: Optional[dict[str, Any]], question: str) -> Optional[str]:
@@ -1695,6 +1816,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-sqlite", default=str(default_output_sqlite_path()), help="Structured sidecar output path; pass empty string to disable")
     parser.add_argument("--run-id", default=None, help="Collection run id for CSV/SQLite rows")
     parser.add_argument("--level-preset", choices=sorted(LEVEL_PRESETS), default="crypto_15m_touch")
+    parser.add_argument("--universe-mode", choices=UNIVERSE_MODES, default="crypto_15m")
     parser.add_argument("--levels", nargs="*", type=float, default=None, help="Explicit levels override --level-preset")
     parser.add_argument("--notionals", nargs="*", type=float, default=list(DEFAULT_NOTIONALS))
     parser.add_argument("--min-shares", type=float, default=DEFAULT_MIN_SHARES)

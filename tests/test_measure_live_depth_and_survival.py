@@ -23,6 +23,9 @@ from measure_live_depth_and_survival import (  # noqa: E402
     SurvivalProbe,
     PreTouchFeatures,
     SpotObservation,
+    _extract_event_subtype,
+    _extract_payoff_type,
+    _horizon_bucket,
     build_book_snapshot_row,
     build_touch_row,
     compute_book_metrics,
@@ -125,7 +128,7 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             conn = sqlite3.connect(path)
             try:
                 run = conn.execute(
-                    "SELECT book_snapshot_interval_ms, stale_book_ms, wide_spread_threshold FROM collection_runs WHERE run_id='run1'"
+                    "SELECT book_snapshot_interval_ms, stale_book_ms, wide_spread_threshold, universe_mode FROM collection_runs WHERE run_id='run1'"
                 ).fetchone()
                 snapshot = conn.execute(
                     "SELECT update_kind, best_bid, best_ask, missing_depth_flag FROM book_snapshots WHERE token_id='tok1'"
@@ -135,6 +138,7 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             self.assertEqual(run[0], 1000)
             self.assertEqual(run[1], 5000)
             self.assertAlmostEqual(run[2], 0.10)
+            self.assertEqual(run[3], "crypto_15m")
             self.assertEqual(snapshot[0], "periodic")
             self.assertAlmostEqual(snapshot[1], 0.49)
             self.assertAlmostEqual(snapshot[2], 0.51)
@@ -181,6 +185,24 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             self.assertAlmostEqual(row[2], 101.0)
             self.assertEqual(row[3], 10)
 
+    def test_market_metadata_helpers(self) -> None:
+        self.assertEqual(_horizon_bucket(900), "15m-ish")
+        self.assertEqual(_horizon_bucket(3600), "1h-ish")
+        self.assertEqual(_horizon_bucket(3 * 24 * 3600), "1-7d")
+        self.assertEqual(
+            _extract_event_subtype({"slug": "duke-unc-total-points"}, None, "Will Duke vs UNC total points be over 140?"),
+            "total",
+        )
+        self.assertEqual(
+            _extract_event_subtype({"slug": "lakers-celtics-spread-ats"}, None, "Lakers against the spread"),
+            "spread",
+        )
+        self.assertEqual(
+            _extract_payoff_type({}, None, "Will highest temperature in London be between 17-18C?"),
+            "range",
+        )
+        self.assertEqual(_extract_payoff_type({}, None, "Bitcoin Up or Down"), "above_below_pair")
+
     def test_touch_row_and_sqlite_sink_include_schema_v2_fields(self) -> None:
         token = MarketToken(
             market_id="m1",
@@ -197,6 +219,12 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             category="crypto",
             event_slug="btc-up-down",
             asset_slug="btc",
+            universe_mode="crypto_15m",
+            horizon_bucket="15m-ish",
+            event_subtype=None,
+            parent_event_slug="btc-up-down-parent",
+            rule_parse_status="parsed",
+            payoff_type="above_below_pair",
             fees_enabled=True,
             fee_rate_bps=100.0,
             tick_size=0.01,
@@ -265,6 +293,9 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
         self.assertEqual(row["held_at_or_above_level"], 0)
         self.assertEqual(row["immediate_reversal_flag"], 1)
         self.assertEqual(row["asset_slug"], "btc")
+        self.assertEqual(row["universe_mode"], "crypto_15m")
+        self.assertEqual(row["horizon_bucket"], "15m-ish")
+        self.assertEqual(row["payoff_type"], "above_below_pair")
         self.assertAlmostEqual(row["spot_price_at_touch"], 101.0)
         self.assertAlmostEqual(row["spot_return_30s"], 0.01)
 
@@ -288,7 +319,7 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             conn = sqlite3.connect(path)
             try:
                 stored = conn.execute(
-                    "SELECT schema_version, run_id, bid_levels_json, spread_at_touch, best_ask_delta_1s, immediate_reversal_flag, spot_price_at_touch FROM touch_events WHERE probe_id='p1'"
+                    "SELECT schema_version, run_id, bid_levels_json, spread_at_touch, best_ask_delta_1s, immediate_reversal_flag, spot_price_at_touch, universe_mode, payoff_type FROM touch_events WHERE probe_id='p1'"
                 ).fetchone()
                 snapshot = conn.execute(
                     "SELECT run_id, update_kind, bid_levels_json, ask_levels_json FROM book_snapshots WHERE probe_id='p1'"
@@ -302,6 +333,8 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             self.assertAlmostEqual(stored[4], 0.01)
             self.assertEqual(stored[5], 1)
             self.assertAlmostEqual(stored[6], 101.0)
+            self.assertEqual(stored[7], "crypto_15m")
+            self.assertEqual(stored[8], "above_below_pair")
             self.assertEqual(snapshot[0], "run1")
             self.assertEqual(snapshot[1], "touch")
             self.assertIn("0.54", snapshot[2])
