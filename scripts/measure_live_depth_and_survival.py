@@ -703,20 +703,29 @@ class LiveDepthCollector:
         allowed_asset_slugs = _allowed_asset_slugs(getattr(self.args, "asset_slug", None))
 
         while True:
-            resp = session.get(
-                f"{GAMMA_BASE}/markets",
-                params={
-                    "limit": 100,
-                    "offset": offset,
-                    "active": "true",
-                    "closed": "false",
-                    "archived": "false",
-                    "order": self.args.discovery_order,
-                    "ascending": str(self.args.discovery_ascending).lower(),
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
+            for _attempt in range(8):
+                resp = session.get(
+                    f"{GAMMA_BASE}/markets",
+                    params={
+                        "limit": 100,
+                        "offset": offset,
+                        "active": "true",
+                        "closed": "false",
+                        "archived": "false",
+                        "order": self.args.discovery_order,
+                        "ascending": str(self.args.discovery_ascending).lower(),
+                    },
+                    timeout=30,
+                )
+                if resp.status_code == 429:
+                    wait = min(10 * (2 ** _attempt), 300)
+                    logging.warning("discovery 429 at offset=%d, retry in %ds", offset, wait)
+                    time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                break
+            else:
+                raise RuntimeError(f"discovery failed after retries at offset={offset}")
             payload = resp.json()
             if not isinstance(payload, list) or not payload:
                 break
