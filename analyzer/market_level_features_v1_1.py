@@ -103,7 +103,10 @@ CREATE TABLE IF NOT EXISTS feature_mart_v1_1 (
     group_token_count       INTEGER,         -- number of outcomes in the group
     group_max_volume         REAL,            -- max market volume in neg-risk group
     group_underdog_count    INTEGER,         -- outcomes in group with swan event
-    group_underdog_winner   INTEGER          -- 1 if any underdog token in group won
+    group_underdog_winner   INTEGER,         -- 1 if any underdog token in group won
+
+    -- ── Black Swan label (strict subset of was_swan) ─────────────────────────
+    was_black_swan          INTEGER NOT NULL DEFAULT 0  -- 1 if best swan token has black_swan=1
 )
 """
 
@@ -151,6 +154,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
         ("group_max_volume",      "REAL"),
         ("group_underdog_count", "INTEGER"),
         ("group_underdog_winner","INTEGER"),
+        ("was_black_swan",       "INTEGER NOT NULL DEFAULT 0"),
     ]:
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE feature_mart_v1_1 ADD COLUMN {col} {col_type}")
@@ -178,6 +182,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                 s.buy_ts_first,
                 s.buy_ts_last,
                 s.is_winner,
+                s.black_swan,
                 t.token_order AS best_swan_token_order,
                 ROW_NUMBER() OVER (
                     PARTITION BY t.market_id
@@ -230,6 +235,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                 WHEN bs.best_swan_token_order = 1 THEN 0
                 ELSE NULL
             END                      AS best_swan_is_yes_token,
+            bs.black_swan            AS best_swan_black_swan,
 
             -- Neg-risk group features (NULL for binary markets)
             m.neg_risk_market_id     AS neg_risk_group_id,
@@ -274,14 +280,16 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             best_buy_ts_first    = row[15]
             swan_is_winner         = row[16]
             best_swan_is_yes_token = row[17]
+            best_swan_black_swan   = row[18]
 
-            neg_risk_group_id    = row[18]
-            group_token_count    = row[19]
-            group_max_volume      = row[20]
-            group_underdog_count = row[21]
-            group_underdog_winner = row[22]
+            neg_risk_group_id    = row[19]
+            group_token_count    = row[20]
+            group_max_volume      = row[21]
+            group_underdog_count = row[22]
+            group_underdog_winner = row[23]
 
             was_swan = 1 if best_buy_min_price is not None else 0
+            was_black_swan = 1 if (was_swan and best_swan_black_swan == 1) else 0
 
             log_volume    = math.log1p(volume)
             log_liquidity = math.log1p(liquidity)
@@ -319,7 +327,8 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     best_floor_duration_s, best_time_to_res_hours,
                     swan_is_winner, best_swan_is_yes_token, label_20x, label_tail,
                     neg_risk_group_id, group_token_count, group_max_volume,
-                    group_underdog_count, group_underdog_winner
+                    group_underdog_count, group_underdog_winner,
+                    was_black_swan
                 ) VALUES (
                     ?, ?, ?,
                     ?, ?, ?, ?,
@@ -329,7 +338,8 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     ?, ?,
                     ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?,
+                    ?
                 ) ON CONFLICT(market_id) DO UPDATE SET
                     volume_usdc              = excluded.volume_usdc,
                     log_volume               = excluded.log_volume,
@@ -355,7 +365,8 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                     group_token_count        = excluded.group_token_count,
                     group_max_volume          = excluded.group_max_volume,
                     group_underdog_count     = excluded.group_underdog_count,
-                    group_underdog_winner    = excluded.group_underdog_winner
+                    group_underdog_winner    = excluded.group_underdog_winner,
+                    was_black_swan           = excluded.was_black_swan
             """, (
                 market_id, close_date, category,
                 volume, log_volume, liquidity, log_liquidity,
@@ -376,6 +387,7 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
                 float(group_max_volume) if group_max_volume is not None else None,
                 int(group_underdog_count) if group_underdog_count is not None else None,
                 int(group_underdog_winner) if group_underdog_winner is not None else None,
+                was_black_swan,
             ))
             inserted += 1
         except Exception as e:
@@ -394,14 +406,15 @@ def build(conn: sqlite3.Connection, recompute: bool = False) -> None:
             COUNT(*) AS total,
             SUM(was_swan) AS swans,
             SUM(label_20x) AS good_swans,
-            SUM(CASE WHEN was_swan=1 AND swan_is_winner=1 THEN 1 ELSE 0 END) AS winner_swans
+            SUM(CASE WHEN was_swan=1 AND swan_is_winner=1 THEN 1 ELSE 0 END) AS winner_swans,
+            SUM(was_black_swan) AS black_swans
         FROM feature_mart_v1_1
     """).fetchone()
 
     logger.info(
         f"Built feature_mart_v1_1 in {elapsed}s | "
         f"total={totals[0]} swans={totals[1]} "
-        f"20x+={totals[2]} winners={totals[3]}"
+        f"20x+={totals[2]} winners={totals[3]} black_swans={totals[4]}"
     )
 
 
