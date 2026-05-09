@@ -10,7 +10,7 @@
   "market_keyword": ["temperature", "highest temperature", "low temperature"],
   "payoff_type": ["exact", "range", "above", "below"],
   "book_snapshot_interval_ms": 5000,
-  "timeout_seconds": "2h",
+  "timeout_seconds": "168h",
   "report_min_rows": 3,
   "signal_min_rows": 3,
   "signal_max_spread": 0.08,
