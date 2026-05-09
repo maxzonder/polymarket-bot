@@ -718,7 +718,7 @@ class LiveDepthCollector:
                     timeout=30,
                 )
                 if resp.status_code == 429:
-                    wait = min(10 * (2 ** _attempt), 300)
+                    wait = min(5 * (2 ** _attempt), 60)
                     logging.warning("discovery 429 at offset=%d, retry in %ds", offset, wait)
                     time.sleep(wait)
                     continue
