@@ -356,8 +356,29 @@ def load_all_markets(
     close_buffer = int(mc.max_hours_to_close * 3600)
     min_listing_hours = getattr(mc, "min_total_duration_hours", 0.0)
 
-    rows = conn.execute(
-        """
+    # When black_swan_only=True, pre-compute the qualifying market_ids via a
+    # simple index scan (idx_swans_v2_token + idx_tokens_market) so the main
+    # query can use an INNER JOIN instead of a correlated EXISTS subquery.
+    # A correlated EXISTS over 500k+ markets is O(N) per row and takes hours;
+    # this approach is O(black_swan_markets) and completes in <1s.
+    bs_market_ids: set[str] | None = None
+    if black_swan_only:
+        bs_rows = conn.execute(
+            """
+            SELECT DISTINCT t.market_id
+            FROM tokens t
+            JOIN swans_v2 s ON s.token_id = t.token_id
+            WHERE s.black_swan = 1
+            """
+        ).fetchall()
+        bs_market_ids = {str(r[0]) for r in bs_rows}
+
+    if black_swan_only and not bs_market_ids:
+        return []
+
+    if bs_market_ids is not None:
+        placeholders = ",".join("?" * len(bs_market_ids))
+        sql = f"""
         SELECT
             m.id           AS market_id,
             m.question,
@@ -377,29 +398,59 @@ def load_all_markets(
             t.is_winner
         FROM markets m
         JOIN tokens t ON m.id = t.market_id
-        WHERE m.end_date  >= :start
-          AND m.end_date  <= :end_buf
-          AND m.volume    >= :vol_min
-          AND m.volume    <= :vol_max
-          AND (:min_listing_hours = 0 OR COALESCE(m.listing_duration_hours, 0) >= :min_listing_hours)
-          AND (
-              :black_swan_only = 0
-              OR EXISTS (
-                  SELECT 1 FROM tokens t2
-                  JOIN swans_v2 s ON s.token_id = t2.token_id
-                  WHERE t2.market_id = m.id AND s.black_swan = 1
-              )
-          )
+        WHERE m.id        IN ({placeholders})
+          AND m.end_date  >= ?
+          AND m.end_date  <= ?
+          AND m.volume    >= ?
+          AND m.volume    <= ?
+          AND (? = 0 OR COALESCE(m.listing_duration_hours, 0) >= ?)
         ORDER BY m.end_date ASC
-        """,
-        {
-            "start":            start_ts,
-            "end_buf":          end_ts + close_buffer,
-            "vol_min":          config.min_volume_usdc,
-            "vol_max":          config.max_volume_usdc,
-            "black_swan_only":  1 if black_swan_only else 0,
-            "min_listing_hours": min_listing_hours,
-        },
-    ).fetchall()
+        """
+        params = list(bs_market_ids) + [
+            start_ts,
+            end_ts + close_buffer,
+            config.min_volume_usdc,
+            config.max_volume_usdc,
+            min_listing_hours,
+            min_listing_hours,
+        ]
+        rows = conn.execute(sql, params).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT
+                m.id           AS market_id,
+                m.question,
+                m.category,
+                m.slug,
+                m.volume,
+                m.end_date,
+                m.start_date,
+                m.duration_hours,
+                m.listing_duration_hours,
+                m.neg_risk,
+                m.neg_risk_market_id,
+                COALESCE(m.comment_count, 0) AS comment_count,
+                t.token_id,
+                t.token_order,
+                t.outcome_name,
+                t.is_winner
+            FROM markets m
+            JOIN tokens t ON m.id = t.market_id
+            WHERE m.end_date  >= :start
+              AND m.end_date  <= :end_buf
+              AND m.volume    >= :vol_min
+              AND m.volume    <= :vol_max
+              AND (:min_listing_hours = 0 OR COALESCE(m.listing_duration_hours, 0) >= :min_listing_hours)
+            ORDER BY m.end_date ASC
+            """,
+            {
+                "start":             start_ts,
+                "end_buf":           end_ts + close_buffer,
+                "vol_min":           config.min_volume_usdc,
+                "vol_max":           config.max_volume_usdc,
+                "min_listing_hours": min_listing_hours,
+            },
+        ).fetchall()
 
     return [dict(r) for r in rows]
