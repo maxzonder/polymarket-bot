@@ -72,6 +72,23 @@ _DEFAULT_DB = _DB_DIR / "swan_v2_live.sqlite3"
 
 _SCREENER_INTERVAL_SECONDS = 300   # 5 min
 _CLEANUP_INTERVAL_SECONDS = 1800   # 30 min
+_DEFAULT_STAKE_PER_LEVEL = 5.0     # floor above 1.0 USDC venue minimum
+
+
+class _ScreenerConfigOverride:
+    """Proxies BotConfig but replaces mode_config.max_hours_to_close."""
+
+    def __init__(self, base: BotConfig, *, max_hours_to_close: float) -> None:
+        from dataclasses import replace
+        self._base = base
+        self._mc = replace(BIG_SWAN_MODE, max_hours_to_close=max_hours_to_close)
+
+    @property
+    def mode_config(self):
+        return self._mc
+
+    def __getattr__(self, name: str):
+        return getattr(self._base, name)
 
 
 def _entry_candidate_to_swan(
@@ -165,6 +182,8 @@ async def run_swan_live(
     max_runtime_seconds: float | None = None,
     max_live_orders_total: int | None = None,
     redeem_interval_seconds: float | None = None,
+    stake_per_level: float | None = None,
+    max_hours_to_close: float | None = None,
 ) -> RunnerSummary:
     resolved_mode = ExecutionMode(str(execution_mode))
     db_path = Path(db_path or _DEFAULT_DB)
@@ -199,14 +218,15 @@ async def run_swan_live(
         execution_client.startup()
         reconcile_runtime_orders(runtime=runtime, execution_client=execution_client, execution_mode=resolved_mode)
 
-    # ── Market event source (wide universe: all categories, 15m–7d) ───────────
+    # ── Market event source (wide universe: all categories, 15m–max) ─────────
+    _max_secs = int(max_hours_to_close * 3600) if max_hours_to_close is not None else 7 * 24 * 3600
     universe_filter = UniverseFilter(allowed_assets=())  # empty = all assets
     duration_window = DurationWindow(
-        min_seconds=900,                # 15 min minimum remaining
-        max_seconds=7 * 24 * 3600,     # 7 day maximum remaining
+        min_seconds=900,           # 15 min minimum remaining
+        max_seconds=_max_secs,
         require_recurrence=False,
         duration_metric="time_remaining",
-        max_seconds_to_end=7 * 24 * 3600,
+        max_seconds_to_end=_max_secs,
     )
 
     # Swan does not use BookUpdate events (detect_touches returns []), so we
@@ -253,15 +273,20 @@ async def run_swan_live(
 
     # ── Old screener (reused for candidate scoring) ───────────────────────────
     bot_config = load_config()
+    screener_config = (
+        _ScreenerConfigOverride(bot_config, max_hours_to_close=max_hours_to_close)
+        if max_hours_to_close is not None
+        else bot_config
+    )
     market_scorer = MarketScorer(min_score=BIG_SWAN_MODE.min_market_score)
     screener = Screener(
-        config=bot_config,
+        config=screener_config,
         db_path=str(_DB_DIR / "swan_screener_log.sqlite3"),
         market_scorer=market_scorer,
     )
     # Per-level stake: venue minimum is 1.0 USDC notional; BIG_SWAN_MODE.stake_usdc
-    # (0.05) is below that threshold so we use a floor of 5.0 USDC per level.
-    _stake_per_level = max(BIG_SWAN_MODE.stake_usdc, 5.0)
+    # (0.05) is below that threshold so we use a configurable floor.
+    _stake_per_level = stake_per_level if stake_per_level is not None else _DEFAULT_STAKE_PER_LEVEL
 
     # ── Redeem sweeper ────────────────────────────────────────────────────────
     redeem_sweeper: PeriodicResolvedRedeemSweeper | None = None
@@ -353,6 +378,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--redeem-interval", type=float, default=None,
                    dest="redeem_interval_seconds",
                    help="Seconds between resolved-position redeem sweeps (live mode only)")
+    p.add_argument("--stake-per-level", type=float, default=None,
+                   dest="stake_per_level",
+                   help="USDC notional per entry level (default: 5.0)")
+    p.add_argument("--max-hours-to-close", type=float, default=None,
+                   dest="max_hours_to_close",
+                   help="Only bid on markets with this many hours remaining (default: 168 = 7d)")
     return p
 
 
@@ -366,5 +397,7 @@ if __name__ == "__main__":
             max_runtime_seconds=args.max_runtime_seconds,
             max_live_orders_total=args.max_live_orders_total,
             redeem_interval_seconds=args.redeem_interval_seconds,
+            stake_per_level=args.stake_per_level,
+            max_hours_to_close=args.max_hours_to_close,
         )
     )
