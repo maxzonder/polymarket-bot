@@ -1692,6 +1692,14 @@ def _extract_asset_slug(raw: dict[str, Any], event0: Optional[dict[str, Any]], q
     for asset in ("xrp", "ripple"):
         if asset in text:
             return "xrp"
+    for asset in ("bnb", "binance coin"):
+        if asset in text:
+            return "bnb"
+    for asset in ("doge", "dogecoin"):
+        if asset in text:
+            return "doge"
+    if "hype" in text:
+        return "hype"
     return None
 
 

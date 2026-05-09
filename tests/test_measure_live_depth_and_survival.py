@@ -23,6 +23,7 @@ from measure_live_depth_and_survival import (  # noqa: E402
     SurvivalProbe,
     PreTouchFeatures,
     SpotObservation,
+    _extract_asset_slug,
     _extract_event_subtype,
     _extract_payoff_type,
     _horizon_bucket,
@@ -202,6 +203,9 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             "range",
         )
         self.assertEqual(_extract_payoff_type({}, None, "Bitcoin Up or Down"), "above_below_pair")
+        self.assertEqual(_extract_asset_slug({}, None, "BNB Up or Down"), "bnb")
+        self.assertEqual(_extract_asset_slug({}, None, "DOGE Up or Down"), "doge")
+        self.assertEqual(_extract_asset_slug({}, None, "HYPE Up or Down"), "hype")
 
     def test_touch_row_and_sqlite_sink_include_schema_v2_fields(self) -> None:
         token = MarketToken(
