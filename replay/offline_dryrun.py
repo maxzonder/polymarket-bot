@@ -340,6 +340,8 @@ def load_all_markets(
     start_ts: int,
     end_ts: int,
     config,
+    *,
+    black_swan_only: bool = False,
 ) -> list[dict]:
     """
     Load all markets closing within the simulation window, with their tokens.
@@ -347,9 +349,12 @@ def load_all_markets(
       - volume between config min/max
       - end_date within [start_ts, end_ts + max_hours_to_close buffer]
       - excludes markets that closed before start_ts
+      - optionally restricts to markets with a confirmed black_swan=1 event
+      - optionally restricts by min listing_duration_hours (mc.min_total_duration_hours)
     """
     mc = config.mode_config
     close_buffer = int(mc.max_hours_to_close * 3600)
+    min_listing_hours = getattr(mc, "min_total_duration_hours", 0.0)
 
     rows = conn.execute(
         """
@@ -357,10 +362,12 @@ def load_all_markets(
             m.id           AS market_id,
             m.question,
             m.category,
+            m.slug,
             m.volume,
             m.end_date,
             m.start_date,
             m.duration_hours,
+            m.listing_duration_hours,
             m.neg_risk,
             m.neg_risk_market_id,
             COALESCE(m.comment_count, 0) AS comment_count,
@@ -374,13 +381,24 @@ def load_all_markets(
           AND m.end_date  <= :end_buf
           AND m.volume    >= :vol_min
           AND m.volume    <= :vol_max
+          AND (:min_listing_hours = 0 OR COALESCE(m.listing_duration_hours, 0) >= :min_listing_hours)
+          AND (
+              :black_swan_only = 0
+              OR EXISTS (
+                  SELECT 1 FROM tokens t2
+                  JOIN swans_v2 s ON s.token_id = t2.token_id
+                  WHERE t2.market_id = m.id AND s.black_swan = 1
+              )
+          )
         ORDER BY m.end_date ASC
         """,
         {
-            "start":   start_ts,
-            "end_buf": end_ts + close_buffer,
-            "vol_min": config.min_volume_usdc,
-            "vol_max": config.max_volume_usdc,
+            "start":            start_ts,
+            "end_buf":          end_ts + close_buffer,
+            "vol_min":          config.min_volume_usdc,
+            "vol_max":          config.max_volume_usdc,
+            "black_swan_only":  1 if black_swan_only else 0,
+            "min_listing_hours": min_listing_hours,
         },
     ).fetchall()
 

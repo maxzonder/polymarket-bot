@@ -18,12 +18,18 @@ def main() -> None:
     ap.add_argument(
         "--mode",
         default="big_swan_mode",
-        choices=["big_swan_mode", "balanced_mode", "fast_tp_mode", "small_swan_mode"],
+        choices=["big_swan_mode", "balanced_mode", "fast_tp_mode", "small_swan_mode", "black_swan_mode"],
     )
     ap.add_argument("--limit-markets", type=int, default=None)
     ap.add_argument("--batch-seconds", type=int, default=300)
     ap.add_argument("--out", default=None)
     ap.add_argument("--tape-db", default=None, help="Path to historical_tape.db (default: auto-detect in data dir)")
+    ap.add_argument(
+        "--black-swan-only",
+        action="store_true",
+        default=False,
+        help="Restrict market universe to markets with a confirmed black_swan=1 event in swans_v2",
+    )
     args = ap.parse_args()
 
     if args.out:
@@ -40,6 +46,7 @@ def main() -> None:
         limit_markets=args.limit_markets,
         batch_seconds=args.batch_seconds,
         tape_db_path=Path(args.tape_db).expanduser() if args.tape_db else None,
+        black_swan_only=args.black_swan_only,
     )
     result = runner.run()
     print(result)

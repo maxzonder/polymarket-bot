@@ -112,6 +112,13 @@ class ModeConfig:
     # 0 = disabled.
     max_cohort_size: int = 0
 
+    # ── Total-duration gate ───────────────────────────────────────────────────
+    # Minimum listing_duration_hours (market creation → close) to include a market.
+    # 0.0 = disabled. Used to exclude genuinely short-lived markets from the universe.
+    # Note: min_hours_to_close already handles remaining-time filtering; this gates
+    # on total market lifespan at load time.
+    min_total_duration_hours: float = 0.0
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -249,11 +256,53 @@ SMALL_SWAN_MODE = ModeConfig(
     ),
 )
 
+_BSV1_BUDGET = 1.0   # USDC per market (spread across 5 price levels)
+_BSV1_LEVELS = (0.005, 0.01, 0.02, 0.03, 0.05)
+
+BLACK_SWAN_MODE = ModeConfig(
+    name="black_swan_mode",
+    # Strict low-zone: 0.5c → 5c only. No bids above 5c (no scorer data above 0.20,
+    # and black_swan=1 requires buy_min_price <= 0.05 by definition).
+    entry_price_levels=_BSV1_LEVELS,
+    entry_price_max=0.05,
+    use_resting_bids=True,
+    scanner_entry=False,       # pre-deployed resting only; median window = 18 min
+    tp_levels=(
+        TPLevel(progress=0.30, fraction=0.10),  # sell 10% at ~30c to recoup
+        TPLevel(progress=0.70, fraction=0.10),  # sell 10% at ~70c
+    ),
+    moonbag_fraction=0.80,     # hold 80% to resolution — high-X tail is the edge
+    stake_usdc=0.20,           # fallback
+    max_open_positions=2000,
+    max_resting_markets=20000,
+    max_resting_per_cluster=1,
+    max_cohort_size=5,
+    min_hours_to_close=1.0,
+    max_hours_to_close=168.0,
+    min_total_duration_hours=2.0,
+    hours_to_close_null_default=48.0,
+    # Lower prices = higher X: allocate more stake there
+    stake_tiers=(
+        (0.005, _BSV1_BUDGET * 0.40),  # 0.5c tier: 40¢
+        (0.01,  _BSV1_BUDGET * 0.25),  # 1c tier:   25¢
+        (0.02,  _BSV1_BUDGET * 0.15),  # 2c tier:   15¢
+        (0.03,  _BSV1_BUDGET * 0.12),  # 3c tier:   12¢
+        (0.05,  _BSV1_BUDGET * 0.08),  # 5c tier:    8¢
+    ),
+    scoring_weights=(
+        ("market_score", 0.60),
+        ("liq",          0.25),
+        ("category",     0.15),
+    ),
+    prefer_long_duration=True,  # flat score=1.0 up to 168h
+)
+
 MODES: dict[str, ModeConfig] = {
     "fast_tp_mode": FAST_TP_MODE,
     "balanced_mode": BALANCED_MODE,
     "big_swan_mode": BIG_SWAN_MODE,
     "small_swan_mode": SMALL_SWAN_MODE,
+    "black_swan_mode": BLACK_SWAN_MODE,
 }
 
 # ── Swan analyzer global threshold ────────────────────────────────────────────

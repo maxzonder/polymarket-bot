@@ -88,6 +88,7 @@ class TapeDrivenDryRunRunner:
         limit_markets: Optional[int] = None,
         batch_seconds: int = 300,
         tape_db_path: Optional[Path] = None,
+        black_swan_only: bool = False,
     ):
         self.start = start
         self.end = end
@@ -96,6 +97,7 @@ class TapeDrivenDryRunRunner:
         self.limit_markets = limit_markets
         self.batch_seconds = batch_seconds
         self.tape_db_path = tape_db_path if tape_db_path is not None else DEFAULT_TAPE_DB_PATH
+        self.black_swan_only = black_swan_only
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.positions_db = self.output_dir / "positions.db"
@@ -119,7 +121,7 @@ class TapeDrivenDryRunRunner:
 
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        rows = load_all_markets(conn, self.start_ts, self.end_ts, self.config)
+        rows = load_all_markets(conn, self.start_ts, self.end_ts, self.config, black_swan_only=black_swan_only)
         conn.close()
 
         if limit_markets is not None:
