@@ -1619,12 +1619,14 @@ def build_book_snapshot_row(
 def _horizon_bucket(duration_seconds: Optional[int]) -> Optional[str]:
     if duration_seconds is None:
         return None
+    if duration_seconds <= 6 * 60:
+        return "5m"
     if duration_seconds <= 18 * 60:
-        return "15m-ish"
+        return "15m"
     if duration_seconds <= 75 * 60:
-        return "1h-ish"
-    if duration_seconds <= 6 * 3600:
-        return "<=6h"
+        return "1h"
+    if duration_seconds <= 36 * 3600:
+        return "1d"
     if duration_seconds <= 7 * 24 * 3600:
         return "1-7d"
     if duration_seconds <= 30 * 24 * 3600:

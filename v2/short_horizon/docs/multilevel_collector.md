@@ -119,7 +119,7 @@ python3 scripts/build_collector_heatmap.py \
 
 ## Run from config
 
-Prefer config-driven runs once a preset is stable:
+Prefer config-driven runs once a preset is stable. The runner executes the collector, builds heatmap/post-touch/signal reports, then writes a compact `_summary.md/json` artifact for quick operator review.
 
 ```bash
 python3 scripts/run_collector_from_config.py configs/collector/crypto_multi_horizon_majors.yaml
@@ -130,6 +130,8 @@ Useful configs:
 - `configs/collector/crypto_multi_horizon_majors.yaml`
 - `configs/collector/weather_temperature_low_tail.yaml`
 - `configs/collector/black_swan_low_tail.yaml`
+
+Horizon buckets are intentionally coarse but explicit: `5m`, `15m`, `1h`, `1d`, `1-7d`, `8-30d`, `>30d`. For exact crypto 5m/15m splits, prefer `duration_seconds` as a report axis.
 
 ## Join resolved outcomes and EV
 
@@ -162,6 +164,18 @@ python3 scripts/build_collector_signal_report.py \
   --axis duration_seconds \
   --axis asset_slug \
   --axis outcome
+```
+
+## Build compact run summary
+
+Use this after reports exist, or let `run_collector_from_config.py` do it automatically:
+
+```bash
+python3 scripts/build_collector_run_summary.py \
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
+  --signal-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_signal_report.json \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_summary.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_summary.json
 ```
 
 ## Quick SQLite inspection

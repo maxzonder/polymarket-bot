@@ -221,8 +221,10 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
         self.assertFalse(_matches_payoff_type_filter("winner", ["range,above"]))
 
     def test_market_metadata_helpers(self) -> None:
-        self.assertEqual(_horizon_bucket(900), "15m-ish")
-        self.assertEqual(_horizon_bucket(3600), "1h-ish")
+        self.assertEqual(_horizon_bucket(300), "5m")
+        self.assertEqual(_horizon_bucket(900), "15m")
+        self.assertEqual(_horizon_bucket(3600), "1h")
+        self.assertEqual(_horizon_bucket(24 * 3600), "1d")
         self.assertEqual(_horizon_bucket(3 * 24 * 3600), "1-7d")
         self.assertEqual(
             _extract_event_subtype({"slug": "duke-unc-total-points"}, None, "Will Duke vs UNC total points be over 140?"),
@@ -258,7 +260,7 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             event_slug="btc-up-down",
             asset_slug="btc",
             universe_mode="crypto_15m",
-            horizon_bucket="15m-ish",
+            horizon_bucket="15m",
             event_subtype=None,
             parent_event_slug="btc-up-down-parent",
             rule_parse_status="parsed",
@@ -332,7 +334,7 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
         self.assertEqual(row["immediate_reversal_flag"], 1)
         self.assertEqual(row["asset_slug"], "btc")
         self.assertEqual(row["universe_mode"], "crypto_15m")
-        self.assertEqual(row["horizon_bucket"], "15m-ish")
+        self.assertEqual(row["horizon_bucket"], "15m")
         self.assertEqual(row["payoff_type"], "above_below_pair")
         self.assertAlmostEqual(row["spot_price_at_touch"], 101.0)
         self.assertAlmostEqual(row["spot_return_30s"], 0.01)

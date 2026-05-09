@@ -104,6 +104,9 @@ def build_report_commands(config: dict[str, Any], run_id: str, sqlite_path: Path
     if not config.get("build_reports", True):
         return []
     resolutions = Path(config.get("resolutions_sqlite") or DATA_DIR / "short_horizon" / "data" / "market_resolutions.sqlite3")
+    heatmap_json = output_dir / f"{run_id}_heatmap.json"
+    post_touch_json = output_dir / f"{run_id}_post_touch.json"
+    signal_json = output_dir / f"{run_id}_signal_report.json"
     reports: list[list[str]] = []
     reports.append(
         [
@@ -114,7 +117,7 @@ def build_report_commands(config: dict[str, Any], run_id: str, sqlite_path: Path
             "--output-md",
             str(output_dir / f"{run_id}_heatmap.md"),
             "--output-json",
-            str(output_dir / f"{run_id}_heatmap.json"),
+            str(heatmap_json),
             "--min-rows",
             str(config.get("report_min_rows", 5)),
         ]
@@ -128,7 +131,7 @@ def build_report_commands(config: dict[str, Any], run_id: str, sqlite_path: Path
             "--output-md",
             str(output_dir / f"{run_id}_post_touch.md"),
             "--output-json",
-            str(output_dir / f"{run_id}_post_touch.json"),
+            str(post_touch_json),
             "--min-rows",
             str(config.get("report_min_rows", 5)),
         ]
@@ -144,7 +147,7 @@ def build_report_commands(config: dict[str, Any], run_id: str, sqlite_path: Path
         "--output-md",
         str(output_dir / f"{run_id}_signal_report.md"),
         "--output-json",
-        str(output_dir / f"{run_id}_signal_report.json"),
+        str(signal_json),
         "--min-rows",
         str(config.get("signal_min_rows", 10)),
         "--max-spread",
@@ -154,6 +157,21 @@ def build_report_commands(config: dict[str, Any], run_id: str, sqlite_path: Path
     for axis in signal_axes:
         signal.extend(["--axis", str(axis)])
     reports.append(signal)
+    if config.get("build_summary", True):
+        reports.append(
+            [
+                sys.executable,
+                "scripts/build_collector_run_summary.py",
+                "--input-sqlite",
+                str(sqlite_path),
+                "--signal-json",
+                str(signal_json),
+                "--output-md",
+                str(output_dir / f"{run_id}_summary.md"),
+                "--output-json",
+                str(output_dir / f"{run_id}_summary.json"),
+            ]
+        )
     return reports
 
 
