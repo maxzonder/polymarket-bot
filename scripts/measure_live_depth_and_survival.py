@@ -25,6 +25,7 @@ import asyncio
 import csv
 import json
 import logging
+import re
 import signal
 import sqlite3
 import sys
@@ -675,6 +676,8 @@ class LiveDepthCollector:
             "skipped_duplicate": 0,
             "skipped_outcomes": 0,
             "skipped_asset_slug": 0,
+            "skipped_text_filter": 0,
+            "skipped_payoff_type": 0,
             "skipped_missing_end": 0,
             "skipped_bad_time": 0,
             "skipped_nonpositive_remaining": 0,
@@ -809,6 +812,20 @@ class LiveDepthCollector:
                 if allowed_asset_slugs is not None and str(asset_slug or "").lower() not in allowed_asset_slugs:
                     stats["skipped_asset_slug"] += 1
                     continue
+                if not _matches_market_text_filters(
+                    raw,
+                    event0,
+                    question,
+                    category=category,
+                    universe_mode=self.args.universe_mode,
+                    include_keywords=getattr(self.args, "market_keyword", None),
+                    exclude_keywords=getattr(self.args, "exclude_market_keyword", None),
+                ):
+                    stats["skipped_text_filter"] += 1
+                    continue
+                if not _matches_payoff_type_filter(payoff_type, getattr(self.args, "payoff_type", None)):
+                    stats["skipped_payoff_type"] += 1
+                    continue
                 fee_rate_bps = None
                 fee_schedule = raw.get("feeSchedule") or raw.get("fee_schedule")
                 if isinstance(fee_schedule, dict):
@@ -859,13 +876,15 @@ class LiveDepthCollector:
         self.last_discovery_stats = stats
         sample_questions = [token.question for token in markets[: min(3, len(markets))]]
         self.logger.info(
-            "Discovery stats: rows=%s eligible_markets=%s eligible_tokens=%s skipped_duration=%s skipped_recurrence=%s skipped_asset=%s skipped_remaining=%s order=%s asc=%s metric=%s sample=%s",
+            "Discovery stats: rows=%s eligible_markets=%s eligible_tokens=%s skipped_duration=%s skipped_recurrence=%s skipped_asset=%s skipped_text=%s skipped_payoff=%s skipped_remaining=%s order=%s asc=%s metric=%s sample=%s",
             stats["rows_seen"],
             stats["eligible_markets"],
             stats["eligible_tokens"],
             stats["skipped_duration_window"],
             stats["skipped_recurrence"],
             stats["skipped_asset_slug"],
+            stats["skipped_text_filter"],
+            stats["skipped_payoff_type"],
             stats["skipped_nonpositive_remaining"],
             self.args.discovery_order,
             self.args.discovery_ascending,
@@ -1728,6 +1747,62 @@ def _allowed_asset_slugs(values: Optional[list[str]]) -> Optional[set[str]]:
     return allowed or None
 
 
+def _matches_market_text_filters(
+    raw: dict[str, Any],
+    event0: Optional[dict[str, Any]],
+    question: str,
+    *,
+    category: Optional[str],
+    universe_mode: str,
+    include_keywords: Optional[list[str]],
+    exclude_keywords: Optional[list[str]],
+) -> bool:
+    text = " ".join(
+        str(part or "")
+        for part in (
+            question,
+            raw.get("slug"),
+            raw.get("description"),
+            category,
+            (event0 or {}).get("slug"),
+            (event0 or {}).get("title"),
+            (event0 or {}).get("description"),
+        )
+    ).lower()
+    include = _keyword_set(include_keywords)
+    if not include and universe_mode == "weather_temperature":
+        include = {"temperature", "weather", "highest temperature", "low temperature"}
+    if include and not any(_keyword_matches(text, keyword) for keyword in include):
+        return False
+    exclude = _keyword_set(exclude_keywords)
+    if exclude and any(_keyword_matches(text, keyword) for keyword in exclude):
+        return False
+    return True
+
+
+def _keyword_matches(text: str, keyword: str) -> bool:
+    if " " in keyword or "-" in keyword:
+        return keyword in text
+    return re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", text) is not None
+
+
+def _matches_payoff_type_filter(payoff_type: Optional[str], values: Optional[list[str]]) -> bool:
+    allowed = _keyword_set(values)
+    if not allowed:
+        return True
+    return str(payoff_type or "").lower() in allowed
+
+
+def _keyword_set(values: Optional[list[str]]) -> set[str]:
+    out: set[str] = set()
+    for value in values or []:
+        for part in str(value or "").split(","):
+            keyword = part.strip().lower()
+            if keyword:
+                out.add(keyword)
+    return out
+
+
 def _extract_category(raw: dict[str, Any], event0: Optional[dict[str, Any]]) -> Optional[str]:
     candidates = [
         raw.get("category"),
@@ -1881,6 +1956,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Restrict discovery to asset slugs; repeatable and comma-separated values are accepted, e.g. --asset-slug btc,eth,sol,xrp",
+    )
+    parser.add_argument(
+        "--market-keyword",
+        action="append",
+        default=None,
+        help="Require at least one keyword in question/slug/category text; repeatable and comma-separated values are accepted",
+    )
+    parser.add_argument(
+        "--exclude-market-keyword",
+        action="append",
+        default=None,
+        help="Exclude markets whose question/slug/category text contains any keyword; repeatable and comma-separated values are accepted",
+    )
+    parser.add_argument(
+        "--payoff-type",
+        action="append",
+        default=None,
+        help="Restrict parsed payoff types; repeatable and comma-separated values are accepted, e.g. range,above,below",
     )
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")

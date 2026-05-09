@@ -1,0 +1,18 @@
+{
+  "run_id_prefix": "black_swan_low_tail",
+  "level_preset": "black_swan_low_tail",
+  "universe_mode": "black_swan_low_tail",
+  "no_require_recurrence": true,
+  "duration_metric": "time_remaining",
+  "min_duration_seconds": 3600,
+  "max_duration_seconds": 604800,
+  "max_seconds_to_end": 604800,
+  "market_keyword": ["temperature", "weather", "bitcoin", "ethereum", "nba", "nfl", "winner", "election"],
+  "exclude_market_keyword": ["up or down"],
+  "book_snapshot_interval_ms": 5000,
+  "timeout_seconds": "2h",
+  "report_min_rows": 3,
+  "signal_min_rows": 3,
+  "signal_max_spread": 0.08,
+  "signal_axes": ["horizon_bucket", "payoff_type", "event_subtype", "touch_level"]
+}

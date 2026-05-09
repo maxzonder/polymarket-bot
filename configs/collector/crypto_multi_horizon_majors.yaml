@@ -1,0 +1,15 @@
+{
+  "run_id_prefix": "crypto_multi_horizon_majors",
+  "level_preset": "crypto_wide",
+  "universe_mode": "crypto_multi_horizon",
+  "asset_slug": ["btc", "eth", "sol", "xrp"],
+  "min_duration_seconds": 300,
+  "max_duration_seconds": 900,
+  "duration_metric": "implied_series",
+  "book_snapshot_interval_ms": 1000,
+  "timeout_seconds": "4h",
+  "report_min_rows": 5,
+  "signal_min_rows": 10,
+  "signal_max_spread": 0.10,
+  "signal_axes": ["duration_seconds", "asset_slug", "outcome"]
+}

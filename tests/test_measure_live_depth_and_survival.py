@@ -28,6 +28,8 @@ from measure_live_depth_and_survival import (  # noqa: E402
     _extract_event_subtype,
     _extract_payoff_type,
     _horizon_bucket,
+    _matches_market_text_filters,
+    _matches_payoff_type_filter,
     build_book_snapshot_row,
     build_touch_row,
     compute_book_metrics,
@@ -190,6 +192,33 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
     def test_allowed_asset_slugs_accepts_repeatable_and_csv_values(self) -> None:
         self.assertIsNone(_allowed_asset_slugs(None))
         self.assertEqual(_allowed_asset_slugs(["BTC,eth", " sol "]), {"btc", "eth", "sol"})
+
+    def test_market_text_and_payoff_filters(self) -> None:
+        raw = {"slug": "london-highest-temperature", "description": "Weather market"}
+        self.assertTrue(
+            _matches_market_text_filters(
+                raw,
+                None,
+                "Will London highest temperature be between 17-18C?",
+                category="weather",
+                universe_mode="weather_temperature",
+                include_keywords=None,
+                exclude_keywords=None,
+            )
+        )
+        self.assertFalse(
+            _matches_market_text_filters(
+                raw,
+                None,
+                "Will London highest temperature be between 17-18C?",
+                category="weather",
+                universe_mode="weather_temperature",
+                include_keywords=["rain"],
+                exclude_keywords=None,
+            )
+        )
+        self.assertTrue(_matches_payoff_type_filter("range", ["range,above"]))
+        self.assertFalse(_matches_payoff_type_filter("winner", ["range,above"]))
 
     def test_market_metadata_helpers(self) -> None:
         self.assertEqual(_horizon_bucket(900), "15m-ish")

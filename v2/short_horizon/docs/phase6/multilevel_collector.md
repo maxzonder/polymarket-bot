@@ -117,6 +117,20 @@ python3 scripts/build_collector_heatmap.py \
   --executable-only
 ```
 
+## Run from config
+
+Prefer config-driven runs once a preset is stable:
+
+```bash
+python3 scripts/run_collector_from_config.py configs/collector/crypto_multi_horizon_majors.yaml
+```
+
+Useful configs:
+
+- `configs/collector/crypto_multi_horizon_majors.yaml`
+- `configs/collector/weather_temperature_low_tail.yaml`
+- `configs/collector/black_swan_low_tail.yaml`
+
 ## Join resolved outcomes and EV
 
 Use this after the collected markets have resolved. It backfills market outcomes from Gamma into a local resolutions DB, joins them to `touch_events`, and reports realized hold-to-resolution EV for hypothetical 5-share and 10 USDC entries.
@@ -129,6 +143,23 @@ python3 scripts/build_collector_outcome_ev.py \
   --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_outcome_ev.json \
   --backfill-resolutions \
   --axis touch_level \
+  --axis asset_slug \
+  --axis outcome
+```
+
+## Build combined signal report
+
+Use this after post-touch enrichment and outcome resolution are available. It applies normal-trade filters (`fit_5_shares`, good freshness/depth flags, max spread), then combines EV, spread, and post-touch hold/reversal metrics.
+
+```bash
+python3 scripts/build_collector_signal_report.py \
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
+  --resolutions-sqlite /home/polybot/.polybot/short_horizon/data/market_resolutions.sqlite3 \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_signal_report.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_signal_report.json \
+  --backfill-resolutions \
+  --max-spread 0.10 \
+  --axis duration_seconds \
   --axis asset_slug \
   --axis outcome
 ```
