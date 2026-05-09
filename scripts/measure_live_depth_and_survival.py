@@ -54,11 +54,13 @@ WS_MARKET_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 SCHEMA_VERSION = 2
 DEFAULT_LEVELS = (0.55, 0.65, 0.70)
 LOW_TAIL_LEVELS = (0.005, 0.01, 0.02, 0.03, 0.05, 0.10, 0.15, 0.20)
+BLACK_SWAN_5C_LEVELS = (0.005, 0.01, 0.02, 0.03, 0.05)
 WIDE_LEVELS = (0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
 LEVEL_PRESETS = {
     "crypto_15m_touch": DEFAULT_LEVELS,
     "crypto_wide": WIDE_LEVELS,
     "black_swan_low_tail": LOW_TAIL_LEVELS,
+    "black_swan_5c": BLACK_SWAN_5C_LEVELS,
     "crypto_wide_low_tail": LOW_TAIL_LEVELS + WIDE_LEVELS,
 }
 UNIVERSE_MODES = (
@@ -694,6 +696,7 @@ class LiveDepthCollector:
             "skipped_nonpositive_remaining": 0,
             "skipped_duration_window": 0,
             "skipped_recurrence": 0,
+            "skipped_volume": 0,
             "eligible_markets": 0,
             "eligible_tokens": 0,
         }
@@ -808,6 +811,16 @@ class LiveDepthCollector:
                     and remaining_seconds > self.args.max_seconds_to_end
                 ):
                     stats["skipped_duration_window"] += 1
+                    continue
+
+                market_volume = _parse_float(raw.get("volumeNum") or raw.get("volume")) or 0.0
+                min_vol = getattr(self.args, "min_volume_usdc", None)
+                max_vol = getattr(self.args, "max_volume_usdc", None)
+                if min_vol is not None and market_volume < min_vol:
+                    stats["skipped_volume"] += 1
+                    continue
+                if max_vol is not None and market_volume > max_vol:
+                    stats["skipped_volume"] += 1
                     continue
 
                 condition_id = str(raw.get("conditionId") or market_id)
@@ -2047,6 +2060,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")
     parser.add_argument("--max-discovery-rows", type=int, default=DEFAULT_MAX_DISCOVERY_ROWS)
+    parser.add_argument("--min-volume-usdc", type=float, default=None, help="Skip markets with lifetime volume below this threshold (USDC)")
+    parser.add_argument("--max-volume-usdc", type=float, default=None, help="Skip markets with lifetime volume above this threshold (USDC)")
     parser.add_argument("--require-recurrence", action="store_true", default=True)
     parser.add_argument("--no-require-recurrence", dest="require_recurrence", action="store_false")
     parser.add_argument("--max-events", type=int, default=0)

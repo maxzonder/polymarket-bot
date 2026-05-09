@@ -79,6 +79,8 @@ def build_collector_command(config: dict[str, Any], run_id: str) -> tuple[list[s
         "max_events": "--max-events",
         "spot_feed": "--spot-feed",
         "spot_poll_interval_sec": "--spot-poll-interval-sec",
+        "min_volume_usdc": "--min-volume-usdc",
+        "max_volume_usdc": "--max-volume-usdc",
     }
     for key, flag in scalar_flags.items():
         if key in config and config[key] is not None:
