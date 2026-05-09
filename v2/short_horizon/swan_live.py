@@ -296,14 +296,18 @@ async def run_swan_live(
         discovery_fn=shared_discovery,
         universe_filter=universe_filter,
         duration_window=duration_window,
-        max_rows=50_000,
+        max_rows=5_000,
+        max_consecutive_failures=30,
+        retry_backoff_max_seconds=300.0,
     )
     source.fee_refresh = FeeMetadataRefreshLoop(
         discovery_fn=shared_discovery,
         universe_filter=universe_filter,
         duration_window=duration_window,
-        max_rows=50_000,
+        max_rows=5_000,
         fee_info_fetcher=None,
+        max_consecutive_failures=30,
+        retry_backoff_max_seconds=300.0,
     )
 
     # ── Old screener (reused for candidate scoring) ───────────────────────────
