@@ -119,6 +119,12 @@ class ModeConfig:
     # on total market lifespan at load time.
     min_total_duration_hours: float = 0.0
 
+    # ── Question-text exclusion keywords ─────────────────────────────────────
+    # Reject a market if its question contains ANY of these substrings (case-insensitive).
+    # Used to filter weak sports subtypes (tennis, F1, CS2, Valorant) that have
+    # materially lower WR (<60%) in black_swan analysis.
+    exclude_question_keywords: tuple[str, ...] = ()
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -295,6 +301,14 @@ BLACK_SWAN_MODE = ModeConfig(
         ("category",     0.15),
     ),
     prefer_long_duration=True,  # flat score=1.0 up to 168h
+    # Exclude weak sports subtypes (WR < 60% in phase A3 analysis):
+    #   Tennis ~54%, F1 ~46%, CS2 ~60%, Valorant ~58%
+    exclude_question_keywords=(
+        "tennis", " atp ", "wta ", "wimbledon", "roland garros",
+        "formula 1", "formula one", "grand prix", "f1 race",
+        "counter-strike", " cs2 ", "blast premier", "esl pro league",
+        "valorant", " vct ",
+    ),
 )
 
 MODES: dict[str, ModeConfig] = {

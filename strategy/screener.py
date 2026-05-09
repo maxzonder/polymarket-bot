@@ -211,6 +211,13 @@ class Screener:
             _log("rejected_hours_to_close_max")
             return []
 
+        # Question-keyword exclusion (e.g. weak sports subtypes).
+        if mc.exclude_question_keywords:
+            q_lower = q.lower()
+            if any(kw in q_lower for kw in mc.exclude_question_keywords):
+                _log("rejected_excluded_keyword")
+                return []
+
         # Hard filter: must have token IDs
         if not m.token_ids:
             _log("rejected_missing_token_ids")
