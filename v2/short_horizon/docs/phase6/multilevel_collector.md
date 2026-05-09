@@ -50,6 +50,20 @@ python3 scripts/measure_live_depth_and_survival.py \
   --book-snapshot-interval-ms 1000
 ```
 
+Crypto multi-horizon majors-only expansion, useful after the first 15m EV join showed wide-spread alt contamination:
+
+```bash
+python3 scripts/measure_live_depth_and_survival.py \
+  --level-preset crypto_wide \
+  --universe-mode crypto_multi_horizon \
+  --asset-slug btc,eth,sol,xrp \
+  --min-duration-seconds 300 \
+  --max-duration-seconds 900 \
+  --output-csv /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_multi_horizon_majors.csv \
+  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_multi_horizon_majors.sqlite3 \
+  --book-snapshot-interval-ms 1000
+```
+
 ## Short smoke run
 
 Use a small `--max-events` cap for a quick non-trading smoke check:

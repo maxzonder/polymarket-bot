@@ -674,6 +674,7 @@ class LiveDepthCollector:
             "rows_seen": 0,
             "skipped_duplicate": 0,
             "skipped_outcomes": 0,
+            "skipped_asset_slug": 0,
             "skipped_missing_end": 0,
             "skipped_bad_time": 0,
             "skipped_nonpositive_remaining": 0,
@@ -682,6 +683,7 @@ class LiveDepthCollector:
             "eligible_markets": 0,
             "eligible_tokens": 0,
         }
+        allowed_asset_slugs = _allowed_asset_slugs(getattr(self.args, "asset_slug", None))
 
         while True:
             resp = session.get(
@@ -797,6 +799,16 @@ class LiveDepthCollector:
                 condition_id = str(raw.get("conditionId") or market_id)
                 fees_enabled = bool(raw.get("feesEnabled"))
                 tick_size = _parse_float(raw.get("orderPriceMinTickSize"))
+                category = _extract_category(raw, event0)
+                event_slug = str((event0 or {}).get("slug") or raw.get("slug") or "") or None
+                asset_slug = _extract_asset_slug(raw, event0, question)
+                event_subtype = _extract_event_subtype(raw, event0, question)
+                parent_event_slug = _extract_parent_event_slug(raw, event0)
+                rule_parse_status = _rule_parse_status(raw, event0, question)
+                payoff_type = _extract_payoff_type(raw, event0, question)
+                if allowed_asset_slugs is not None and str(asset_slug or "").lower() not in allowed_asset_slugs:
+                    stats["skipped_asset_slug"] += 1
+                    continue
                 fee_rate_bps = None
                 fee_schedule = raw.get("feeSchedule") or raw.get("fee_schedule")
                 if isinstance(fee_schedule, dict):
@@ -822,17 +834,17 @@ class LiveDepthCollector:
                             fees_enabled=fees_enabled,
                             fee_rate_bps=fee_rate_bps,
                             tick_size=tick_size,
-                            category=_extract_category(raw, event0),
-                            event_slug=str((event0 or {}).get("slug") or raw.get("slug") or "") or None,
-                            asset_slug=_extract_asset_slug(raw, event0, question),
+                            category=category,
+                            event_slug=event_slug,
+                            asset_slug=asset_slug,
                             universe_mode=self.args.universe_mode,
                             horizon_bucket=_horizon_bucket(
                                 implied_duration_seconds if implied_duration_seconds is not None else duration_seconds
                             ),
-                            event_subtype=_extract_event_subtype(raw, event0, question),
-                            parent_event_slug=_extract_parent_event_slug(raw, event0),
-                            rule_parse_status=_rule_parse_status(raw, event0, question),
-                            payoff_type=_extract_payoff_type(raw, event0, question),
+                            event_subtype=event_subtype,
+                            parent_event_slug=parent_event_slug,
+                            rule_parse_status=rule_parse_status,
+                            payoff_type=payoff_type,
                         )
                     )
                     stats["eligible_tokens"] += 1
@@ -847,12 +859,13 @@ class LiveDepthCollector:
         self.last_discovery_stats = stats
         sample_questions = [token.question for token in markets[: min(3, len(markets))]]
         self.logger.info(
-            "Discovery stats: rows=%s eligible_markets=%s eligible_tokens=%s skipped_duration=%s skipped_recurrence=%s skipped_remaining=%s order=%s asc=%s metric=%s sample=%s",
+            "Discovery stats: rows=%s eligible_markets=%s eligible_tokens=%s skipped_duration=%s skipped_recurrence=%s skipped_asset=%s skipped_remaining=%s order=%s asc=%s metric=%s sample=%s",
             stats["rows_seen"],
             stats["eligible_markets"],
             stats["eligible_tokens"],
             stats["skipped_duration_window"],
             stats["skipped_recurrence"],
+            stats["skipped_asset_slug"],
             stats["skipped_nonpositive_remaining"],
             self.args.discovery_order,
             self.args.discovery_ascending,
@@ -1703,6 +1716,18 @@ def _extract_asset_slug(raw: dict[str, Any], event0: Optional[dict[str, Any]], q
     return None
 
 
+def _allowed_asset_slugs(values: Optional[list[str]]) -> Optional[set[str]]:
+    if not values:
+        return None
+    allowed: set[str] = set()
+    for value in values:
+        for part in str(value or "").split(","):
+            slug = part.strip().lower()
+            if slug:
+                allowed.add(slug)
+    return allowed or None
+
+
 def _extract_category(raw: dict[str, Any], event0: Optional[dict[str, Any]]) -> Optional[str]:
     candidates = [
         raw.get("category"),
@@ -1851,6 +1876,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only used when --duration-metric=time_remaining; recurring 15m markets expose long-horizon endDate values",
     )
     parser.add_argument("--duration-metric", choices=("lifecycle", "time_remaining", "implied_series"), default="implied_series")
+    parser.add_argument(
+        "--asset-slug",
+        action="append",
+        default=None,
+        help="Restrict discovery to asset slugs; repeatable and comma-separated values are accepted, e.g. --asset-slug btc,eth,sol,xrp",
+    )
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")
     parser.add_argument("--max-discovery-rows", type=int, default=DEFAULT_MAX_DISCOVERY_ROWS)

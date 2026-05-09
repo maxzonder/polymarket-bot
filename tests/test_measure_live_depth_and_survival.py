@@ -23,6 +23,7 @@ from measure_live_depth_and_survival import (  # noqa: E402
     SurvivalProbe,
     PreTouchFeatures,
     SpotObservation,
+    _allowed_asset_slugs,
     _extract_asset_slug,
     _extract_event_subtype,
     _extract_payoff_type,
@@ -185,6 +186,10 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             self.assertEqual(row[1], "fixture")
             self.assertAlmostEqual(row[2], 101.0)
             self.assertEqual(row[3], 10)
+
+    def test_allowed_asset_slugs_accepts_repeatable_and_csv_values(self) -> None:
+        self.assertIsNone(_allowed_asset_slugs(None))
+        self.assertEqual(_allowed_asset_slugs(["BTC,eth", " sol "]), {"btc", "eth", "sol"})
 
     def test_market_metadata_helpers(self) -> None:
         self.assertEqual(_horizon_bucket(900), "15m-ish")
