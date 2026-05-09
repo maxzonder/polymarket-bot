@@ -9,14 +9,17 @@ Old bot/main_loop.py remains as a backtest harness; this file owns all live
 order submission going forward.
 
 Usage:
-    # dry-run (default)
+    # dry-run (default, big_swan strategy)
     python -m v2.short_horizon.swan_live
+
+    # black_swan strategy dry-run
+    python -m v2.short_horizon.swan_live --strategy black_swan
 
     # live
     python -m v2.short_horizon.swan_live --execution-mode live
 
-    # live, with 1-hour resolved redeem sweep
-    python -m v2.short_horizon.swan_live --execution-mode live --redeem-interval 3600
+    # black_swan live, with 1-hour resolved redeem sweep
+    python -m v2.short_horizon.swan_live --strategy black_swan --execution-mode live --redeem-interval 3600
 """
 from __future__ import annotations
 
@@ -53,6 +56,10 @@ from short_horizon.strategies.swan_strategy_v1 import (
     SwanConfig,
     SwanStrategyV1,
 )
+from short_horizon.strategies.black_swan_strategy_v1 import (
+    BlackSwanConfig,
+    BlackSwanStrategyV1,
+)
 from short_horizon.telemetry import configure_logging, get_logger
 from short_horizon.venue_polymarket import PolymarketUserStream
 from short_horizon.venue_polymarket.execution_client import (
@@ -62,26 +69,41 @@ from short_horizon.venue_polymarket.execution_client import (
 from short_horizon.venue_polymarket.markets import DurationWindow, UniverseFilter
 
 # Import old swan screener (reused as-is for market discovery).
-from config import BIG_SWAN_MODE, BotConfig, load_config
+from config import BIG_SWAN_MODE, BLACK_SWAN_MODE, BotConfig, load_config
 from execution.order_manager import POSITIONS_DB
 from strategy.market_scorer import MarketScorer
 from strategy.screener import EntryCandidate, Screener
 
 _DB_DIR = Path(os.environ.get("POLYBOT_DATA_DIR", Path.home() / ".polybot" / "swan_v2"))
-_DEFAULT_DB = _DB_DIR / "swan_v2_live.sqlite3"
 
 _SCREENER_INTERVAL_SECONDS = 300   # 5 min
 _CLEANUP_INTERVAL_SECONDS = 1800   # 30 min
 _DEFAULT_STAKE_PER_LEVEL = 5.0     # floor above 1.0 USDC venue minimum
 
+_STRATEGY_REGISTRY = {
+    "swan": {
+        "mode":           BIG_SWAN_MODE,
+        "config_class":   SwanConfig,
+        "strategy_class": SwanStrategyV1,
+        "strategy_id":    "swan_v1",
+        "db_name":        "swan_v2_live.sqlite3",
+    },
+    "black_swan": {
+        "mode":           BLACK_SWAN_MODE,
+        "config_class":   BlackSwanConfig,
+        "strategy_class": BlackSwanStrategyV1,
+        "strategy_id":    "black_swan_v1",
+        "db_name":        "black_swan_v1_live.sqlite3",
+    },
+}
+
 
 class _ScreenerConfigOverride:
-    """Proxies BotConfig but replaces mode_config.max_hours_to_close."""
+    """Proxies BotConfig but replaces mode_config with a given ModeConfig."""
 
-    def __init__(self, base: BotConfig, *, max_hours_to_close: float) -> None:
-        from dataclasses import replace
+    def __init__(self, base: BotConfig, *, mode_config) -> None:
         self._base = base
-        self._mc = replace(BIG_SWAN_MODE, max_hours_to_close=max_hours_to_close)
+        self._mc = mode_config
 
     @property
     def mode_config(self):
@@ -184,30 +206,40 @@ async def run_swan_live(
     redeem_interval_seconds: float | None = None,
     stake_per_level: float | None = None,
     max_hours_to_close: float | None = None,
+    strategy_name: str = "swan",
 ) -> RunnerSummary:
+    reg = _STRATEGY_REGISTRY.get(strategy_name)
+    if reg is None:
+        raise ValueError(f"Unknown strategy: {strategy_name!r}. Choose from {list(_STRATEGY_REGISTRY)}")
+
+    mode_config    = reg["mode"]
+    config_class   = reg["config_class"]
+    strategy_class = reg["strategy_class"]
+    strategy_id    = reg["strategy_id"]
+
     resolved_mode = ExecutionMode(str(execution_mode))
-    db_path = Path(db_path or _DEFAULT_DB)
+    db_path = Path(db_path or (_DB_DIR / reg["db_name"]))
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    run_id = run_id or f"swan_v2_{uuid.uuid4().hex[:12]}"
+    run_id = run_id or f"{strategy_id}_{uuid.uuid4().hex[:12]}"
 
     configure_logging()
-    logger = get_logger("swan_live", run_id=run_id)
-    logger.info("swan_live_starting", execution_mode=resolved_mode.value, db_path=str(db_path))
+    logger = get_logger("swan_live", run_id=run_id, strategy=strategy_name)
+    logger.info("swan_live_starting", execution_mode=resolved_mode.value, db_path=str(db_path), strategy=strategy_name)
 
     clock = SystemClock()
 
     # ── Strategy ──────────────────────────────────────────────────────────────
-    swan_config = SwanConfig(
-        strategy_id="swan_v1",
-        max_open_resting_bids=BIG_SWAN_MODE.max_open_positions,
-        max_resting_markets=BIG_SWAN_MODE.max_resting_markets,
-        max_resting_per_cluster=BIG_SWAN_MODE.max_resting_per_cluster,
-        stale_order_ttl_seconds=float(BIG_SWAN_MODE.max_hours_to_close * 3600),
+    swan_config = config_class(
+        strategy_id=strategy_id,
+        max_open_resting_bids=mode_config.max_open_positions,
+        max_resting_markets=mode_config.max_resting_markets,
+        max_resting_per_cluster=mode_config.max_resting_per_cluster,
+        stale_order_ttl_seconds=float(mode_config.max_hours_to_close * 3600),
     )
-    strategy = SwanStrategyV1(config=swan_config, clock=clock)
+    strategy = strategy_class(config=swan_config, clock=clock)
 
     # ── Storage ───────────────────────────────────────────────────────────────
-    run_context = RunContext(run_id=run_id, strategy_id="swan_v1", mode=resolved_mode.value, config_hash="swan_v1")
+    run_context = RunContext(run_id=run_id, strategy_id=strategy_id, mode=resolved_mode.value, config_hash=strategy_id)
     store = SQLiteRuntimeStore(db_path, run=run_context)
     runtime = StrategyRuntime(strategy=strategy, intent_store=store, clock=clock)
 
@@ -218,11 +250,12 @@ async def run_swan_live(
         execution_client.startup()
         reconcile_runtime_orders(runtime=runtime, execution_client=execution_client, execution_mode=resolved_mode)
 
-    # ── Market event source (wide universe: all categories, 15m–max) ─────────
-    _max_secs = int(max_hours_to_close * 3600) if max_hours_to_close is not None else 7 * 24 * 3600
+    # ── Market event source ───────────────────────────────────────────────────
+    _min_secs = int(mode_config.min_hours_to_close * 3600)
+    _max_secs = int(max_hours_to_close * 3600) if max_hours_to_close is not None else int(mode_config.max_hours_to_close * 3600)
     universe_filter = UniverseFilter(allowed_assets=())  # empty = all assets
     duration_window = DurationWindow(
-        min_seconds=900,           # 15 min minimum remaining
+        min_seconds=_min_secs,
         max_seconds=_max_secs,
         require_recurrence=False,
         duration_metric="time_remaining",
@@ -273,12 +306,14 @@ async def run_swan_live(
 
     # ── Old screener (reused for candidate scoring) ───────────────────────────
     bot_config = load_config()
-    screener_config = (
-        _ScreenerConfigOverride(bot_config, max_hours_to_close=max_hours_to_close)
-        if max_hours_to_close is not None
-        else bot_config
-    )
-    market_scorer = MarketScorer(min_score=BIG_SWAN_MODE.min_market_score)
+    # Always override mode_config so the screener uses the selected strategy's
+    # entry levels and price gates, not the default big_swan_mode from .env.
+    effective_mc = mode_config
+    if max_hours_to_close is not None:
+        from dataclasses import replace as _dc_replace
+        effective_mc = _dc_replace(mode_config, max_hours_to_close=max_hours_to_close)
+    screener_config = _ScreenerConfigOverride(bot_config, mode_config=effective_mc)
+    market_scorer = MarketScorer(min_score=mode_config.min_market_score)
     screener = Screener(
         config=screener_config,
         db_path=str(_DB_DIR / "swan_screener_log.sqlite3"),
@@ -368,6 +403,12 @@ async def run_swan_live(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Swan V2 live runner")
+    p.add_argument(
+        "--strategy",
+        default="swan",
+        choices=list(_STRATEGY_REGISTRY),
+        help="Trading strategy: 'swan' (big_swan_mode) or 'black_swan' (black_swan_mode)",
+    )
     p.add_argument("--execution-mode", default="dry_run", choices=["dry_run", "live"],
                    help="dry_run = log only, live = submit real orders")
     p.add_argument("--db-path", default=None, help="SQLite DB path for run storage")
@@ -383,7 +424,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="USDC notional per entry level (default: 5.0)")
     p.add_argument("--max-hours-to-close", type=float, default=None,
                    dest="max_hours_to_close",
-                   help="Only bid on markets with this many hours remaining (default: 168 = 7d)")
+                   help="Override max hours to close from mode config")
     return p
 
 
@@ -391,6 +432,7 @@ if __name__ == "__main__":
     args = _build_arg_parser().parse_args()
     asyncio.run(
         run_swan_live(
+            strategy_name=args.strategy,
             db_path=args.db_path,
             run_id=args.run_id,
             execution_mode=args.execution_mode,
