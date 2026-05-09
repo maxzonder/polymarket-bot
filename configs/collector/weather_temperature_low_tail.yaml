@@ -8,7 +8,6 @@
   "max_duration_seconds": 604800,
   "max_seconds_to_end": 604800,
   "min_volume_usdc": 50,
-  "max_volume_usdc": 300000,
   "market_keyword": ["temperature", "highest temperature", "low temperature"],
   "payoff_type": ["exact", "range", "above", "below"],
   "book_snapshot_interval_ms": 5000,

@@ -8,7 +8,6 @@
   "max_duration_seconds": 604800,
   "max_seconds_to_end": 604800,
   "min_volume_usdc": 50,
-  "max_volume_usdc": 300000,
   "asset_slug": ["btc", "eth", "sol", "xrp"],
   "market_keyword": ["bitcoin", "ethereum", "solana", "xrp", "crypto"],
   "exclude_market_keyword": ["up or down"],

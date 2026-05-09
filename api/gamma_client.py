@@ -217,7 +217,7 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
 def fetch_open_markets(
     price_max: float = 0.30,
     volume_min: float = 50.0,
-    volume_max: float = 100_000.0,
+    volume_max: float = float("inf"),
     limit_pages: int = 50,
 ) -> list[MarketInfo]:
     """
@@ -247,7 +247,7 @@ def fetch_open_markets(
             "active": "true",
             "include_tag": "true",
             "volume_num_min": volume_min,
-            "volume_num_max": volume_max,
+            **({"volume_num_max": volume_max} if volume_max != float("inf") else {}),
             "limit": PAGE_SIZE,
             "offset": offset,
         }

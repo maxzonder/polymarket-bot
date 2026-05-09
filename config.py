@@ -381,7 +381,7 @@ class BotConfig:
 
     # ── Screener hard limits ──────────────────────────────────────────────────
     min_volume_usdc: float = 50.0
-    max_volume_usdc: float = 300_000.0  # raised from 50k: geopolitics/politics markets often 100k–1M
+    max_volume_usdc: float = float("inf")  # no upper cap: hit rate rises with volume (300k-1M: 19.8%, >1M: 19.2%)
     dead_market_hours: float = 48.0    # reject markets with no trades in this many hours
 
     # ── Category EV weights (recalibrated from black_swan=1 data, issue #180) ──

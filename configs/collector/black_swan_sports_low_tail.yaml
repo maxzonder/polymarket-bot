@@ -8,7 +8,6 @@
   "max_duration_seconds": 604800,
   "max_seconds_to_end": 604800,
   "min_volume_usdc": 50,
-  "max_volume_usdc": 300000,
   "market_keyword": ["nba", "nfl", "nhl", "mlb", "soccer", "premier league", "la liga", "champions league", "world cup", "lol", "league of legends"],
   "exclude_market_keyword": ["up or down", "tennis", " atp ", "wta", "wimbledon", "roland garros", "formula 1", "formula one", "grand prix", "f1 race", "counter-strike", " cs2 ", "blast premier", "esl pro league", "valorant", " vct "],
   "book_snapshot_interval_ms": 5000,
