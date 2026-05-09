@@ -77,6 +77,8 @@ def build_collector_command(config: dict[str, Any], run_id: str) -> tuple[list[s
         "discovery_order": "--discovery-order",
         "log_level": "--log-level",
         "max_events": "--max-events",
+        "spot_feed": "--spot-feed",
+        "spot_poll_interval_sec": "--spot-poll-interval-sec",
     }
     for key, flag in scalar_flags.items():
         if key in config and config[key] is not None:
@@ -86,6 +88,7 @@ def build_collector_command(config: dict[str, Any], run_id: str) -> tuple[list[s
         "market_keyword": "--market-keyword",
         "exclude_market_keyword": "--exclude-market-keyword",
         "payoff_type": "--payoff-type",
+        "spot_asset_slug": "--spot-asset-slug",
     }
     for key, flag in list_flags.items():
         values = config.get(key) or []

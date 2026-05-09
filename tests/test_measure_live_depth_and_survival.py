@@ -238,6 +238,7 @@ class MeasureLiveDepthAndSurvivalTest(unittest.TestCase):
             _extract_payoff_type({}, None, "Will highest temperature in London be between 17-18C?"),
             "range",
         )
+        self.assertEqual(_extract_payoff_type({}, None, "Will the lowest temperature in Seoul be 14°C on May 11?"), "exact")
         self.assertEqual(_extract_payoff_type({}, None, "Bitcoin Up or Down"), "above_below_pair")
         self.assertEqual(_extract_asset_slug({}, None, "BNB Up or Down"), "bnb")
         self.assertEqual(_extract_asset_slug({}, None, "DOGE Up or Down"), "doge")

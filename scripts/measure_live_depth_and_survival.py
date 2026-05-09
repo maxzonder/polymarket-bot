@@ -84,6 +84,15 @@ DEFAULT_PING_INTERVAL_SEC = 10
 DEFAULT_MAX_DISCOVERY_ROWS = 20000
 DEFAULT_OUTPUT_SUBDIR = Path("short_horizon") / "phase0"
 DEFAULT_OUTPUT_BASENAME = "live_depth_survival.csv"
+BINANCE_TICKER_BASE = "https://api.binance.com"
+DEFAULT_BINANCE_SPOT_SYMBOLS = {
+    "btc": "BTCUSDT",
+    "eth": "ETHUSDT",
+    "sol": "SOLUSDT",
+    "xrp": "XRPUSDT",
+    "bnb": "BNBUSDT",
+    "doge": "DOGEUSDT",
+}
 
 
 @dataclass
@@ -654,13 +663,15 @@ class LiveDepthCollector:
         survival = asyncio.create_task(self.survival_loop())
         heartbeat = asyncio.create_task(self.heartbeat_loop())
         snapshot = asyncio.create_task(self.book_snapshot_loop())
+        spot = asyncio.create_task(self.spot_feed_loop())
+        tasks = (consumer, refresh, survival, heartbeat, snapshot, spot)
 
         try:
             await self.stop_event.wait()
         finally:
-            for task in (consumer, refresh, survival, heartbeat, snapshot):
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(consumer, refresh, survival, heartbeat, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             self.csv.close()
             if self.sqlite is not None:
                 self.sqlite.close()
@@ -948,6 +959,34 @@ class LiveDepthCollector:
             self.periodic_snapshots_written += written
             if written:
                 self.logger.debug("Periodic book snapshots written=%s total=%s", written, self.periodic_snapshots_written)
+
+    async def spot_feed_loop(self) -> None:
+        if getattr(self.args, "spot_feed", "none") == "none":
+            return
+        interval = float(getattr(self.args, "spot_poll_interval_sec", 1.0) or 1.0)
+        session = requests.Session()
+        while True:
+            symbols = self._active_spot_symbols()
+            if not symbols:
+                await asyncio.sleep(interval)
+                continue
+            started = time.monotonic()
+            for asset_slug, symbol in symbols.items():
+                try:
+                    observation = await asyncio.to_thread(fetch_binance_spot_observation, session, asset_slug, symbol)
+                    self.record_spot_observation(observation)
+                except Exception:
+                    self.logger.debug("Spot fetch failed asset=%s symbol=%s", asset_slug, symbol, exc_info=True)
+            elapsed = time.monotonic() - started
+            await asyncio.sleep(max(0.0, interval - elapsed))
+
+    def _active_spot_symbols(self) -> dict[str, str]:
+        configured = _allowed_asset_slugs(getattr(self.args, "spot_asset_slug", None))
+        if not configured:
+            configured = _allowed_asset_slugs(getattr(self.args, "asset_slug", None))
+        if not configured:
+            configured = {token.asset_slug for token in self.tokens_by_id.values() if token.asset_slug}
+        return {asset: DEFAULT_BINANCE_SPOT_SYMBOLS[asset] for asset in sorted(configured) if asset in DEFAULT_BINANCE_SPOT_SYMBOLS}
 
     async def market_ws_loop(self) -> None:
         if websockets is None:  # pragma: no cover
@@ -1441,6 +1480,24 @@ def spot_features_from_history(
     return features
 
 
+def fetch_binance_spot_observation(session: requests.Session, asset_slug: str, symbol: str) -> SpotObservation:
+    now_ms = int(time.time() * 1000)
+    response = session.get(
+        f"{BINANCE_TICKER_BASE}/api/v3/ticker/price",
+        params={"symbol": symbol},
+        timeout=5,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return SpotObservation(
+        asset_slug=asset_slug,
+        event_ts_ms=now_ms,
+        ingest_ts_ms=int(time.time() * 1000),
+        source="binance.ticker",
+        spot_price=float(payload["price"]),
+    )
+
+
 def latest_observation_before(history: deque[BookObservation], target_ts_ms: int) -> Optional[BookObservation]:
     latest: Optional[BookObservation] = None
     for obs in history:
@@ -1677,6 +1734,8 @@ def _extract_payoff_type(raw: dict[str, Any], event0: Optional[dict[str, Any]], 
         return "below"
     if "between" in text or "range" in text:
         return "range"
+    if "temperature" in text and re.search(r"\b\d+(?:\.\d+)?\s*°?\s*[cf]\b", text):
+        return "exact"
     if "spread" in text or "against the spread" in text or "-ats-" in text:
         return "spread"
     if "total" in text or "over/under" in text:
@@ -1976,6 +2035,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         help="Restrict parsed payoff types; repeatable and comma-separated values are accepted, e.g. range,above,below",
+    )
+    parser.add_argument("--spot-feed", choices=("none", "binance"), default="none", help="Optional live spot feed for crypto spot context")
+    parser.add_argument("--spot-poll-interval-sec", type=float, default=1.0, help="Polling interval for --spot-feed=binance")
+    parser.add_argument(
+        "--spot-asset-slug",
+        action="append",
+        default=None,
+        help="Restrict spot feed assets; repeatable and comma-separated. Defaults to --asset-slug or active token asset slugs.",
     )
     parser.add_argument("--discovery-order", default="createdAt")
     parser.add_argument("--discovery-ascending", action="store_true")

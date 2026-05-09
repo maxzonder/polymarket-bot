@@ -8,7 +8,7 @@
   "max_duration_seconds": 604800,
   "max_seconds_to_end": 604800,
   "market_keyword": ["temperature", "highest temperature", "low temperature"],
-  "payoff_type": ["range", "above", "below"],
+  "payoff_type": ["exact", "range", "above", "below"],
   "book_snapshot_interval_ms": 5000,
   "timeout_seconds": "2h",
   "report_min_rows": 3,

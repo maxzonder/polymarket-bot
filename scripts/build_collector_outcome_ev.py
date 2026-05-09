@@ -103,7 +103,7 @@ def build_collector_outcome_ev(
         groups.setdefault(row.group_values, []).append(row)
 
     out: list[OutcomeEvRow] = []
-    for key, group_rows in sorted(groups.items(), key=lambda item: item[0]):
+    for key, group_rows in sorted(groups.items(), key=lambda item: _safe_sort_key(item[0])):
         if len(group_rows) < min_rows:
             continue
         joined_rows = [row for row in group_rows if row.is_joined]
@@ -144,8 +144,12 @@ def build_collector_outcome_ev(
                 held_at_or_above_rate=_rate(joined_rows, lambda row: row.held_at_or_above is True),
             )
         )
-    out.sort(key=lambda row: tuple(row.group.values()))
+    out.sort(key=lambda row: _safe_sort_key(tuple(row.group.values())))
     return out
+
+
+def _safe_sort_key(values: tuple[Any, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple(("" if value is None else type(value).__name__, "" if value is None else str(value)) for value in values)
 
 
 def distinct_market_ids(db_path: Path) -> list[str]:

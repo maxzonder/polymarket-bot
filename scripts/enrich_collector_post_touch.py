@@ -89,7 +89,7 @@ def build_enrichment_summary(
         groups.setdefault(key, []).append(row)
 
     out: list[EnrichmentSummaryRow] = []
-    for key, group_rows in sorted(groups.items(), key=lambda item: item[0]):
+    for key, group_rows in sorted(groups.items(), key=lambda item: _safe_sort_key(item[0])):
         if len(group_rows) < min_rows:
             continue
         out.append(
@@ -113,6 +113,10 @@ def build_enrichment_summary(
             )
         )
     return out
+
+
+def _safe_sort_key(values: tuple[Any, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple(("" if value is None else type(value).__name__, "" if value is None else str(value)) for value in values)
 
 
 def _ensure_enrichment_table(conn: sqlite3.Connection, horizons_ms: Sequence[int], *, replace: bool) -> None:

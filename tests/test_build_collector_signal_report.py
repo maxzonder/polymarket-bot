@@ -12,7 +12,7 @@ SCRIPTS_ROOT = REPO_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from build_collector_signal_report import build_signal_report, write_json, write_markdown  # noqa: E402
+from build_collector_signal_report import _safe_sort_key, build_signal_report, write_json, write_markdown  # noqa: E402
 
 
 class BuildCollectorSignalReportTest(unittest.TestCase):
@@ -43,6 +43,10 @@ class BuildCollectorSignalReportTest(unittest.TestCase):
             self.assertEqual(row.fit_10_usdc_rows, 2)
             self.assertAlmostEqual(row.held_5s_rate or 0.0, 0.5)
             self.assertAlmostEqual(row.reversal_5s_rate or 0.0, 0.5)
+
+    def test_safe_sort_key_handles_mixed_none_and_strings(self) -> None:
+        values = [("total",), (None,), ("temperature_exact",)]
+        self.assertEqual(sorted(values, key=_safe_sort_key), [(None,), ("temperature_exact",), ("total",)])
 
     def test_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

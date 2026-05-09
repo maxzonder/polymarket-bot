@@ -81,7 +81,7 @@ def build_collector_heatmap(
         groups.setdefault(key, []).append(row)
 
     out: list[HeatmapRow] = []
-    for key, group_rows in sorted(groups.items(), key=lambda item: (item[0], len(item[1]))):
+    for key, group_rows in sorted(groups.items(), key=lambda item: (_safe_sort_key(item[0]), len(item[1]))):
         if len(group_rows) < min_rows:
             continue
         executable_rows = [row for row in group_rows if _is_executable(row)]
@@ -104,8 +104,12 @@ def build_collector_heatmap(
                 avg_max_adverse_move=_avg(group_rows, "max_adverse_move"),
             )
         )
-    out.sort(key=lambda row: (row.group_key(), -row.rows) if hasattr(row, "group_key") else (tuple(row.group.values()), -row.rows))
+    out.sort(key=lambda row: (_safe_sort_key(tuple(row.group.values())), -row.rows))
     return out
+
+
+def _safe_sort_key(values: tuple[Any, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple(("" if value is None else type(value).__name__, "" if value is None else str(value)) for value in values)
 
 
 def _validate_axes(conn: sqlite3.Connection, axes: Sequence[str]) -> None:

@@ -161,7 +161,7 @@ def build_signal_report(
         groups.setdefault(row.group_values, []).append(row)
 
     out: list[SignalReportRow] = []
-    for key, group_rows in sorted(groups.items(), key=lambda item: item[0]):
+    for key, group_rows in sorted(groups.items(), key=lambda item: _safe_sort_key(item[0])):
         rows_joined = [row for row in group_rows if row.joined]
         filtered = [row for row in group_rows if row.passed_filters]
         if len(filtered) < min_rows:
@@ -217,6 +217,10 @@ def build_signal_report(
         )
     out.sort(key=lambda row: (row.score if row.score is not None else -999.0, row.total_ev_5_shares or -999.0), reverse=True)
     return out
+
+
+def _safe_sort_key(values: tuple[Any, ...]) -> tuple[tuple[str, str], ...]:
+    return tuple(("" if value is None else type(value).__name__, "" if value is None else str(value)) for value in values)
 
 
 def distinct_market_ids(db_path: Path) -> list[str]:

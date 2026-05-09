@@ -14,8 +14,8 @@ Research infrastructure for GitHub issue #161. This collector is measurement-onl
 - New runs use explicit horizon buckets: `5m`, `15m`, `1h`, `1d`, `1-7d`, `8-30d`, `>30d`.
 - Older DBs still contain old bucket labels such as `15m-ish`; do not reinterpret them in-place.
 - For exact crypto 5m/15m analysis, prefer `duration_seconds` as a report axis.
-- `spot_snapshots` schema exists, but live spot feed is not connected yet, so crypto spot features remain empty.
-- Broad `black_swan_low_tail` discovery is still experimental/debug. A smoke run showed it can pull useful weather temperature markets but also noisy sports/esports markets; do not use it as a long production collector config until filters are split/refined.
+- `spot_snapshots` schema exists and crypto configs can enable Binance ticker polling with `spot_feed: "binance"`.
+- Broad `black_swan_low_tail` discovery is still experimental/debug. A smoke run showed it can pull useful weather temperature markets but also noisy sports/esports markets; do not use it as a long production collector config.
 
 ## Prod paths
 
@@ -65,13 +65,22 @@ Useful configs:
 - `configs/collector/crypto_multi_horizon_majors.yaml`
   - crypto majors only: BTC/ETH/SOL/XRP;
   - 5m/15m via `duration_seconds`;
+  - enables Binance spot polling;
   - good default for validating ETH Down / majors slices on another day.
 - `configs/collector/weather_temperature_low_tail.yaml`
   - weather temperature low-tail markets;
+  - exact/range/above/below temperature payoffs;
   - good for fill/stability now, outcome EV only after markets resolve.
+- `configs/collector/black_swan_crypto_low_tail.yaml`
+  - crypto low-tail / MP-style discovery;
+  - enables Binance spot polling;
+  - excludes short-horizon Up/Down markets.
+- `configs/collector/black_swan_politics_low_tail.yaml`
+  - politics/geopolitics low-tail discovery;
+  - excludes obvious esports map/total-kills noise.
 - `configs/collector/black_swan_low_tail.yaml`
-  - broad discovery/debug only for now;
-  - currently too noisy for blind long runs.
+  - broad discovery/debug smoke only;
+  - timeout is intentionally short.
 
 The runner writes artifacts named from `run_id`:
 
@@ -105,6 +114,8 @@ python3 scripts/measure_live_depth_and_survival.py \
   --min-duration-seconds 300 \
   --max-duration-seconds 900 \
   --duration-metric implied_series \
+  --spot-feed binance \
+  --spot-asset-slug btc,eth,sol,xrp \
   --output-csv /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_multi_horizon_majors.csv \
   --output-sqlite /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_multi_horizon_majors.sqlite3 \
   --book-snapshot-interval-ms 1000
@@ -307,5 +318,5 @@ PY
   - politics/geopolitics low-tail separately.
 - Run another crypto majors 12h collector to validate ETH Down and other positive slices across days.
 - Re-run weather outcome/EV after weather markets resolve.
-- Connect live spot feed so `spot_snapshots` and crypto spot-return features become usable.
+- Validate Binance spot polling in the next crypto collector run; `spot_snapshots` should become non-zero for BTC/ETH/SOL/XRP runs.
 - Keep all collector outputs under `/home/polybot/.polybot`, not the git repo.
