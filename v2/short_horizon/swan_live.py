@@ -30,10 +30,12 @@ import sys
 import uuid
 from pathlib import Path
 
-# Ensure repo root is on path so strategy/ and api/ imports resolve.
+# Ensure repo root and v2/short_horizon/ are on path so all imports resolve.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_V2_SH_DIR = Path(__file__).resolve().parent  # v2/short_horizon/ → exposes short_horizon pkg
+for _p in (_REPO_ROOT, _V2_SH_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from short_horizon.core.clock import SystemClock
 from short_horizon.core.events import TimerEvent
