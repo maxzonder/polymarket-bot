@@ -715,7 +715,7 @@ class SQLiteRuntimeStore:
         return self._latest_market_state_by_id.get(market_id)
 
     def _initialize_schema(self) -> None:
-        schema_path = Path(__file__).resolve().parents[2] / "docs" / "phase0" / "storage_schema.sql"
+        schema_path = Path(__file__).resolve().parent / "schema.sql"
         self._migrate_runs_schema()
         self._migrate_orders_schema(precreate=True)
         self.conn.executescript(schema_path.read_text())
