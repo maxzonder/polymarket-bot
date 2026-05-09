@@ -10,7 +10,7 @@
   "market_keyword": ["election", "trump", "biden", "president", "senate", "congress", "war", "ceasefire", "ukraine", "israel"],
   "exclude_market_keyword": ["up or down", "total kills", "map 1", "map 2", "map 3"],
   "book_snapshot_interval_ms": 5000,
-  "timeout_seconds": "2h",
+  "timeout_seconds": "168h",
   "report_min_rows": 3,
   "signal_min_rows": 3,
   "signal_max_spread": 0.08,

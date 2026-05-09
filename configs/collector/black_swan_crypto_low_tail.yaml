@@ -14,7 +14,7 @@
   "spot_feed": "binance",
   "spot_asset_slug": ["btc", "eth", "sol", "xrp"],
   "spot_poll_interval_sec": 1.0,
-  "timeout_seconds": "2h",
+  "timeout_seconds": "168h",
   "report_min_rows": 3,
   "signal_min_rows": 3,
   "signal_max_spread": 0.08,
