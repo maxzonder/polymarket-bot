@@ -95,6 +95,7 @@ class MarketToken:
     tick_size: Optional[float]
     category: Optional[str] = None
     event_slug: Optional[str] = None
+    asset_slug: Optional[str] = None
 
 
 @dataclass
@@ -115,6 +116,17 @@ class BookObservation:
     event_ts_ms: int
     best_bid: Optional[float]
     best_ask: Optional[float]
+
+
+@dataclass
+class SpotObservation:
+    asset_slug: str
+    event_ts_ms: int
+    ingest_ts_ms: int
+    source: str
+    spot_price: float
+    bid: Optional[float] = None
+    ask: Optional[float] = None
 
 
 @dataclass
@@ -151,6 +163,7 @@ class SurvivalProbe:
     fit_details: dict[str, dict[str, Optional[float] | str]]
     min_share_details: dict[str, Optional[float] | str]
     pre_touch_features: PreTouchFeatures = field(default_factory=PreTouchFeatures)
+    spot_features: dict[str, Any] = field(default_factory=dict)
     max_favorable_move: float = 0.0
     max_adverse_move: float = 0.0
     held_at_or_above_level: bool = True
@@ -173,6 +186,7 @@ class CsvSink:
         "question",
         "category",
         "event_slug",
+        "asset_slug",
         "touch_level",
         "touch_time_iso",
         "duration_seconds",
@@ -249,6 +263,15 @@ class CsvSink:
         "max_adverse_move",
         "held_at_or_above_level",
         "immediate_reversal_flag",
+        "spot_price_at_touch",
+        "spot_source_at_touch",
+        "spot_latency_ms_at_touch",
+        "spot_bid_at_touch",
+        "spot_ask_at_touch",
+        "spot_return_30s",
+        "spot_return_1m",
+        "spot_return_3m",
+        "spot_return_5m",
         "survived_ms",
         "end_reason",
     ]
@@ -332,6 +355,7 @@ class SqliteSink:
                 question TEXT,
                 category TEXT,
                 event_slug TEXT,
+                asset_slug TEXT,
                 touch_level REAL,
                 touch_time_iso TEXT,
                 duration_seconds INTEGER,
@@ -390,6 +414,15 @@ class SqliteSink:
                 max_adverse_move REAL,
                 held_at_or_above_level INTEGER,
                 immediate_reversal_flag INTEGER,
+                spot_price_at_touch REAL,
+                spot_source_at_touch TEXT,
+                spot_latency_ms_at_touch INTEGER,
+                spot_bid_at_touch REAL,
+                spot_ask_at_touch REAL,
+                spot_return_30s REAL,
+                spot_return_1m REAL,
+                spot_return_3m REAL,
+                spot_return_5m REAL,
                 survived_ms INTEGER,
                 end_reason TEXT
             );
@@ -423,6 +456,21 @@ class SqliteSink:
             );
             CREATE INDEX IF NOT EXISTS idx_book_snapshots_token_time ON book_snapshots(token_id, event_ts_ms);
             CREATE INDEX IF NOT EXISTS idx_book_snapshots_market_time ON book_snapshots(market_id, event_ts_ms);
+            CREATE TABLE IF NOT EXISTS spot_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                asset_slug TEXT NOT NULL,
+                event_ts_ms INTEGER NOT NULL,
+                ingest_ts_ms INTEGER NOT NULL,
+                event_time_iso TEXT NOT NULL,
+                source TEXT NOT NULL,
+                spot_price REAL NOT NULL,
+                bid REAL,
+                ask REAL,
+                latency_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_spot_snapshots_asset_time ON spot_snapshots(asset_slug, event_ts_ms);
             """
         )
         self.conn.commit()
@@ -435,7 +483,7 @@ class SqliteSink:
             """
             INSERT OR REPLACE INTO touch_events(
                 probe_id, run_id, schema_version, recorded_at, market_id, condition_id, token_id, outcome,
-                question, category, event_slug, touch_level, touch_time_iso, duration_seconds, start_time_iso,
+                question, category, event_slug, asset_slug, touch_level, touch_time_iso, duration_seconds, start_time_iso,
                 end_time_iso, fees_enabled, fee_rate_bps, tick_size, best_bid_at_touch, best_ask_at_touch,
                 spread_at_touch, mid_price_at_touch, microprice_at_touch, imbalance_top1, imbalance_top3,
                 imbalance_top5, bid_levels_json, ask_levels_json, ask_size_at_touch_level, fit_5_shares,
@@ -449,10 +497,12 @@ class SqliteSink:
                 best_bid_delta_5s, best_ask_delta_5s, best_bid_15s_before, best_ask_15s_before,
                 best_bid_delta_15s, best_ask_delta_15s, best_bid_60s_before, best_ask_60s_before,
                 best_bid_delta_60s, best_ask_delta_60s, max_favorable_move, max_adverse_move,
-                held_at_or_above_level, immediate_reversal_flag, survived_ms, end_reason
+                held_at_or_above_level, immediate_reversal_flag, spot_price_at_touch, spot_source_at_touch,
+                spot_latency_ms_at_touch, spot_bid_at_touch, spot_ask_at_touch, spot_return_30s,
+                spot_return_1m, spot_return_3m, spot_return_5m, survived_ms, end_reason
             ) VALUES (
                 :probe_id, :run_id, :schema_version, :recorded_at, :market_id, :condition_id, :token_id, :outcome,
-                :question, :category, :event_slug, :touch_level, :touch_time_iso, :duration_seconds, :start_time_iso,
+                :question, :category, :event_slug, :asset_slug, :touch_level, :touch_time_iso, :duration_seconds, :start_time_iso,
                 :end_time_iso, :fees_enabled, :fee_rate_bps, :tick_size, :best_bid_at_touch, :best_ask_at_touch,
                 :spread_at_touch, :mid_price_at_touch, :microprice_at_touch, :imbalance_top1, :imbalance_top3,
                 :imbalance_top5, :bid_levels_json, :ask_levels_json, :ask_size_at_touch_level, :fit_5_shares,
@@ -466,7 +516,9 @@ class SqliteSink:
                 :best_bid_delta_5s, :best_ask_delta_5s, :best_bid_15s_before, :best_ask_15s_before,
                 :best_bid_delta_15s, :best_ask_delta_15s, :best_bid_60s_before, :best_ask_60s_before,
                 :best_bid_delta_60s, :best_ask_delta_60s, :max_favorable_move, :max_adverse_move,
-                :held_at_or_above_level, :immediate_reversal_flag, :survived_ms, :end_reason
+                :held_at_or_above_level, :immediate_reversal_flag, :spot_price_at_touch, :spot_source_at_touch,
+                :spot_latency_ms_at_touch, :spot_bid_at_touch, :spot_ask_at_touch, :spot_return_30s,
+                :spot_return_1m, :spot_return_3m, :spot_return_5m, :survived_ms, :end_reason
             )
             """,
             row,
@@ -506,6 +558,33 @@ class SqliteSink:
         )
         self.conn.commit()
 
+    def write_spot_snapshot(self, spot: SpotObservation) -> None:
+        snapshot_id = f"{self.run_id}:spot:{spot.asset_slug}:{spot.event_ts_ms}:{spot.source}"
+        latency_ms = max(0, spot.ingest_ts_ms - spot.event_ts_ms)
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO spot_snapshots(
+                snapshot_id, run_id, schema_version, asset_slug, event_ts_ms, ingest_ts_ms, event_time_iso,
+                source, spot_price, bid, ask, latency_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                snapshot_id,
+                self.run_id,
+                SCHEMA_VERSION,
+                spot.asset_slug,
+                spot.event_ts_ms,
+                spot.ingest_ts_ms,
+                iso_from_ms(spot.event_ts_ms),
+                spot.source,
+                spot.spot_price,
+                spot.bid,
+                spot.ask,
+                latency_ms,
+            ),
+        )
+        self.conn.commit()
+
     def close(self) -> None:
         self.conn.close()
 
@@ -520,6 +599,8 @@ class LiveDepthCollector:
         self.fired_touches: set[tuple[str, str, float]] = set()
         self.active_probes: dict[str, SurvivalProbe] = {}
         self.book_history: dict[str, deque[BookObservation]] = {}
+        self.spot_history_by_asset: dict[str, deque[SpotObservation]] = {}
+        self.latest_spot_by_asset: dict[str, SpotObservation] = {}
         self.completed_probes = 0
         self.csv = CsvSink(Path(args.output_csv), run_id=args.run_id)
         self.sqlite = SqliteSink(Path(args.output_sqlite), run_id=args.run_id, args=args) if args.output_sqlite else None
@@ -713,6 +794,7 @@ class LiveDepthCollector:
                             tick_size=tick_size,
                             category=_extract_category(raw, event0),
                             event_slug=str((event0 or {}).get("slug") or raw.get("slug") or "") or None,
+                            asset_slug=_extract_asset_slug(raw, event0, question),
                         )
                     )
                     stats["eligible_tokens"] += 1
@@ -868,6 +950,25 @@ class LiveDepthCollector:
         self._record_book_observation(asset_id)
         await self._detect_touches(asset_id)
 
+    def record_spot_observation(self, spot: SpotObservation) -> None:
+        history = self.spot_history_by_asset.setdefault(spot.asset_slug, deque())
+        history.append(spot)
+        cutoff = spot.event_ts_ms - 360_000
+        while history and history[0].event_ts_ms < cutoff:
+            history.popleft()
+        self.latest_spot_by_asset[spot.asset_slug] = spot
+        if self.sqlite is not None:
+            self.sqlite.write_spot_snapshot(spot)
+
+    def _spot_features_at_touch(self, asset_slug: Optional[str], touch_ts_ms: int) -> dict[str, Any]:
+        if not asset_slug:
+            return empty_spot_features()
+        history = self.spot_history_by_asset.get(asset_slug)
+        if not history:
+            return empty_spot_features()
+        latest = latest_spot_before(history, touch_ts_ms)
+        return spot_features_from_history(history, latest, touch_ts_ms)
+
     def _record_book_observation(self, token_id: str) -> None:
         book = self.books.get(token_id)
         if book is None:
@@ -999,6 +1100,10 @@ class LiveDepthCollector:
                         book.last_event_ts_ms or int(time.time() * 1000),
                         book.best_bid,
                         best_ask,
+                    ),
+                    spot_features=self._spot_features_at_touch(
+                        token.asset_slug,
+                        book.last_event_ts_ms or int(time.time() * 1000),
                     ),
                 )
                 self.active_probes[probe_id] = probe
@@ -1220,6 +1325,52 @@ def evaluate_notional_entry_details(
     return results
 
 
+def empty_spot_features() -> dict[str, Any]:
+    return {
+        "spot_price_at_touch": None,
+        "spot_source_at_touch": None,
+        "spot_latency_ms_at_touch": None,
+        "spot_bid_at_touch": None,
+        "spot_ask_at_touch": None,
+        "spot_return_30s": None,
+        "spot_return_1m": None,
+        "spot_return_3m": None,
+        "spot_return_5m": None,
+    }
+
+
+def latest_spot_before(history: deque[SpotObservation], target_ts_ms: int) -> Optional[SpotObservation]:
+    latest: Optional[SpotObservation] = None
+    for obs in history:
+        if obs.event_ts_ms <= target_ts_ms:
+            latest = obs
+        else:
+            break
+    return latest
+
+
+def spot_features_from_history(
+    history: deque[SpotObservation], latest: Optional[SpotObservation], touch_ts_ms: int
+) -> dict[str, Any]:
+    features = empty_spot_features()
+    if latest is None:
+        return features
+    features.update(
+        {
+            "spot_price_at_touch": latest.spot_price,
+            "spot_source_at_touch": latest.source,
+            "spot_latency_ms_at_touch": max(0, latest.ingest_ts_ms - latest.event_ts_ms),
+            "spot_bid_at_touch": latest.bid,
+            "spot_ask_at_touch": latest.ask,
+        }
+    )
+    for label, seconds in (("30s", 30), ("1m", 60), ("3m", 180), ("5m", 300)):
+        base = latest_spot_before(history, touch_ts_ms - seconds * 1000)
+        if base is not None and base.spot_price > 0:
+            features[f"spot_return_{label}"] = (latest.spot_price / base.spot_price) - 1.0
+    return features
+
+
 def latest_observation_before(history: deque[BookObservation], target_ts_ms: int) -> Optional[BookObservation]:
     latest: Optional[BookObservation] = None
     for obs in history:
@@ -1242,6 +1393,7 @@ def build_touch_row(probe: SurvivalProbe, book: BookState, *, run_id: str) -> di
     min_share = probe.min_share_details
     quality = build_book_snapshot_row(book, run_id=run_id, update_kind="touch", probe=probe)
     pre = probe.pre_touch_features
+    spot = probe.spot_features or empty_spot_features()
     row: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -1254,6 +1406,7 @@ def build_touch_row(probe: SurvivalProbe, book: BookState, *, run_id: str) -> di
         "question": probe.token.question,
         "category": probe.token.category,
         "event_slug": probe.token.event_slug,
+        "asset_slug": probe.token.asset_slug,
         "touch_level": probe.level,
         "touch_time_iso": iso_from_ms(probe.started_at_ms),
         "duration_seconds": probe.token.duration_seconds,
@@ -1300,6 +1453,15 @@ def build_touch_row(probe: SurvivalProbe, book: BookState, *, run_id: str) -> di
         "max_adverse_move": probe.max_adverse_move,
         "held_at_or_above_level": int(probe.held_at_or_above_level),
         "immediate_reversal_flag": int(probe.immediate_reversal_flag),
+        "spot_price_at_touch": spot.get("spot_price_at_touch"),
+        "spot_source_at_touch": spot.get("spot_source_at_touch"),
+        "spot_latency_ms_at_touch": spot.get("spot_latency_ms_at_touch"),
+        "spot_bid_at_touch": spot.get("spot_bid_at_touch"),
+        "spot_ask_at_touch": spot.get("spot_ask_at_touch"),
+        "spot_return_30s": spot.get("spot_return_30s"),
+        "spot_return_1m": spot.get("spot_return_1m"),
+        "spot_return_3m": spot.get("spot_return_3m"),
+        "spot_return_5m": spot.get("spot_return_5m"),
         "survived_ms": probe.survived_ms,
         "end_reason": probe.end_reason,
     }
@@ -1376,6 +1538,40 @@ def build_book_snapshot_row(
         "book_stale_flag": int(stale),
         "zero_size_level_flag": int(zero_size),
     }
+
+
+def _extract_asset_slug(raw: dict[str, Any], event0: Optional[dict[str, Any]], question: str) -> Optional[str]:
+    candidates = [
+        raw.get("assetSlug"),
+        raw.get("asset_slug"),
+        (event0 or {}).get("assetSlug"),
+        (event0 or {}).get("asset_slug"),
+    ]
+    for value in candidates:
+        if value:
+            return str(value).lower()
+    text = " ".join(
+        str(part or "")
+        for part in (
+            question,
+            raw.get("slug"),
+            (event0 or {}).get("slug"),
+            raw.get("question"),
+        )
+    ).lower()
+    for asset in ("bitcoin", "btc"):
+        if asset in text:
+            return "btc"
+    for asset in ("ethereum", "eth"):
+        if asset in text:
+            return "eth"
+    for asset in ("solana", " sol", "sol-"):
+        if asset in text:
+            return "sol"
+    for asset in ("xrp", "ripple"):
+        if asset in text:
+            return "xrp"
+    return None
 
 
 def _extract_category(raw: dict[str, Any], event0: Optional[dict[str, Any]]) -> Optional[str]:
