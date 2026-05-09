@@ -78,7 +78,8 @@ class FeatureMartNegRiskYesOnlyTests(unittest.TestCase):
                 buy_trade_count INTEGER,
                 buy_ts_first INTEGER,
                 buy_ts_last INTEGER,
-                is_winner INTEGER
+                is_winner INTEGER,
+                black_swan INTEGER DEFAULT 0
             )
             """
         )
