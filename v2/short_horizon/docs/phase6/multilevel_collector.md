@@ -103,6 +103,22 @@ python3 scripts/build_collector_heatmap.py \
   --executable-only
 ```
 
+## Join resolved outcomes and EV
+
+Use this after the collected markets have resolved. It backfills market outcomes from Gamma into a local resolutions DB, joins them to `touch_events`, and reports realized hold-to-resolution EV for hypothetical 5-share and 10 USDC entries.
+
+```bash
+python3 scripts/build_collector_outcome_ev.py \
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
+  --resolutions-sqlite /home/polybot/.polybot/short_horizon/data/market_resolutions.sqlite3 \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_outcome_ev.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_outcome_ev.json \
+  --backfill-resolutions \
+  --axis touch_level \
+  --axis asset_slug \
+  --axis outcome
+```
+
 ## Quick SQLite inspection
 
 ```bash
