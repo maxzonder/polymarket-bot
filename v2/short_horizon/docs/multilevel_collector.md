@@ -1,21 +1,32 @@
 # Multilevel collector runbook
 
-Research infrastructure for GitHub issue #161. This collector is measurement-only: it does not place orders.
+Research infrastructure for GitHub issue #161. The collector is measurement-only: it does not place orders.
 
-## Current state
+## Finish-line definition
 
-- Collector schema v2 is live and writes both legacy CSV and SQLite sidecar data.
-- Config-driven runs are preferred over long hand-written CLI commands.
-- `run_collector_from_config.py` now runs the collector and then builds:
-  - heatmap report;
-  - post-touch enrichment/report;
-  - signal report;
-  - compact run summary.
-- New runs use explicit horizon buckets: `5m`, `15m`, `1h`, `1d`, `1-7d`, `8-30d`, `>30d`.
-- Older DBs still contain old bucket labels such as `15m-ish`; do not reinterpret them in-place.
-- For exact crypto 5m/15m analysis, prefer `duration_seconds` as a report axis.
-- `spot_snapshots` schema exists and crypto configs can enable Binance ticker polling with `spot_feed: "binance"`.
-- Broad `black_swan_low_tail` discovery is still experimental/debug. A smoke run showed it can pull useful weather temperature markets but also noisy sports/esports markets; do not use it as a long production collector config.
+The collector is a strategy-specific data factory, not a strategy and not a trading bot.
+
+Its job is to produce a standard data package for a configured research universe:
+
+- which markets were available;
+- what the live book looked like;
+- whether a hypothetical entry was executable;
+- what happened after a level touch;
+- what the market resolved to;
+- which context features were present at entry time.
+
+Short runs are smoke/validation runs for this data factory. They are not the end product.
+
+## Current status
+
+- Collector schema v2 is live.
+- Config-driven runs are the canonical path.
+- `run_collector_from_config.py` runs the collector and then builds the standard report package.
+- New rows use explicit horizon buckets: `5m`, `15m`, `1h`, `1d`, `1-7d`, `8-30d`, `>30d`.
+- Older DBs may still contain `15m-ish`; do not rewrite those in-place.
+- Binance spot polling is connected for crypto configs with `spot_feed: "binance"`.
+- Broad `black_swan_low_tail` is now discovery/debug only; clean strategy configs exist for weather, crypto low-tail, and politics/geopolitics.
+- Reports handle mixed `None`/string axes after the sort fix.
 
 ## Prod paths
 
@@ -25,62 +36,73 @@ Research infrastructure for GitHub issue #161. This collector is measurement-onl
 - Collector logs: `/home/polybot/.polybot/short_horizon/logs/`
 - Resolutions DB: `/home/polybot/.polybot/short_horizon/data/market_resolutions.sqlite3`
 
-Always run prod collector commands from the repo with the data dir exported:
+Run prod commands from the repo with the data dir exported:
 
 ```bash
 cd /home/polybot/claude-polymarket
 export POLYMARKET_DATA_DIR=/home/polybot/.polybot
 ```
 
+## Architecture
+
+1. **Discovery layer**
+   - Finds markets for a configured universe.
+   - Filters by duration, recurrence, asset, keywords, payoff type, and time-to-end.
+
+2. **Live book collector**
+   - Subscribes to Polymarket market websocket.
+   - Writes periodic book snapshots when enabled.
+   - Detects configured ask-level touches.
+
+3. **Executable context**
+   - Records spread/depth/freshness flags.
+   - Computes fit for 5 shares and 10/50/100 USDC.
+   - This is the basic “could we actually enter?” layer.
+
+4. **Spot context**
+   - Optional Binance ticker polling for crypto assets.
+   - Writes `spot_snapshots` and spot fields on touch rows.
+   - Current supported assets: BTC, ETH, SOL, XRP, BNB, DOGE.
+
+5. **Post-touch context**
+   - Enriches touches with hold/reversal and move metrics.
+   - Helps separate valid entry states from microprint/noise.
+
+6. **Outcome/EV join**
+   - After markets resolve, joins collector rows to outcomes.
+   - Computes realized hypothetical hold-to-resolution EV.
+
+7. **Strategy reports**
+   - Summarize candidate slices/rules.
+   - Do not trade and should not be treated as strategy approval.
+
 ## What the collector writes
 
 `measure_live_depth_and_survival.py` writes:
 
 - legacy CSV rows for touch events;
-- SQLite sidecar with:
+- SQLite sidecar tables:
   - `collection_runs`
   - `touch_events`
   - `book_snapshots`
   - `spot_snapshots`
 
-Important touch-event fields include:
+Important `touch_events` fields:
 
 - metadata: `asset_slug`, `universe_mode`, `horizon_bucket`, `duration_seconds`, `event_subtype`, `payoff_type`;
 - executable context: `fit_5_shares`, `fit_10_usdc`, average entry prices, required hit rate;
 - book context: spread, mid, microprice, top-N bid/ask levels, imbalance top1/top3/top5;
 - quality flags: missing depth, crossed book, stale book, wide spread, zero-size level;
 - post-touch fields: survival reason, max favorable/adverse move, held/reversal flags;
-- spot fields: present in schema, currently empty unless spot feed is connected.
+- spot fields: spot price/source/latency and 30s/1m/3m/5m returns when spot feed is enabled.
 
-## Config-driven runs
+## Canonical run path
 
-Prefer this path once a preset is stable:
+Prefer config-driven runs:
 
 ```bash
 python3 scripts/run_collector_from_config.py configs/collector/crypto_multi_horizon_majors.yaml
 ```
-
-Useful configs:
-
-- `configs/collector/crypto_multi_horizon_majors.yaml`
-  - crypto majors only: BTC/ETH/SOL/XRP;
-  - 5m/15m via `duration_seconds`;
-  - enables Binance spot polling;
-  - good default for validating ETH Down / majors slices on another day.
-- `configs/collector/weather_temperature_low_tail.yaml`
-  - weather temperature low-tail markets;
-  - exact/range/above/below temperature payoffs;
-  - good for fill/stability now, outcome EV only after markets resolve.
-- `configs/collector/black_swan_crypto_low_tail.yaml`
-  - crypto low-tail / MP-style discovery;
-  - enables Binance spot polling;
-  - excludes short-horizon Up/Down markets.
-- `configs/collector/black_swan_politics_low_tail.yaml`
-  - politics/geopolitics low-tail discovery;
-  - excludes obvious esports map/total-kills noise.
-- `configs/collector/black_swan_low_tail.yaml`
-  - broad discovery/debug smoke only;
-  - timeout is intentionally short.
 
 The runner writes artifacts named from `run_id`:
 
@@ -91,20 +113,70 @@ The runner writes artifacts named from `run_id`:
 - `<run_id>_signal_report.md/json`
 - `<run_id>_summary.md/json`
 
-## Manual collector commands
+If `timeout` stops the collector, exit status `124` is normal.
 
-Crypto wide grid:
+## Strategy configs
 
-```bash
-python3 scripts/measure_live_depth_and_survival.py \
-  --level-preset crypto_wide \
-  --universe-mode crypto_15m \
-  --output-csv /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_wide.csv \
-  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_wide.sqlite3 \
-  --book-snapshot-interval-ms 1000
-```
+### `configs/collector/crypto_multi_horizon_majors.yaml`
 
-Crypto multi-horizon majors-only:
+Purpose: 5m/15m crypto majors validation.
+
+- universe: `crypto_multi_horizon`
+- assets: BTC/ETH/SOL/XRP
+- levels: `crypto_wide`
+- duration: 300–900s via `duration_metric=implied_series`
+- spot feed: Binance enabled
+- report axes: `duration_seconds`, `asset_slug`, `outcome`
+
+Use for validating ETH Down / majors slices across another day.
+
+### `configs/collector/weather_temperature_low_tail.yaml`
+
+Purpose: low-tail temperature markets.
+
+- universe: `weather_temperature`
+- levels: `black_swan_low_tail`
+- duration: 1h–7d by time remaining
+- payoff types: `exact`, `range`, `above`, `below`
+- report axes: `horizon_bucket`, `event_subtype`, `payoff_type`, `touch_level`
+
+Use for fill/stability now; EV only after markets resolve.
+
+### `configs/collector/black_swan_crypto_low_tail.yaml`
+
+Purpose: crypto low-tail / MP-style discovery.
+
+- universe: `black_swan_low_tail`
+- assets: BTC/ETH/SOL/XRP
+- levels: `black_swan_low_tail`
+- excludes short-horizon `up or down`
+- spot feed: Binance enabled
+- report axes: `horizon_bucket`, `asset_slug`, `payoff_type`, `touch_level`
+
+Use as the clean crypto black-swan collector, not the broad debug config.
+
+### `configs/collector/black_swan_politics_low_tail.yaml`
+
+Purpose: politics/geopolitics low-tail discovery.
+
+- keywords: election, major politicians, war/ceasefire/geopolitics terms
+- excludes obvious esports map/total-kills noise
+- duration: up to 30d by time remaining
+- report axes: `horizon_bucket`, `payoff_type`, `event_subtype`, `touch_level`
+
+Use for narrow politics/geopolitics smoke before any long run.
+
+### `configs/collector/black_swan_low_tail.yaml`
+
+Purpose: broad discovery/debug only.
+
+- intentionally short timeout: 30m
+- known to mix useful weather markets with sports/esports noise
+- do not use for blind long runs
+
+## Manual command examples
+
+Crypto multi-horizon majors:
 
 ```bash
 python3 scripts/measure_live_depth_and_survival.py \
@@ -135,6 +207,7 @@ python3 scripts/measure_live_depth_and_survival.py \
   --market-keyword temperature \
   --market-keyword "highest temperature" \
   --market-keyword "low temperature" \
+  --payoff-type exact \
   --payoff-type range \
   --payoff-type above \
   --payoff-type below \
@@ -143,29 +216,22 @@ python3 scripts/measure_live_depth_and_survival.py \
   --book-snapshot-interval-ms 5000
 ```
 
-Broad black-swan low-tail discovery smoke only:
+Crypto black-swan low-tail:
 
 ```bash
-timeout 30m python3 scripts/measure_live_depth_and_survival.py \
-  --level-preset black_swan_low_tail \
-  --universe-mode black_swan_low_tail \
-  --no-require-recurrence \
-  --duration-metric time_remaining \
-  --min-duration-seconds 3600 \
-  --max-duration-seconds 604800 \
-  --max-seconds-to-end 604800 \
-  --market-keyword temperature \
-  --market-keyword weather \
-  --market-keyword bitcoin \
-  --market-keyword ethereum \
-  --market-keyword nba \
-  --market-keyword nfl \
-  --market-keyword winner \
-  --market-keyword election \
-  --exclude-market-keyword "up or down" \
-  --output-csv /home/polybot/.polybot/short_horizon/phase0/black_swan_low_tail_smoke.csv \
-  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/black_swan_low_tail_smoke.sqlite3 \
-  --book-snapshot-interval-ms 5000
+python3 scripts/run_collector_from_config.py configs/collector/black_swan_crypto_low_tail.yaml
+```
+
+Politics/geopolitics low-tail:
+
+```bash
+python3 scripts/run_collector_from_config.py configs/collector/black_swan_politics_low_tail.yaml
+```
+
+Broad discovery/debug smoke:
+
+```bash
+python3 scripts/run_collector_from_config.py configs/collector/black_swan_low_tail.yaml
 ```
 
 ## Report commands
@@ -234,17 +300,16 @@ A smoke run is good enough if:
 - process starts and subscribes to market WS;
 - SQLite sidecar is created;
 - `collection_runs` has one row;
-- `book_snapshots` grows when `--book-snapshot-interval-ms` is enabled;
+- `book_snapshots` grows when periodic snapshots are enabled;
 - if touches occur, `touch_events` rows include depth/spread/executable/freshness metadata;
+- if spot feed is enabled, `spot_snapshots` becomes non-zero;
 - report scripts can read the sidecar and write Markdown/JSON.
 
-If no touches occur during a short smoke window, that is not a collector failure. Treat it as an ingest/schema smoke and run a longer collection window for heatmap analysis.
-
-Expected `timeout` exit status is `124`; this is normal for bounded collector runs.
+If no touches occur during a short smoke window, that is not a collector failure. Treat it as an ingest/schema smoke.
 
 ## Quick inspection on prod
 
-The prod host may not have the `sqlite3` CLI installed. Use Python sqlite instead:
+The prod host may not have the `sqlite3` CLI installed. Use Python sqlite:
 
 ```bash
 python3 - <<'PY'
@@ -280,7 +345,7 @@ conn.close()
 PY
 ```
 
-## Findings from completed runs
+## Completed validation runs
 
 `crypto_wide_8h_20260509_005540`:
 
@@ -305,18 +370,33 @@ PY
 
 `black_swan_low_tail_smoke_20260509_202701`:
 
-- Early smoke showed the broad universe is too noisy for blind long runs.
-- It collected useful weather temperature questions, but also sports/esports such as total-kills markets.
-- Treat broad black-swan config as discovery/debug until split into narrower configs.
+- 134 touch events, 133078 book snapshots, 134 post-touch rows.
+- Useful as broad discovery smoke.
+- Showed useful weather temperature questions plus noisy sports/esports markets.
+- This is why broad black-swan remains debug-only and clean configs are preferred.
 
-## Recommended next work
+`spot_smoke_20260509_211100`:
 
-- Split broad black-swan discovery into narrower configs:
-  - weather temperature low-tail;
-  - crypto low-tail / MP-style markets;
-  - sports low-tail only after stronger subtype filters;
-  - politics/geopolitics low-tail separately.
-- Run another crypto majors 12h collector to validate ETH Down and other positive slices across days.
-- Re-run weather outcome/EV after weather markets resolve.
-- Validate Binance spot polling in the next crypto collector run; `spot_snapshots` should become non-zero for BTC/ETH/SOL/XRP runs.
-- Keep all collector outputs under `/home/polybot/.polybot`, not the git repo.
+- 1 touch event, 1 book snapshot, 14 spot snapshots.
+- Spot assets: BTC/ETH/SOL/XRP.
+- Confirms Binance spot feed is connected for crypto collector runs.
+
+## Collector infra status
+
+Done enough as a data factory:
+
+- stable strategy-config runner;
+- standard artifact package;
+- executable book context;
+- post-touch enrichment;
+- outcome/EV join;
+- compact run summary;
+- clean strategy configs for crypto majors, weather, crypto black-swan, politics/geopolitics;
+- Binance spot snapshots for crypto runs.
+
+Remaining work is strategy validation, not collector plumbing:
+
+- crypto majors 12–24h validation run with spot enabled;
+- weather outcome/EV after resolution;
+- narrow black-swan smoke runs from clean configs;
+- only then promote candidate slices into strategy research/trading code.
