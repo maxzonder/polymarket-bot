@@ -1,8 +1,38 @@
 # Multilevel collector runbook
 
-Research infrastructure for #161. This collector is measurement-only: it does not place orders.
+Research infrastructure for GitHub issue #161. This collector is measurement-only: it does not place orders.
 
-## What it writes
+## Current state
+
+- Collector schema v2 is live and writes both legacy CSV and SQLite sidecar data.
+- Config-driven runs are preferred over long hand-written CLI commands.
+- `run_collector_from_config.py` now runs the collector and then builds:
+  - heatmap report;
+  - post-touch enrichment/report;
+  - signal report;
+  - compact run summary.
+- New runs use explicit horizon buckets: `5m`, `15m`, `1h`, `1d`, `1-7d`, `8-30d`, `>30d`.
+- Older DBs still contain old bucket labels such as `15m-ish`; do not reinterpret them in-place.
+- For exact crypto 5m/15m analysis, prefer `duration_seconds` as a report axis.
+- `spot_snapshots` schema exists, but live spot feed is not connected yet, so crypto spot features remain empty.
+- Broad `black_swan_low_tail` discovery is still experimental/debug. A smoke run showed it can pull useful weather temperature markets but also noisy sports/esports markets; do not use it as a long production collector config until filters are split/refined.
+
+## Prod paths
+
+- Repo: `/home/polybot/claude-polymarket`
+- Data dir: `/home/polybot/.polybot`
+- Collector artifacts: `/home/polybot/.polybot/short_horizon/phase0/`
+- Collector logs: `/home/polybot/.polybot/short_horizon/logs/`
+- Resolutions DB: `/home/polybot/.polybot/short_horizon/data/market_resolutions.sqlite3`
+
+Always run prod collector commands from the repo with the data dir exported:
+
+```bash
+cd /home/polybot/claude-polymarket
+export POLYMARKET_DATA_DIR=/home/polybot/.polybot
+```
+
+## What the collector writes
 
 `measure_live_depth_and_survival.py` writes:
 
@@ -13,9 +43,46 @@ Research infrastructure for #161. This collector is measurement-only: it does no
   - `book_snapshots`
   - `spot_snapshots`
 
-The current default discovery remains narrow crypto short-horizon unless explicitly changed. Universe modes are metadata/config groundwork; they do not by themselves make the collector trade or broaden all discovery logic.
+Important touch-event fields include:
 
-## Useful presets
+- metadata: `asset_slug`, `universe_mode`, `horizon_bucket`, `duration_seconds`, `event_subtype`, `payoff_type`;
+- executable context: `fit_5_shares`, `fit_10_usdc`, average entry prices, required hit rate;
+- book context: spread, mid, microprice, top-N bid/ask levels, imbalance top1/top3/top5;
+- quality flags: missing depth, crossed book, stale book, wide spread, zero-size level;
+- post-touch fields: survival reason, max favorable/adverse move, held/reversal flags;
+- spot fields: present in schema, currently empty unless spot feed is connected.
+
+## Config-driven runs
+
+Prefer this path once a preset is stable:
+
+```bash
+python3 scripts/run_collector_from_config.py configs/collector/crypto_multi_horizon_majors.yaml
+```
+
+Useful configs:
+
+- `configs/collector/crypto_multi_horizon_majors.yaml`
+  - crypto majors only: BTC/ETH/SOL/XRP;
+  - 5m/15m via `duration_seconds`;
+  - good default for validating ETH Down / majors slices on another day.
+- `configs/collector/weather_temperature_low_tail.yaml`
+  - weather temperature low-tail markets;
+  - good for fill/stability now, outcome EV only after markets resolve.
+- `configs/collector/black_swan_low_tail.yaml`
+  - broad discovery/debug only for now;
+  - currently too noisy for blind long runs.
+
+The runner writes artifacts named from `run_id`:
+
+- `<run_id>.csv`
+- `<run_id>.sqlite3`
+- `<run_id>_heatmap.md/json`
+- `<run_id>_post_touch.md/json`
+- `<run_id>_signal_report.md/json`
+- `<run_id>_summary.md/json`
+
+## Manual collector commands
 
 Crypto wide grid:
 
@@ -28,29 +95,7 @@ python3 scripts/measure_live_depth_and_survival.py \
   --book-snapshot-interval-ms 1000
 ```
 
-Black-swan low-tail grid:
-
-```bash
-python3 scripts/measure_live_depth_and_survival.py \
-  --level-preset black_swan_low_tail \
-  --universe-mode black_swan_low_tail \
-  --output-csv /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_low_tail.csv \
-  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_low_tail.sqlite3 \
-  --book-snapshot-interval-ms 5000
-```
-
-Combined crypto wide + low-tail grid:
-
-```bash
-python3 scripts/measure_live_depth_and_survival.py \
-  --level-preset crypto_wide_low_tail \
-  --universe-mode crypto_15m \
-  --output-csv /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_wide_low_tail.csv \
-  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_wide_low_tail.sqlite3 \
-  --book-snapshot-interval-ms 1000
-```
-
-Crypto multi-horizon majors-only expansion, useful after the first 15m EV join showed wide-spread alt contamination:
+Crypto multi-horizon majors-only:
 
 ```bash
 python3 scripts/measure_live_depth_and_survival.py \
@@ -59,106 +104,101 @@ python3 scripts/measure_live_depth_and_survival.py \
   --asset-slug btc,eth,sol,xrp \
   --min-duration-seconds 300 \
   --max-duration-seconds 900 \
+  --duration-metric implied_series \
   --output-csv /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_multi_horizon_majors.csv \
   --output-sqlite /home/polybot/.polybot/short_horizon/phase0/live_depth_survival_crypto_multi_horizon_majors.sqlite3 \
   --book-snapshot-interval-ms 1000
 ```
 
-## Short smoke run
-
-Use a small `--max-events` cap for a quick non-trading smoke check:
+Weather temperature low-tail:
 
 ```bash
 python3 scripts/measure_live_depth_and_survival.py \
-  --level-preset crypto_wide \
-  --universe-mode crypto_15m \
-  --output-csv /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.csv \
-  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  --book-snapshot-interval-ms 1000 \
-  --max-events 5
+  --level-preset black_swan_low_tail \
+  --universe-mode weather_temperature \
+  --no-require-recurrence \
+  --duration-metric time_remaining \
+  --min-duration-seconds 3600 \
+  --max-duration-seconds 604800 \
+  --max-seconds-to-end 604800 \
+  --market-keyword temperature \
+  --market-keyword "highest temperature" \
+  --market-keyword "low temperature" \
+  --payoff-type range \
+  --payoff-type above \
+  --payoff-type below \
+  --output-csv /home/polybot/.polybot/short_horizon/phase0/weather_temperature_low_tail.csv \
+  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/weather_temperature_low_tail.sqlite3 \
+  --book-snapshot-interval-ms 5000
 ```
 
-If the market is quiet and no touches arrive, use a timeout wrapper for an ingest/schema smoke:
+Broad black-swan low-tail discovery smoke only:
 
 ```bash
-timeout 15m python3 scripts/measure_live_depth_and_survival.py \
-  --level-preset crypto_wide \
-  --universe-mode crypto_15m \
-  --output-csv /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.csv \
-  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  --book-snapshot-interval-ms 1000
+timeout 30m python3 scripts/measure_live_depth_and_survival.py \
+  --level-preset black_swan_low_tail \
+  --universe-mode black_swan_low_tail \
+  --no-require-recurrence \
+  --duration-metric time_remaining \
+  --min-duration-seconds 3600 \
+  --max-duration-seconds 604800 \
+  --max-seconds-to-end 604800 \
+  --market-keyword temperature \
+  --market-keyword weather \
+  --market-keyword bitcoin \
+  --market-keyword ethereum \
+  --market-keyword nba \
+  --market-keyword nfl \
+  --market-keyword winner \
+  --market-keyword election \
+  --exclude-market-keyword "up or down" \
+  --output-csv /home/polybot/.polybot/short_horizon/phase0/black_swan_low_tail_smoke.csv \
+  --output-sqlite /home/polybot/.polybot/short_horizon/phase0/black_swan_low_tail_smoke.sqlite3 \
+  --book-snapshot-interval-ms 5000
 ```
 
-## Build heatmap report
+## Report commands
+
+Build heatmap:
 
 ```bash
 python3 scripts/build_collector_heatmap.py \
-  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  --output-md /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_heatmap.md \
-  --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_heatmap.json
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/<run_id>.sqlite3 \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/<run_id>_heatmap.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/<run_id>_heatmap.json
 ```
 
-Custom axes:
+Build post-touch enrichment:
 
 ```bash
-python3 scripts/build_collector_heatmap.py \
-  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  --axis touch_level \
-  --axis asset_slug \
-  --axis outcome \
-  --axis horizon_bucket
+python3 scripts/enrich_collector_post_touch.py \
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/<run_id>.sqlite3 \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/<run_id>_post_touch.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/<run_id>_post_touch.json
 ```
 
-Executable-only report:
-
-```bash
-python3 scripts/build_collector_heatmap.py \
-  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  --executable-only
-```
-
-## Run from config
-
-Prefer config-driven runs once a preset is stable. The runner executes the collector, builds heatmap/post-touch/signal reports, then writes a compact `_summary.md/json` artifact for quick operator review.
-
-```bash
-python3 scripts/run_collector_from_config.py configs/collector/crypto_multi_horizon_majors.yaml
-```
-
-Useful configs:
-
-- `configs/collector/crypto_multi_horizon_majors.yaml`
-- `configs/collector/weather_temperature_low_tail.yaml`
-- `configs/collector/black_swan_low_tail.yaml`
-
-Horizon buckets are intentionally coarse but explicit: `5m`, `15m`, `1h`, `1d`, `1-7d`, `8-30d`, `>30d`. For exact crypto 5m/15m splits, prefer `duration_seconds` as a report axis.
-
-## Join resolved outcomes and EV
-
-Use this after the collected markets have resolved. It backfills market outcomes from Gamma into a local resolutions DB, joins them to `touch_events`, and reports realized hold-to-resolution EV for hypothetical 5-share and 10 USDC entries.
+Join resolved outcomes and EV:
 
 ```bash
 python3 scripts/build_collector_outcome_ev.py \
-  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/<run_id>.sqlite3 \
   --resolutions-sqlite /home/polybot/.polybot/short_horizon/data/market_resolutions.sqlite3 \
-  --output-md /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_outcome_ev.md \
-  --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_outcome_ev.json \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/<run_id>_outcome_ev.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/<run_id>_outcome_ev.json \
   --backfill-resolutions \
-  --axis touch_level \
+  --axis duration_seconds \
   --axis asset_slug \
   --axis outcome
 ```
 
-## Build combined signal report
-
-Use this after post-touch enrichment and outcome resolution are available. It applies normal-trade filters (`fit_5_shares`, good freshness/depth flags, max spread), then combines EV, spread, and post-touch hold/reversal metrics.
+Build combined signal report:
 
 ```bash
 python3 scripts/build_collector_signal_report.py \
-  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/<run_id>.sqlite3 \
   --resolutions-sqlite /home/polybot/.polybot/short_horizon/data/market_resolutions.sqlite3 \
-  --output-md /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_signal_report.md \
-  --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_signal_report.json \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/<run_id>_signal_report.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/<run_id>_signal_report.json \
   --backfill-resolutions \
   --max-spread 0.10 \
   --axis duration_seconds \
@@ -166,30 +206,14 @@ python3 scripts/build_collector_signal_report.py \
   --axis outcome
 ```
 
-## Build compact run summary
-
-Use this after reports exist, or let `run_collector_from_config.py` do it automatically:
+Build compact run summary:
 
 ```bash
 python3 scripts/build_collector_run_summary.py \
-  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  --signal-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_signal_report.json \
-  --output-md /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_summary.md \
-  --output-json /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide_summary.json
-```
-
-## Quick SQLite inspection
-
-```bash
-sqlite3 /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  "select 'runs', count(*) from collection_runs union all select 'touch_events', count(*) from touch_events union all select 'book_snapshots', count(*) from book_snapshots union all select 'spot_snapshots', count(*) from spot_snapshots;"
-```
-
-Check that metadata/freshness fields are present:
-
-```bash
-sqlite3 /home/polybot/.polybot/short_horizon/phase0/smoke_crypto_wide.sqlite3 \
-  "select touch_level, asset_slug, horizon_bucket, fit_5_shares, spread_at_touch, missing_depth_flag_at_touch, book_stale_flag_at_touch from touch_events limit 5;"
+  --input-sqlite /home/polybot/.polybot/short_horizon/phase0/<run_id>.sqlite3 \
+  --signal-json /home/polybot/.polybot/short_horizon/phase0/<run_id>_signal_report.json \
+  --output-md /home/polybot/.polybot/short_horizon/phase0/<run_id>_summary.md \
+  --output-json /home/polybot/.polybot/short_horizon/phase0/<run_id>_summary.json
 ```
 
 ## Smoke acceptance
@@ -201,6 +225,87 @@ A smoke run is good enough if:
 - `collection_runs` has one row;
 - `book_snapshots` grows when `--book-snapshot-interval-ms` is enabled;
 - if touches occur, `touch_events` rows include depth/spread/executable/freshness metadata;
-- `build_collector_heatmap.py` can read the sidecar and write Markdown/JSON.
+- report scripts can read the sidecar and write Markdown/JSON.
 
 If no touches occur during a short smoke window, that is not a collector failure. Treat it as an ingest/schema smoke and run a longer collection window for heatmap analysis.
+
+Expected `timeout` exit status is `124`; this is normal for bounded collector runs.
+
+## Quick inspection on prod
+
+The prod host may not have the `sqlite3` CLI installed. Use Python sqlite instead:
+
+```bash
+python3 - <<'PY'
+import sqlite3
+from pathlib import Path
+
+path = Path('/home/polybot/.polybot/short_horizon/phase0/<run_id>.sqlite3')
+print('exists', path.exists(), 'size', path.stat().st_size if path.exists() else 0)
+conn = sqlite3.connect(path)
+for table in ['collection_runs', 'touch_events', 'book_snapshots', 'spot_snapshots', 'post_touch_enrichment']:
+    try:
+        count = conn.execute(f'select count(*) from {table}').fetchone()[0]
+    except Exception as exc:
+        count = exc
+    print(table, count)
+conn.close()
+PY
+```
+
+Sample market questions:
+
+```bash
+python3 - <<'PY'
+import sqlite3
+conn = sqlite3.connect('/home/polybot/.polybot/short_horizon/phase0/<run_id>.sqlite3')
+for row in conn.execute('''
+    select question, outcome, touch_level, horizon_bucket, payoff_type, event_subtype
+    from touch_events
+    limit 20
+'''):
+    print(row)
+conn.close()
+PY
+```
+
+## Findings from completed runs
+
+`crypto_wide_8h_20260509_005540`:
+
+- 4458 touch events, 220762 book snapshots, 0 spot snapshots.
+- Overall 5-share hold-to-resolution EV was strongly negative.
+- Majors were much cleaner than BNB/DOGE/HYPE alts.
+- Positive slices existed, notably SOL Up and ETH Down, but raw touch-buy-hold is not a trading signal.
+
+`crypto_multi_horizon_majors_4h_20260509_110331`:
+
+- 4266 touch events, 152448 book snapshots, 0 spot snapshots.
+- Majors-only was cleaner than all-crypto, but raw 5-share EV remained negative overall.
+- Strongest normal-trade slice was 5m ETH Down.
+- Offline prototype rule `ETH Down + 5s held + no 5s reversal` improved the slice, but it needs validation on other days/runs before any trading work.
+
+`weather_temperature_low_tail_2h_20260509_152614`:
+
+- 121 touch events, 162031 book snapshots, 0 spot snapshots.
+- All horizon bucket `1-7d`.
+- Outcome EV unavailable at collection time because markets had not resolved.
+- Useful for fill/stability; profitability requires later outcome join.
+
+`black_swan_low_tail_smoke_20260509_202701`:
+
+- Early smoke showed the broad universe is too noisy for blind long runs.
+- It collected useful weather temperature questions, but also sports/esports such as total-kills markets.
+- Treat broad black-swan config as discovery/debug until split into narrower configs.
+
+## Recommended next work
+
+- Split broad black-swan discovery into narrower configs:
+  - weather temperature low-tail;
+  - crypto low-tail / MP-style markets;
+  - sports low-tail only after stronger subtype filters;
+  - politics/geopolitics low-tail separately.
+- Run another crypto majors 12h collector to validate ETH Down and other positive slices across days.
+- Re-run weather outcome/EV after weather markets resolve.
+- Connect live spot feed so `spot_snapshots` and crypto spot-return features become usable.
+- Keep all collector outputs under `/home/polybot/.polybot`, not the git repo.
