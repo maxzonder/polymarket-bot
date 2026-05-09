@@ -26,8 +26,10 @@ import csv
 import json
 import logging
 import signal
+import sqlite3
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,20 +45,30 @@ from utils.paths import DATA_DIR
 
 try:
     import websockets
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "Missing dependency: websockets. Install it before running this script, for example: "
-        "python3 -m pip install websockets"
-    ) from exc
+except ImportError:  # pragma: no cover
+    websockets = None  # type: ignore[assignment]
 
 
 WS_MARKET_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+SCHEMA_VERSION = 2
 DEFAULT_LEVELS = (0.55, 0.65, 0.70)
+LOW_TAIL_LEVELS = (0.005, 0.01, 0.02, 0.03, 0.05, 0.10, 0.15, 0.20)
+WIDE_LEVELS = (0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
+LEVEL_PRESETS = {
+    "crypto_15m_touch": DEFAULT_LEVELS,
+    "crypto_wide": WIDE_LEVELS,
+    "black_swan_low_tail": LOW_TAIL_LEVELS,
+    "crypto_wide_low_tail": LOW_TAIL_LEVELS + WIDE_LEVELS,
+}
 DEFAULT_NOTIONALS = (10.0, 50.0, 100.0)
+DEFAULT_MIN_SHARES = 5.0
 DEFAULT_DEPTH_LEVELS = 5
 DEFAULT_SURVIVAL_WINDOW_MS = 2000
 DEFAULT_SAMPLING_INTERVAL_MS = 25
 DEFAULT_REFRESH_INTERVAL_SEC = 30
+DEFAULT_BOOK_SNAPSHOT_INTERVAL_MS = 0
+DEFAULT_STALE_BOOK_MS = 5_000
+DEFAULT_WIDE_SPREAD = 0.10
 DEFAULT_DURATION_MIN = 840
 DEFAULT_DURATION_MAX = 960
 DEFAULT_PING_INTERVAL_SEC = 10
@@ -81,6 +93,8 @@ class MarketToken:
     fees_enabled: bool
     fee_rate_bps: Optional[float]
     tick_size: Optional[float]
+    category: Optional[str] = None
+    event_slug: Optional[str] = None
 
 
 @dataclass
@@ -97,6 +111,33 @@ class BookState:
 
 
 @dataclass
+class BookObservation:
+    event_ts_ms: int
+    best_bid: Optional[float]
+    best_ask: Optional[float]
+
+
+@dataclass
+class PreTouchFeatures:
+    best_bid_1s_before: Optional[float] = None
+    best_ask_1s_before: Optional[float] = None
+    best_bid_delta_1s: Optional[float] = None
+    best_ask_delta_1s: Optional[float] = None
+    best_bid_5s_before: Optional[float] = None
+    best_ask_5s_before: Optional[float] = None
+    best_bid_delta_5s: Optional[float] = None
+    best_ask_delta_5s: Optional[float] = None
+    best_bid_15s_before: Optional[float] = None
+    best_ask_15s_before: Optional[float] = None
+    best_bid_delta_15s: Optional[float] = None
+    best_ask_delta_15s: Optional[float] = None
+    best_bid_60s_before: Optional[float] = None
+    best_ask_60s_before: Optional[float] = None
+    best_bid_delta_60s: Optional[float] = None
+    best_ask_delta_60s: Optional[float] = None
+
+
+@dataclass
 class SurvivalProbe:
     probe_id: str
     token: MarketToken
@@ -105,7 +146,15 @@ class SurvivalProbe:
     initial_best_ask: float
     initial_ask_size_at_level: float
     ask_levels_at_touch: list[tuple[float, float]]
+    bid_levels_at_touch: list[tuple[float, float]]
     notional_fit: dict[str, str]
+    fit_details: dict[str, dict[str, Optional[float] | str]]
+    min_share_details: dict[str, Optional[float] | str]
+    pre_touch_features: PreTouchFeatures = field(default_factory=PreTouchFeatures)
+    max_favorable_move: float = 0.0
+    max_adverse_move: float = 0.0
+    held_at_or_above_level: bool = True
+    immediate_reversal_flag: bool = False
     done: bool = False
     end_reason: Optional[str] = None
     survived_ms: Optional[int] = None
@@ -113,6 +162,8 @@ class SurvivalProbe:
 
 class CsvSink:
     FIELDNAMES = [
+        "schema_version",
+        "run_id",
         "probe_id",
         "recorded_at",
         "market_id",
@@ -120,6 +171,8 @@ class CsvSink:
         "token_id",
         "outcome",
         "question",
+        "category",
+        "event_slug",
         "touch_level",
         "touch_time_iso",
         "duration_seconds",
@@ -130,6 +183,22 @@ class CsvSink:
         "tick_size",
         "best_bid_at_touch",
         "best_ask_at_touch",
+        "spread_at_touch",
+        "mid_price_at_touch",
+        "microprice_at_touch",
+        "imbalance_top1",
+        "imbalance_top3",
+        "imbalance_top5",
+        "bid_level_1_price",
+        "bid_level_1_size",
+        "bid_level_2_price",
+        "bid_level_2_size",
+        "bid_level_3_price",
+        "bid_level_3_size",
+        "bid_level_4_price",
+        "bid_level_4_size",
+        "bid_level_5_price",
+        "bid_level_5_size",
         "ask_level_1_price",
         "ask_level_1_size",
         "ask_level_2_price",
@@ -141,66 +210,304 @@ class CsvSink:
         "ask_level_5_price",
         "ask_level_5_size",
         "ask_size_at_touch_level",
+        "fit_5_shares",
+        "entry_price_for_5_shares",
+        "avg_entry_price_for_5_shares",
+        "cost_for_5_shares",
+        "worst_tick_for_5_shares",
+        "estimated_fee_for_5_shares",
+        "required_hit_rate_for_5_shares",
         "fit_10_usdc",
+        "avg_entry_price_for_10_usdc",
         "fit_50_usdc",
+        "avg_entry_price_for_50_usdc",
         "fit_100_usdc",
+        "avg_entry_price_for_100_usdc",
+        "book_age_ms_at_touch",
+        "event_to_ingest_latency_ms_at_touch",
+        "missing_depth_flag_at_touch",
+        "crossed_book_flag_at_touch",
+        "wide_spread_flag_at_touch",
+        "book_stale_flag_at_touch",
+        "best_bid_1s_before",
+        "best_ask_1s_before",
+        "best_bid_delta_1s",
+        "best_ask_delta_1s",
+        "best_bid_5s_before",
+        "best_ask_5s_before",
+        "best_bid_delta_5s",
+        "best_ask_delta_5s",
+        "best_bid_15s_before",
+        "best_ask_15s_before",
+        "best_bid_delta_15s",
+        "best_ask_delta_15s",
+        "best_bid_60s_before",
+        "best_ask_60s_before",
+        "best_bid_delta_60s",
+        "best_ask_delta_60s",
+        "max_favorable_move",
+        "max_adverse_move",
+        "held_at_or_above_level",
+        "immediate_reversal_flag",
         "survived_ms",
         "end_reason",
     ]
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, run_id: str):
         self.path = path
+        self.run_id = run_id
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self.path.open("a", newline="", encoding="utf-8")
-        self._writer = csv.DictWriter(self._fh, fieldnames=self.FIELDNAMES)
+        self._writer = csv.DictWriter(self._fh, fieldnames=self.FIELDNAMES, extrasaction="ignore")
         if self.path.stat().st_size == 0:
             self._writer.writeheader()
             self._fh.flush()
 
-    def write_probe(self, probe: SurvivalProbe, book: BookState) -> None:
-        levels = list(probe.ask_levels_at_touch[:5])
-        while len(levels) < 5:
-            levels.append((None, None))
-        row = {
-            "probe_id": probe.probe_id,
-            "recorded_at": utc_now_iso(),
-            "market_id": probe.token.market_id,
-            "condition_id": probe.token.condition_id,
-            "token_id": probe.token.token_id,
-            "outcome": probe.token.outcome,
-            "question": probe.token.question,
-            "touch_level": f"{probe.level:.2f}",
-            "touch_time_iso": iso_from_ms(probe.started_at_ms),
-            "duration_seconds": probe.token.duration_seconds,
-            "start_time_iso": probe.token.start_time_iso,
-            "end_time_iso": probe.token.end_time_iso,
-            "fees_enabled": int(probe.token.fees_enabled),
-            "fee_rate_bps": probe.token.fee_rate_bps,
-            "tick_size": probe.token.tick_size,
-            "best_bid_at_touch": book.best_bid,
-            "best_ask_at_touch": probe.initial_best_ask,
-            "ask_level_1_price": levels[0][0],
-            "ask_level_1_size": levels[0][1],
-            "ask_level_2_price": levels[1][0],
-            "ask_level_2_size": levels[1][1],
-            "ask_level_3_price": levels[2][0],
-            "ask_level_3_size": levels[2][1],
-            "ask_level_4_price": levels[3][0],
-            "ask_level_4_size": levels[3][1],
-            "ask_level_5_price": levels[4][0],
-            "ask_level_5_size": levels[4][1],
-            "ask_size_at_touch_level": probe.initial_ask_size_at_level,
-            "fit_10_usdc": probe.notional_fit.get("10"),
-            "fit_50_usdc": probe.notional_fit.get("50"),
-            "fit_100_usdc": probe.notional_fit.get("100"),
-            "survived_ms": probe.survived_ms,
-            "end_reason": probe.end_reason,
-        }
+    def write_probe(self, probe: SurvivalProbe, book: BookState) -> dict[str, Any]:
+        row = build_touch_row(probe, book, run_id=self.run_id)
         self._writer.writerow(row)
         self._fh.flush()
+        return row
 
     def close(self) -> None:
         self._fh.close()
+
+
+class SqliteSink:
+    def __init__(self, path: Path, *, run_id: str, args: argparse.Namespace):
+        self.path = path
+        self.run_id = run_id
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.stale_book_ms = int(getattr(args, "stale_book_ms", DEFAULT_STALE_BOOK_MS))
+        self.wide_spread_threshold = float(getattr(args, "wide_spread_threshold", DEFAULT_WIDE_SPREAD))
+        self.conn = sqlite3.connect(self.path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self._init_schema()
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO collection_runs(
+                run_id, schema_version, started_at, level_preset, levels_json, depth_levels, output_csv,
+                book_snapshot_interval_ms, stale_book_ms, wide_spread_threshold
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                SCHEMA_VERSION,
+                utc_now_iso(),
+                getattr(args, "level_preset", None),
+                json.dumps(list(args.levels)),
+                int(args.depth_levels),
+                str(args.output_csv),
+                int(getattr(args, "book_snapshot_interval_ms", 0) or 0),
+                int(getattr(args, "stale_book_ms", DEFAULT_STALE_BOOK_MS)),
+                float(getattr(args, "wide_spread_threshold", DEFAULT_WIDE_SPREAD)),
+            ),
+        )
+        self.conn.commit()
+
+    def _init_schema(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS collection_runs (
+                run_id TEXT PRIMARY KEY,
+                schema_version INTEGER NOT NULL,
+                started_at TEXT NOT NULL,
+                level_preset TEXT,
+                levels_json TEXT NOT NULL,
+                depth_levels INTEGER NOT NULL,
+                output_csv TEXT,
+                book_snapshot_interval_ms INTEGER,
+                stale_book_ms INTEGER,
+                wide_spread_threshold REAL
+            );
+            CREATE TABLE IF NOT EXISTS touch_events (
+                probe_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                recorded_at TEXT,
+                market_id TEXT,
+                condition_id TEXT,
+                token_id TEXT,
+                outcome TEXT,
+                question TEXT,
+                category TEXT,
+                event_slug TEXT,
+                touch_level REAL,
+                touch_time_iso TEXT,
+                duration_seconds INTEGER,
+                start_time_iso TEXT,
+                end_time_iso TEXT,
+                fees_enabled INTEGER,
+                fee_rate_bps REAL,
+                tick_size REAL,
+                best_bid_at_touch REAL,
+                best_ask_at_touch REAL,
+                spread_at_touch REAL,
+                mid_price_at_touch REAL,
+                microprice_at_touch REAL,
+                imbalance_top1 REAL,
+                imbalance_top3 REAL,
+                imbalance_top5 REAL,
+                bid_levels_json TEXT,
+                ask_levels_json TEXT,
+                ask_size_at_touch_level REAL,
+                fit_5_shares TEXT,
+                entry_price_for_5_shares REAL,
+                avg_entry_price_for_5_shares REAL,
+                cost_for_5_shares REAL,
+                worst_tick_for_5_shares INTEGER,
+                estimated_fee_for_5_shares REAL,
+                required_hit_rate_for_5_shares REAL,
+                fit_10_usdc TEXT,
+                avg_entry_price_for_10_usdc REAL,
+                fit_50_usdc TEXT,
+                avg_entry_price_for_50_usdc REAL,
+                fit_100_usdc TEXT,
+                avg_entry_price_for_100_usdc REAL,
+                book_age_ms_at_touch INTEGER,
+                event_to_ingest_latency_ms_at_touch INTEGER,
+                missing_depth_flag_at_touch INTEGER,
+                crossed_book_flag_at_touch INTEGER,
+                wide_spread_flag_at_touch INTEGER,
+                book_stale_flag_at_touch INTEGER,
+                best_bid_1s_before REAL,
+                best_ask_1s_before REAL,
+                best_bid_delta_1s REAL,
+                best_ask_delta_1s REAL,
+                best_bid_5s_before REAL,
+                best_ask_5s_before REAL,
+                best_bid_delta_5s REAL,
+                best_ask_delta_5s REAL,
+                best_bid_15s_before REAL,
+                best_ask_15s_before REAL,
+                best_bid_delta_15s REAL,
+                best_ask_delta_15s REAL,
+                best_bid_60s_before REAL,
+                best_ask_60s_before REAL,
+                best_bid_delta_60s REAL,
+                best_ask_delta_60s REAL,
+                max_favorable_move REAL,
+                max_adverse_move REAL,
+                held_at_or_above_level INTEGER,
+                immediate_reversal_flag INTEGER,
+                survived_ms INTEGER,
+                end_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_touch_events_market_time ON touch_events(market_id, touch_time_iso);
+            CREATE INDEX IF NOT EXISTS idx_touch_events_token_time ON touch_events(token_id, touch_time_iso);
+            CREATE TABLE IF NOT EXISTS book_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                probe_id TEXT,
+                market_id TEXT,
+                token_id TEXT NOT NULL,
+                event_time_iso TEXT,
+                event_ts_ms INTEGER,
+                ingest_monotonic_ms INTEGER,
+                source TEXT NOT NULL,
+                update_kind TEXT NOT NULL,
+                book_hash TEXT,
+                best_bid REAL,
+                best_ask REAL,
+                bid_levels_json TEXT NOT NULL,
+                ask_levels_json TEXT NOT NULL,
+                depth_levels INTEGER NOT NULL,
+                book_age_ms INTEGER,
+                event_to_ingest_latency_ms INTEGER,
+                missing_depth_flag INTEGER NOT NULL DEFAULT 0,
+                crossed_book_flag INTEGER NOT NULL DEFAULT 0,
+                wide_spread_flag INTEGER NOT NULL DEFAULT 0,
+                book_stale_flag INTEGER NOT NULL DEFAULT 0,
+                zero_size_level_flag INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_book_snapshots_token_time ON book_snapshots(token_id, event_ts_ms);
+            CREATE INDEX IF NOT EXISTS idx_book_snapshots_market_time ON book_snapshots(market_id, event_ts_ms);
+            """
+        )
+        self.conn.commit()
+
+    def write_probe(self, probe: SurvivalProbe, book: BookState, row: Optional[dict[str, Any]] = None) -> None:
+        if row is None:
+            row = build_touch_row(probe, book, run_id=self.run_id)
+        self.write_book_snapshot(book, update_kind="touch", probe=probe)
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO touch_events(
+                probe_id, run_id, schema_version, recorded_at, market_id, condition_id, token_id, outcome,
+                question, category, event_slug, touch_level, touch_time_iso, duration_seconds, start_time_iso,
+                end_time_iso, fees_enabled, fee_rate_bps, tick_size, best_bid_at_touch, best_ask_at_touch,
+                spread_at_touch, mid_price_at_touch, microprice_at_touch, imbalance_top1, imbalance_top3,
+                imbalance_top5, bid_levels_json, ask_levels_json, ask_size_at_touch_level, fit_5_shares,
+                entry_price_for_5_shares, avg_entry_price_for_5_shares, cost_for_5_shares,
+                worst_tick_for_5_shares, estimated_fee_for_5_shares, required_hit_rate_for_5_shares,
+                fit_10_usdc, avg_entry_price_for_10_usdc, fit_50_usdc, avg_entry_price_for_50_usdc,
+                fit_100_usdc, avg_entry_price_for_100_usdc, book_age_ms_at_touch,
+                event_to_ingest_latency_ms_at_touch, missing_depth_flag_at_touch, crossed_book_flag_at_touch,
+                wide_spread_flag_at_touch, book_stale_flag_at_touch, best_bid_1s_before, best_ask_1s_before,
+                best_bid_delta_1s, best_ask_delta_1s, best_bid_5s_before, best_ask_5s_before,
+                best_bid_delta_5s, best_ask_delta_5s, best_bid_15s_before, best_ask_15s_before,
+                best_bid_delta_15s, best_ask_delta_15s, best_bid_60s_before, best_ask_60s_before,
+                best_bid_delta_60s, best_ask_delta_60s, max_favorable_move, max_adverse_move,
+                held_at_or_above_level, immediate_reversal_flag, survived_ms, end_reason
+            ) VALUES (
+                :probe_id, :run_id, :schema_version, :recorded_at, :market_id, :condition_id, :token_id, :outcome,
+                :question, :category, :event_slug, :touch_level, :touch_time_iso, :duration_seconds, :start_time_iso,
+                :end_time_iso, :fees_enabled, :fee_rate_bps, :tick_size, :best_bid_at_touch, :best_ask_at_touch,
+                :spread_at_touch, :mid_price_at_touch, :microprice_at_touch, :imbalance_top1, :imbalance_top3,
+                :imbalance_top5, :bid_levels_json, :ask_levels_json, :ask_size_at_touch_level, :fit_5_shares,
+                :entry_price_for_5_shares, :avg_entry_price_for_5_shares, :cost_for_5_shares,
+                :worst_tick_for_5_shares, :estimated_fee_for_5_shares, :required_hit_rate_for_5_shares,
+                :fit_10_usdc, :avg_entry_price_for_10_usdc, :fit_50_usdc, :avg_entry_price_for_50_usdc,
+                :fit_100_usdc, :avg_entry_price_for_100_usdc, :book_age_ms_at_touch,
+                :event_to_ingest_latency_ms_at_touch, :missing_depth_flag_at_touch, :crossed_book_flag_at_touch,
+                :wide_spread_flag_at_touch, :book_stale_flag_at_touch, :best_bid_1s_before, :best_ask_1s_before,
+                :best_bid_delta_1s, :best_ask_delta_1s, :best_bid_5s_before, :best_ask_5s_before,
+                :best_bid_delta_5s, :best_ask_delta_5s, :best_bid_15s_before, :best_ask_15s_before,
+                :best_bid_delta_15s, :best_ask_delta_15s, :best_bid_60s_before, :best_ask_60s_before,
+                :best_bid_delta_60s, :best_ask_delta_60s, :max_favorable_move, :max_adverse_move,
+                :held_at_or_above_level, :immediate_reversal_flag, :survived_ms, :end_reason
+            )
+            """,
+            row,
+        )
+        self.conn.commit()
+
+    def write_book_snapshot(
+        self,
+        book: BookState,
+        *,
+        update_kind: str,
+        probe: Optional[SurvivalProbe] = None,
+    ) -> None:
+        row = build_book_snapshot_row(
+            book,
+            run_id=self.run_id,
+            update_kind=update_kind,
+            probe=probe,
+            stale_book_ms=self.stale_book_ms,
+            wide_spread_threshold=self.wide_spread_threshold,
+        )
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO book_snapshots(
+                snapshot_id, run_id, schema_version, probe_id, market_id, token_id, event_time_iso,
+                event_ts_ms, ingest_monotonic_ms, source, update_kind, book_hash, best_bid, best_ask,
+                bid_levels_json, ask_levels_json, depth_levels, book_age_ms, event_to_ingest_latency_ms,
+                missing_depth_flag, crossed_book_flag, wide_spread_flag, book_stale_flag, zero_size_level_flag
+            ) VALUES (
+                :snapshot_id, :run_id, :schema_version, :probe_id, :market_id, :token_id, :event_time_iso,
+                :event_ts_ms, :ingest_monotonic_ms, :source, :update_kind, :book_hash, :best_bid, :best_ask,
+                :bid_levels_json, :ask_levels_json, :depth_levels, :book_age_ms, :event_to_ingest_latency_ms,
+                :missing_depth_flag, :crossed_book_flag, :wide_spread_flag, :book_stale_flag, :zero_size_level_flag
+            )
+            """,
+            row,
+        )
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
 
 
 class LiveDepthCollector:
@@ -212,11 +519,14 @@ class LiveDepthCollector:
         self.last_best_ask: dict[tuple[str, float], Optional[float]] = {}
         self.fired_touches: set[tuple[str, str, float]] = set()
         self.active_probes: dict[str, SurvivalProbe] = {}
+        self.book_history: dict[str, deque[BookObservation]] = {}
         self.completed_probes = 0
-        self.csv = CsvSink(Path(args.output_csv))
+        self.csv = CsvSink(Path(args.output_csv), run_id=args.run_id)
+        self.sqlite = SqliteSink(Path(args.output_sqlite), run_id=args.run_id, args=args) if args.output_sqlite else None
         self.stop_event = asyncio.Event()
         self.last_discovery_stats: dict[str, Any] = {}
         self.market_ws: Any = None
+        self.periodic_snapshots_written = 0
 
     async def run(self) -> None:
         self._install_signal_handlers()
@@ -231,14 +541,17 @@ class LiveDepthCollector:
         refresh = asyncio.create_task(self.refresh_loop())
         survival = asyncio.create_task(self.survival_loop())
         heartbeat = asyncio.create_task(self.heartbeat_loop())
+        snapshot = asyncio.create_task(self.book_snapshot_loop())
 
         try:
             await self.stop_event.wait()
         finally:
-            for task in (consumer, refresh, survival, heartbeat):
+            for task in (consumer, refresh, survival, heartbeat, snapshot):
                 task.cancel()
             await asyncio.gather(consumer, refresh, survival, heartbeat, return_exceptions=True)
             self.csv.close()
+            if self.sqlite is not None:
+                self.sqlite.close()
 
     def fetch_active_market_tokens(self) -> list[MarketToken]:
         markets: list[MarketToken] = []
@@ -398,6 +711,8 @@ class LiveDepthCollector:
                             fees_enabled=fees_enabled,
                             fee_rate_bps=fee_rate_bps,
                             tick_size=tick_size,
+                            category=_extract_category(raw, event0),
+                            event_slug=str((event0 or {}).get("slug") or raw.get("slug") or "") or None,
                         )
                     )
                     stats["eligible_tokens"] += 1
@@ -454,16 +769,40 @@ class LiveDepthCollector:
         while True:
             await asyncio.sleep(self.args.heartbeat_interval_sec)
             self.logger.info(
-                "Heartbeat: subscribed_tokens=%s books=%s fired_touches=%s active_probes=%s completed_probes=%s discovery=%s",
+                "Heartbeat: subscribed_tokens=%s books=%s fired_touches=%s active_probes=%s completed_probes=%s periodic_snapshots=%s discovery=%s",
                 len(self.tokens_by_id),
                 len(self.books),
                 len(self.fired_touches),
                 len(self.active_probes),
                 self.completed_probes,
+                self.periodic_snapshots_written,
                 self.last_discovery_stats,
             )
 
+    async def book_snapshot_loop(self) -> None:
+        interval_ms = int(getattr(self.args, "book_snapshot_interval_ms", 0) or 0)
+        if interval_ms <= 0 or self.sqlite is None:
+            return
+        while True:
+            await asyncio.sleep(interval_ms / 1000.0)
+            written = 0
+            for token_id, book in list(self.books.items()):
+                if token_id not in self.tokens_by_id:
+                    continue
+                if not book.bid_levels and not book.ask_levels and book.best_bid is None and book.best_ask is None:
+                    continue
+                self.sqlite.write_book_snapshot(book, update_kind="periodic")
+                written += 1
+            self.periodic_snapshots_written += written
+            if written:
+                self.logger.debug("Periodic book snapshots written=%s total=%s", written, self.periodic_snapshots_written)
+
     async def market_ws_loop(self) -> None:
+        if websockets is None:  # pragma: no cover
+            raise RuntimeError(
+                "Missing dependency: websockets. Install it before running live collection, for example: "
+                "python3 -m pip install websockets"
+            )
         while True:
             asset_ids = list(self.tokens_by_id.keys())
             if not asset_ids:
@@ -526,7 +865,34 @@ class LiveDepthCollector:
         asset_id = str(event.get("asset_id") or "")
         if not asset_id or asset_id not in self.tokens_by_id:
             return
+        self._record_book_observation(asset_id)
         await self._detect_touches(asset_id)
+
+    def _record_book_observation(self, token_id: str) -> None:
+        book = self.books.get(token_id)
+        if book is None:
+            return
+        event_ts_ms = book.last_event_ts_ms or int(time.time() * 1000)
+        history = self.book_history.setdefault(token_id, deque())
+        history.append(BookObservation(event_ts_ms=event_ts_ms, best_bid=book.best_bid, best_ask=book.best_ask))
+        cutoff = event_ts_ms - 65_000
+        while history and history[0].event_ts_ms < cutoff:
+            history.popleft()
+
+    def _pre_touch_features(self, token_id: str, touch_ts_ms: int, best_bid: Optional[float], best_ask: float) -> PreTouchFeatures:
+        history = self.book_history.get(token_id, deque())
+        features = PreTouchFeatures()
+        for seconds in (1, 5, 15, 60):
+            obs = latest_observation_before(history, touch_ts_ms - seconds * 1000)
+            if obs is None:
+                continue
+            setattr(features, f"best_bid_{seconds}s_before", obs.best_bid)
+            setattr(features, f"best_ask_{seconds}s_before", obs.best_ask)
+            if best_bid is not None and obs.best_bid is not None:
+                setattr(features, f"best_bid_delta_{seconds}s", best_bid - obs.best_bid)
+            if obs.best_ask is not None:
+                setattr(features, f"best_ask_delta_{seconds}s", best_ask - obs.best_ask)
+        return features
 
     def _ensure_book(self, token_id: str, market_id: Optional[str] = None) -> BookState:
         book = self.books.get(token_id)
@@ -607,8 +973,15 @@ class LiveDepthCollector:
                 if probe_id in self.active_probes:
                     continue
                 ask_levels = list(book.ask_levels[: self.args.depth_levels])
+                bid_levels = list(book.bid_levels[: self.args.depth_levels])
                 ask_size = sum(size for price, size in ask_levels if abs(price - level) < 1e-9)
-                fit = evaluate_notional_fit(ask_levels, self.args.notionals)
+                fit_details = evaluate_notional_entry_details(ask_levels, self.args.notionals)
+                fit = {key: str(value.get("fit")) for key, value in fit_details.items()}
+                min_share_details = evaluate_share_entry_details(
+                    ask_levels,
+                    self.args.min_shares,
+                    fee_rate_bps=token.fee_rate_bps if token.fees_enabled else None,
+                )
                 probe = SurvivalProbe(
                     probe_id=probe_id,
                     token=token,
@@ -617,7 +990,16 @@ class LiveDepthCollector:
                     initial_best_ask=best_ask,
                     initial_ask_size_at_level=ask_size,
                     ask_levels_at_touch=ask_levels,
+                    bid_levels_at_touch=bid_levels,
                     notional_fit=fit,
+                    fit_details=fit_details,
+                    min_share_details=min_share_details,
+                    pre_touch_features=self._pre_touch_features(
+                        token_id,
+                        book.last_event_ts_ms or int(time.time() * 1000),
+                        book.best_bid,
+                        best_ask,
+                    ),
                 )
                 self.active_probes[probe_id] = probe
                 self.logger.info(
@@ -645,6 +1027,13 @@ class LiveDepthCollector:
                 elapsed = now_ms - probe.started_at_ms
                 level_present = any(abs(price - probe.level) < 1e-9 and size > 0 for price, size in book.ask_levels)
                 best_ask = float(book.best_ask)
+                move = best_ask - probe.initial_best_ask
+                probe.max_favorable_move = max(probe.max_favorable_move, move)
+                probe.max_adverse_move = min(probe.max_adverse_move, move)
+                if best_ask < probe.level - 1e-9:
+                    probe.held_at_or_above_level = False
+                    if elapsed <= min(1000, self.args.survival_window_ms):
+                        probe.immediate_reversal_flag = True
                 if not level_present:
                     probe.done = True
                     probe.end_reason = "level_removed"
@@ -661,7 +1050,9 @@ class LiveDepthCollector:
                     to_finalize.append((probe, book))
                     self.active_probes.pop(probe_id, None)
             for probe, book in to_finalize:
-                self.csv.write_probe(probe, book)
+                row = self.csv.write_probe(probe, book)
+                if self.sqlite is not None:
+                    self.sqlite.write_probe(probe, book, row)
                 self.completed_probes += 1
                 self.logger.info(
                     "Probe complete id=%s survived_ms=%s reason=%s completed=%s",
@@ -694,6 +1085,317 @@ def iso_from_ms(ts_ms: int) -> str:
 
 def monotonic_ms() -> int:
     return int(time.monotonic() * 1000)
+
+
+def padded_levels(levels: list[tuple[float, float]], depth: int = DEFAULT_DEPTH_LEVELS) -> list[tuple[Optional[float], Optional[float]]]:
+    out: list[tuple[Optional[float], Optional[float]]] = list(levels[:depth])
+    while len(out) < depth:
+        out.append((None, None))
+    return out
+
+
+def depth_size(levels: list[tuple[float, float]], depth: int) -> float:
+    return sum(size for _, size in levels[:depth])
+
+
+def compute_book_metrics(
+    bid_levels: list[tuple[float, float]],
+    ask_levels: list[tuple[float, float]],
+    *,
+    best_bid: Optional[float] = None,
+    best_ask: Optional[float] = None,
+) -> dict[str, Optional[float]]:
+    bid = best_bid if best_bid is not None else (bid_levels[0][0] if bid_levels else None)
+    ask = best_ask if best_ask is not None else (ask_levels[0][0] if ask_levels else None)
+    bid_size = bid_levels[0][1] if bid_levels else None
+    ask_size = ask_levels[0][1] if ask_levels else None
+    spread = ask - bid if bid is not None and ask is not None else None
+    mid = (ask + bid) / 2.0 if bid is not None and ask is not None else None
+    microprice = None
+    if bid is not None and ask is not None and bid_size is not None and ask_size is not None and bid_size + ask_size > 0:
+        microprice = (ask * bid_size + bid * ask_size) / (bid_size + ask_size)
+
+    def imbalance(depth: int) -> Optional[float]:
+        bid_sum = depth_size(bid_levels, depth)
+        ask_sum = depth_size(ask_levels, depth)
+        denom = bid_sum + ask_sum
+        return bid_sum / denom if denom > 0 else None
+
+    return {
+        "spread_at_touch": spread,
+        "mid_price_at_touch": mid,
+        "microprice_at_touch": microprice,
+        "imbalance_top1": imbalance(1),
+        "imbalance_top3": imbalance(3),
+        "imbalance_top5": imbalance(5),
+    }
+
+
+def fit_label_from_worst_tick(worst_tick: Optional[int]) -> str:
+    if worst_tick is None:
+        return "no_book"
+    if worst_tick <= 0:
+        return "+0_tick"
+    if worst_tick == 1:
+        return "+1_tick"
+    return "+2plus_ticks"
+
+
+def evaluate_share_entry_details(
+    ask_levels: list[tuple[float, float]],
+    shares: float,
+    *,
+    fee_rate_bps: Optional[float] = None,
+) -> dict[str, Optional[float] | str]:
+    if shares <= 0:
+        return {"fit": "invalid_size"}
+    if not ask_levels:
+        return {"fit": "no_book"}
+    remaining_shares = shares
+    cost = 0.0
+    worst_tick: Optional[int] = None
+    best_ask = ask_levels[0][0]
+    entry_price = best_ask
+    for price, size in ask_levels:
+        take = min(size, remaining_shares)
+        if take > 0:
+            ticks = round((price - best_ask) / 0.01)
+            worst_tick = ticks if worst_tick is None else max(worst_tick, ticks)
+            cost += take * price
+            remaining_shares -= take
+        if remaining_shares <= 1e-9:
+            break
+    if remaining_shares > 1e-9:
+        return {"fit": "insufficient_depth", "entry_price": entry_price}
+    avg_entry = cost / shares
+    fee = cost * ((fee_rate_bps or 0.0) / 10000.0)
+    required_hit = (cost + fee) / shares
+    return {
+        "fit": fit_label_from_worst_tick(worst_tick),
+        "entry_price": entry_price,
+        "avg_entry_price": avg_entry,
+        "cost": cost,
+        "worst_tick": worst_tick,
+        "estimated_fee": fee,
+        "required_hit_rate": required_hit,
+    }
+
+
+def evaluate_notional_entry_details(
+    ask_levels: list[tuple[float, float]], notionals: tuple[float, ...]
+) -> dict[str, dict[str, Optional[float] | str]]:
+    results: dict[str, dict[str, Optional[float] | str]] = {}
+    for notional in notionals:
+        key = str(int(notional)) if float(notional).is_integer() else str(notional)
+        if notional <= 0:
+            results[key] = {"fit": "invalid_notional"}
+            continue
+        if not ask_levels:
+            results[key] = {"fit": "no_book"}
+            continue
+        remaining = notional
+        cost = 0.0
+        shares = 0.0
+        worst_tick: Optional[int] = None
+        best_ask = ask_levels[0][0]
+        for price, size in ask_levels:
+            level_notional = price * size
+            take_cost = min(level_notional, remaining)
+            if take_cost > 0:
+                ticks = round((price - best_ask) / 0.01)
+                worst_tick = ticks if worst_tick is None else max(worst_tick, ticks)
+                cost += take_cost
+                shares += take_cost / price
+                remaining -= take_cost
+            if remaining <= 1e-9:
+                break
+        if remaining > 1e-9:
+            results[key] = {"fit": "insufficient_depth"}
+        else:
+            results[key] = {
+                "fit": fit_label_from_worst_tick(worst_tick),
+                "avg_entry_price": cost / shares if shares > 0 else None,
+                "worst_tick": worst_tick,
+            }
+    return results
+
+
+def latest_observation_before(history: deque[BookObservation], target_ts_ms: int) -> Optional[BookObservation]:
+    latest: Optional[BookObservation] = None
+    for obs in history:
+        if obs.event_ts_ms <= target_ts_ms:
+            latest = obs
+        else:
+            break
+    return latest
+
+
+def build_touch_row(probe: SurvivalProbe, book: BookState, *, run_id: str) -> dict[str, Any]:
+    bid_levels = padded_levels(probe.bid_levels_at_touch)
+    ask_levels = padded_levels(probe.ask_levels_at_touch)
+    metrics = compute_book_metrics(
+        [(p, s) for p, s in probe.bid_levels_at_touch if p is not None and s is not None],
+        [(p, s) for p, s in probe.ask_levels_at_touch if p is not None and s is not None],
+        best_bid=probe.bid_levels_at_touch[0][0] if probe.bid_levels_at_touch else book.best_bid,
+        best_ask=probe.initial_best_ask,
+    )
+    min_share = probe.min_share_details
+    quality = build_book_snapshot_row(book, run_id=run_id, update_kind="touch", probe=probe)
+    pre = probe.pre_touch_features
+    row: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "probe_id": probe.probe_id,
+        "recorded_at": utc_now_iso(),
+        "market_id": probe.token.market_id,
+        "condition_id": probe.token.condition_id,
+        "token_id": probe.token.token_id,
+        "outcome": probe.token.outcome,
+        "question": probe.token.question,
+        "category": probe.token.category,
+        "event_slug": probe.token.event_slug,
+        "touch_level": probe.level,
+        "touch_time_iso": iso_from_ms(probe.started_at_ms),
+        "duration_seconds": probe.token.duration_seconds,
+        "start_time_iso": probe.token.start_time_iso,
+        "end_time_iso": probe.token.end_time_iso,
+        "fees_enabled": int(probe.token.fees_enabled),
+        "fee_rate_bps": probe.token.fee_rate_bps,
+        "tick_size": probe.token.tick_size,
+        "best_bid_at_touch": probe.bid_levels_at_touch[0][0] if probe.bid_levels_at_touch else book.best_bid,
+        "best_ask_at_touch": probe.initial_best_ask,
+        "bid_levels_json": json.dumps(probe.bid_levels_at_touch),
+        "ask_levels_json": json.dumps(probe.ask_levels_at_touch),
+        "ask_size_at_touch_level": probe.initial_ask_size_at_level,
+        "fit_5_shares": min_share.get("fit"),
+        "entry_price_for_5_shares": min_share.get("entry_price"),
+        "avg_entry_price_for_5_shares": min_share.get("avg_entry_price"),
+        "cost_for_5_shares": min_share.get("cost"),
+        "worst_tick_for_5_shares": min_share.get("worst_tick"),
+        "estimated_fee_for_5_shares": min_share.get("estimated_fee"),
+        "required_hit_rate_for_5_shares": min_share.get("required_hit_rate"),
+        "book_age_ms_at_touch": quality.get("book_age_ms"),
+        "event_to_ingest_latency_ms_at_touch": quality.get("event_to_ingest_latency_ms"),
+        "missing_depth_flag_at_touch": quality.get("missing_depth_flag"),
+        "crossed_book_flag_at_touch": quality.get("crossed_book_flag"),
+        "wide_spread_flag_at_touch": quality.get("wide_spread_flag"),
+        "book_stale_flag_at_touch": quality.get("book_stale_flag"),
+        "best_bid_1s_before": pre.best_bid_1s_before,
+        "best_ask_1s_before": pre.best_ask_1s_before,
+        "best_bid_delta_1s": pre.best_bid_delta_1s,
+        "best_ask_delta_1s": pre.best_ask_delta_1s,
+        "best_bid_5s_before": pre.best_bid_5s_before,
+        "best_ask_5s_before": pre.best_ask_5s_before,
+        "best_bid_delta_5s": pre.best_bid_delta_5s,
+        "best_ask_delta_5s": pre.best_ask_delta_5s,
+        "best_bid_15s_before": pre.best_bid_15s_before,
+        "best_ask_15s_before": pre.best_ask_15s_before,
+        "best_bid_delta_15s": pre.best_bid_delta_15s,
+        "best_ask_delta_15s": pre.best_ask_delta_15s,
+        "best_bid_60s_before": pre.best_bid_60s_before,
+        "best_ask_60s_before": pre.best_ask_60s_before,
+        "best_bid_delta_60s": pre.best_bid_delta_60s,
+        "best_ask_delta_60s": pre.best_ask_delta_60s,
+        "max_favorable_move": probe.max_favorable_move,
+        "max_adverse_move": probe.max_adverse_move,
+        "held_at_or_above_level": int(probe.held_at_or_above_level),
+        "immediate_reversal_flag": int(probe.immediate_reversal_flag),
+        "survived_ms": probe.survived_ms,
+        "end_reason": probe.end_reason,
+    }
+    row.update(metrics)
+    for idx, (price, size) in enumerate(bid_levels, start=1):
+        row[f"bid_level_{idx}_price"] = price
+        row[f"bid_level_{idx}_size"] = size
+    for idx, (price, size) in enumerate(ask_levels, start=1):
+        row[f"ask_level_{idx}_price"] = price
+        row[f"ask_level_{idx}_size"] = size
+    for notional in (10, 50, 100):
+        details = probe.fit_details.get(str(notional), {})
+        row[f"fit_{notional}_usdc"] = details.get("fit", probe.notional_fit.get(str(notional)))
+        row[f"avg_entry_price_for_{notional}_usdc"] = details.get("avg_entry_price")
+    return row
+
+
+def build_book_snapshot_row(
+    book: BookState,
+    *,
+    run_id: str,
+    update_kind: str,
+    probe: Optional[SurvivalProbe] = None,
+    stale_book_ms: int = DEFAULT_STALE_BOOK_MS,
+    wide_spread_threshold: float = DEFAULT_WIDE_SPREAD,
+) -> dict[str, Any]:
+    event_ts_ms = book.last_event_ts_ms or (probe.started_at_ms if probe is not None else None)
+    token_id = probe.token.token_id if probe is not None else book.token_id
+    market_id = probe.token.market_id if probe is not None else book.market_id
+    probe_id = probe.probe_id if probe is not None else None
+    bid_levels = probe.bid_levels_at_touch if probe is not None else book.bid_levels
+    ask_levels = probe.ask_levels_at_touch if probe is not None else book.ask_levels
+    best_bid = bid_levels[0][0] if bid_levels else book.best_bid
+    best_ask = probe.initial_best_ask if probe is not None else book.best_ask
+    now_wall_ms = int(time.time() * 1000)
+    now_mono_ms = monotonic_ms()
+    book_age_ms = None
+    if book.last_ingest_monotonic_ms is not None:
+        book_age_ms = max(0, now_mono_ms - book.last_ingest_monotonic_ms)
+    event_to_ingest_latency_ms = None
+    if event_ts_ms is not None:
+        event_to_ingest_latency_ms = max(0, now_wall_ms - event_ts_ms)
+    spread = best_ask - best_bid if best_bid is not None and best_ask is not None else None
+    missing_depth = not bid_levels or not ask_levels
+    crossed = best_bid is not None and best_ask is not None and best_bid >= best_ask
+    wide_spread = spread is not None and spread >= wide_spread_threshold
+    stale = book_age_ms is not None and book_age_ms >= stale_book_ms
+    zero_size = any(size <= 0 for _, size in bid_levels + ask_levels)
+    suffix = probe_id or str(event_ts_ms or now_wall_ms)
+    snapshot_id = f"{run_id}:{token_id}:{update_kind}:{suffix}"
+    return {
+        "snapshot_id": snapshot_id,
+        "run_id": run_id,
+        "schema_version": SCHEMA_VERSION,
+        "probe_id": probe_id,
+        "market_id": market_id,
+        "token_id": token_id,
+        "event_time_iso": iso_from_ms(event_ts_ms) if event_ts_ms is not None else None,
+        "event_ts_ms": event_ts_ms,
+        "ingest_monotonic_ms": book.last_ingest_monotonic_ms,
+        "source": "clob_ws",
+        "update_kind": update_kind,
+        "book_hash": book.last_book_hash,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "bid_levels_json": json.dumps(bid_levels),
+        "ask_levels_json": json.dumps(ask_levels),
+        "depth_levels": max(len(bid_levels), len(ask_levels)),
+        "book_age_ms": book_age_ms,
+        "event_to_ingest_latency_ms": event_to_ingest_latency_ms,
+        "missing_depth_flag": int(missing_depth),
+        "crossed_book_flag": int(crossed),
+        "wide_spread_flag": int(wide_spread),
+        "book_stale_flag": int(stale),
+        "zero_size_level_flag": int(zero_size),
+    }
+
+
+def _extract_category(raw: dict[str, Any], event0: Optional[dict[str, Any]]) -> Optional[str]:
+    candidates = [
+        raw.get("category"),
+        raw.get("categorySlug"),
+        raw.get("category_slug"),
+        (event0 or {}).get("category"),
+        (event0 or {}).get("categorySlug"),
+    ]
+    for value in candidates:
+        if value:
+            return str(value)
+    tags = raw.get("tags") or (event0 or {}).get("tags") or []
+    if isinstance(tags, list) and tags:
+        first = tags[0]
+        if isinstance(first, dict):
+            return str(first.get("slug") or first.get("label") or first.get("name") or "") or None
+        return str(first)
+    return None
 
 
 def parse_iso_to_ts(value: Optional[str]) -> Optional[float]:
@@ -787,12 +1489,28 @@ def default_output_csv_path() -> Path:
     return DATA_DIR / DEFAULT_OUTPUT_SUBDIR / DEFAULT_OUTPUT_BASENAME
 
 
+def default_output_sqlite_path() -> Path:
+    return default_output_csv_path().with_suffix(".sqlite3")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-csv", default=str(default_output_csv_path()))
-    parser.add_argument("--levels", nargs="*", type=float, default=list(DEFAULT_LEVELS))
+    parser.add_argument("--output-sqlite", default=str(default_output_sqlite_path()), help="Structured sidecar output path; pass empty string to disable")
+    parser.add_argument("--run-id", default=None, help="Collection run id for CSV/SQLite rows")
+    parser.add_argument("--level-preset", choices=sorted(LEVEL_PRESETS), default="crypto_15m_touch")
+    parser.add_argument("--levels", nargs="*", type=float, default=None, help="Explicit levels override --level-preset")
     parser.add_argument("--notionals", nargs="*", type=float, default=list(DEFAULT_NOTIONALS))
+    parser.add_argument("--min-shares", type=float, default=DEFAULT_MIN_SHARES)
     parser.add_argument("--depth-levels", type=int, default=DEFAULT_DEPTH_LEVELS)
+    parser.add_argument(
+        "--book-snapshot-interval-ms",
+        type=int,
+        default=DEFAULT_BOOK_SNAPSHOT_INTERVAL_MS,
+        help="Persist periodic top-N book snapshots to SQLite sidecar; 0 disables periodic snapshots",
+    )
+    parser.add_argument("--stale-book-ms", type=int, default=DEFAULT_STALE_BOOK_MS)
+    parser.add_argument("--wide-spread-threshold", type=float, default=DEFAULT_WIDE_SPREAD)
     parser.add_argument("--survival-window-ms", type=int, default=DEFAULT_SURVIVAL_WINDOW_MS)
     parser.add_argument("--sampling-interval-ms", type=int, default=DEFAULT_SAMPLING_INTERVAL_MS)
     parser.add_argument("--refresh-interval-sec", type=int, default=DEFAULT_REFRESH_INTERVAL_SEC)
@@ -820,8 +1538,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    args.levels = tuple(float(x) for x in args.levels)
+    if args.levels is None:
+        args.levels = LEVEL_PRESETS[args.level_preset]
+    else:
+        args.levels = tuple(float(x) for x in args.levels)
     args.notionals = tuple(float(x) for x in args.notionals)
+    if args.output_sqlite == "":
+        args.output_sqlite = None
+    if args.run_id is None:
+        args.run_id = f"live_depth_survival_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
