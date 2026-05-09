@@ -82,7 +82,7 @@ def _write_collector(path: Path) -> None:
             """
             CREATE TABLE collection_runs (
                 run_id TEXT PRIMARY KEY,
-                started_at_iso TEXT
+                started_at TEXT
             )
             """
         )

@@ -129,7 +129,8 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
 def _run_ids(conn: sqlite3.Connection) -> list[str]:
     if not _has_table(conn, "collection_runs") or not _has_column(conn, "collection_runs", "run_id"):
         return []
-    return [str(row[0]) for row in conn.execute("SELECT run_id FROM collection_runs ORDER BY started_at_iso, run_id")]
+    order_column = "started_at" if _has_column(conn, "collection_runs", "started_at") else "run_id"
+    return [str(row[0]) for row in conn.execute(f"SELECT run_id FROM collection_runs ORDER BY {order_column}, run_id")]
 
 
 def _group_counts(conn: sqlite3.Connection, column: str, *, top_n: int) -> list[dict[str, Any]]:
