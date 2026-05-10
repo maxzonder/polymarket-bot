@@ -218,6 +218,20 @@ class Screener:
                 _log("rejected_excluded_keyword")
                 return []
 
+        # Slug prefix filters (issue #180 Phase A).
+        # Reliable than question keywords; slug follows league/type prefix.
+        slug_lower = (m.slug or "").lower()
+        if slug_lower and mc.exclude_slug_prefixes:
+            if any(slug_lower.startswith(p) for p in mc.exclude_slug_prefixes):
+                _log("rejected_excluded_slug")
+                return []
+        if (m.category == "sports"
+                and mc.include_slug_prefixes_for_sports
+                and slug_lower
+                and not any(slug_lower.startswith(p) for p in mc.include_slug_prefixes_for_sports)):
+            _log("rejected_sports_slug_not_in_allowlist")
+            return []
+
         # Hard filter: must have token IDs
         if not m.token_ids:
             _log("rejected_missing_token_ids")

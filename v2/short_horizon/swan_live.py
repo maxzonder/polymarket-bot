@@ -115,20 +115,42 @@ class _ScreenerConfigOverride:
         return getattr(self._base, name)
 
 
+def _duration_stake_multiplier(
+    hours_to_close: float | None,
+    table: tuple[tuple[float, float], ...],
+) -> float:
+    """First-match multiplier from a (max_hours, multiplier) table.
+
+    Empty table → 1.0 (no scaling). None hours_to_close → 1.0 (treat as
+    unknown rather than apply worst-case attenuation, matches behaviour of
+    other null-default fallbacks in the screener).
+    """
+    if not table or hours_to_close is None:
+        return 1.0
+    for max_h, mult in table:
+        if hours_to_close <= max_h:
+            return mult
+    return 1.0
+
+
 def _entry_candidate_to_swan(
     candidate: EntryCandidate,
     *,
     stake_usdc_per_level: float,
+    duration_stake_multipliers: tuple[tuple[float, float], ...] = (),
 ) -> SwanCandidate:
     mi = candidate.market_info
+    duration_mult = _duration_stake_multiplier(
+        getattr(mi, "hours_to_close", None), duration_stake_multipliers
+    )
     return SwanCandidate(
         market_id=mi.market_id,
         condition_id=mi.condition_id,
         token_id=candidate.token_id,
         question=mi.question or "",
-        asset_slug=getattr(mi, "asset_slug", None) or "",
+        asset_slug=getattr(mi, "slug", None) or "",
         entry_levels=tuple(sorted(set(candidate.suggested_entry_levels))),
-        notional_usdc_per_level=stake_usdc_per_level,
+        notional_usdc_per_level=stake_usdc_per_level * duration_mult,
         candidate_id=candidate.candidate_id or "",
     )
 
@@ -143,13 +165,18 @@ async def _screener_loop(
     logger,
     shutdown: asyncio.Event,
     stake_usdc_per_level: float,
+    duration_stake_multipliers: tuple[tuple[float, float], ...] = (),
 ) -> None:
     """Runs the swan screener periodically and injects a timer event each time."""
     while not shutdown.is_set():
         try:
             raw_candidates = await asyncio.to_thread(screener.scan)
             swan_candidates = [
-                _entry_candidate_to_swan(c, stake_usdc_per_level=stake_usdc_per_level)
+                _entry_candidate_to_swan(
+                    c,
+                    stake_usdc_per_level=stake_usdc_per_level,
+                    duration_stake_multipliers=duration_stake_multipliers,
+                )
                 for c in raw_candidates
             ]
             strategy.update_candidates(swan_candidates)
@@ -241,6 +268,7 @@ async def run_swan_live(
         max_open_resting_bids=mode_config.max_open_positions,
         max_resting_markets=mode_config.max_resting_markets,
         max_resting_per_cluster=mode_config.max_resting_per_cluster,
+        phase_stake_multipliers=mode_config.phase_stake_multipliers,
     )
     strategy = strategy_class(config=swan_config, clock=clock)
 
@@ -389,6 +417,7 @@ async def run_swan_live(
             logger=logger,
             shutdown=shutdown,
             stake_usdc_per_level=_stake_per_level,
+            duration_stake_multipliers=mode_config.duration_stake_multipliers,
         ),
         name="swan_screener_loop",
     )

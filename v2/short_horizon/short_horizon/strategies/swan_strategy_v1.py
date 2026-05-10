@@ -23,6 +23,23 @@ TIMER_SCREENER_REFRESH = "swan_screener_refresh"
 TIMER_STALE_CLEANUP = "swan_stale_cleanup"
 
 
+def _phase_stake_multiplier(
+    lifecycle_fraction: float,
+    table: tuple[tuple[float, float], ...],
+) -> float:
+    """First-match multiplier from a (max_lifecycle, multiplier) table.
+
+    Empty table → 1.0 (no scaling). Sentinel: pass float('inf') as the last
+    max_lifecycle to bound the table.
+    """
+    if not table:
+        return 1.0
+    for max_lc, mult in table:
+        if lifecycle_fraction <= max_lc:
+            return mult
+    return 1.0
+
+
 @dataclass(frozen=True)
 class SwanCandidate:
     """A market candidate produced by the swan screener."""
@@ -49,6 +66,10 @@ class SwanConfig:
     # filling there. Screener already filters at placement; this catches
     # markets that aged into the danger zone after placement.
     cancel_when_remaining_seconds_lt: float = 3600.0
+
+    # Lifecycle (phase) stake multipliers (issue #180 P1.3). Tuple of
+    # (max_lifecycle_fraction, multiplier); first match wins. Empty = no scaling.
+    phase_stake_multipliers: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass
@@ -210,6 +231,10 @@ class SwanStrategyV1:
         else:
             lifecycle = 0.5
 
+        notional = candidate.notional_usdc_per_level * _phase_stake_multiplier(
+            lifecycle, self.config.phase_stake_multipliers
+        )
+
         return OrderIntent(
             intent_id=str(uuid.uuid4()),
             strategy_id=self.config.strategy_id,
@@ -220,7 +245,7 @@ class SwanStrategyV1:
             asset_slug=candidate.asset_slug or "",
             level=level,
             entry_price=level,
-            notional_usdc=candidate.notional_usdc_per_level,
+            notional_usdc=notional,
             lifecycle_fraction=lifecycle,
             event_time_ms=now_ms,
             reason="swan_resting_bid",

@@ -125,6 +125,38 @@ class ModeConfig:
     # materially lower WR (<60%) in black_swan analysis.
     exclude_question_keywords: tuple[str, ...] = ()
 
+    # ── Slug prefix filters (issue #180 Phase A) ─────────────────────────────
+    # Asset-slug-based filtering. More reliable than question keywords because
+    # slugs follow consistent prefixes per league/type. Both lists default to
+    # empty (no slug filtering). When either is non-empty:
+    #   exclude_slug_prefixes — reject if slug starts with any of these
+    #   include_slug_prefixes — for sports markets only, REQUIRE slug to start
+    #     with one of these (allowlist). Non-sports categories are not gated
+    #     by include list. Keeps filter scope-bounded.
+    exclude_slug_prefixes: tuple[str, ...] = ()
+    include_slug_prefixes_for_sports: tuple[str, ...] = ()
+
+    # ── Duration-aware stake multipliers (issue #180 P1.2) ───────────────────
+    # Multiplier applied to per-level stake based on hours_to_close at screen time.
+    # Tuple of (max_hours, multiplier). First match wins. Last entry is the
+    # default cap (use float("inf") as max_hours). Empty tuple = no scaling.
+    # BLACK_SWAN_MODE rationale (issue #180 Phase A):
+    #   ≤1h: avg X 30x, thin volume — small stake
+    #   1-6h: avg X 50-66x — moderate
+    #   6h-7d: avg X 95x, best cohort — full stake
+    duration_stake_multipliers: tuple[tuple[float, float], ...] = ()
+
+    # ── Lifecycle (phase) stake multipliers (issue #180 P1.3) ────────────────
+    # Multiplier applied based on lifecycle_fraction = (now - start) / duration
+    # at order placement time. Tuple of (max_lifecycle_fraction, multiplier);
+    # first match wins. Empty tuple = no scaling.
+    # BLACK_SWAN_MODE rationale (issue #180 Phase B3):
+    #   <0.10 (opening_10pct): low EV, dampen
+    #   0.10-0.75 (middle): 75.6% WR, 99x avg X — boost
+    #   0.75-0.95 (late): 75.1% WR, 100x avg X — boost
+    #   >0.95: approaching final_hour, attenuate
+    phase_stake_multipliers: tuple[tuple[float, float], ...] = ()
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -308,6 +340,32 @@ BLACK_SWAN_MODE = ModeConfig(
         "formula 1", "formula one", "grand prix", "f1 race",
         "counter-strike", " cs2 ", "blast premier", "esl pro league",
         "valorant", " vct ",
+    ),
+    # Slug prefix filters from issue #180 Phase A.
+    # Block weak subtypes; require strong subtypes for sports markets only.
+    exclude_slug_prefixes=(
+        "atp-", "wta-", "f1-", "grand-prix-",
+        "cfb-", "cbb-", "cs2-", "es2-", "val-",
+    ),
+    include_slug_prefixes_for_sports=(
+        # soccer leagues
+        "epl-", "lal-", "ucl-", "uel-", "bun-", "fl1-", "sea-", "elc-",
+        "spl-", "ere-", "bl2-", "tur-", "por-", "arg-", "mex-",
+        # major US leagues
+        "nba-", "nhl-", "mlb-", "nfl-", "mls-",
+        # esports (strong)
+        "lol-", "league-of-legends-",
+    ),
+    duration_stake_multipliers=(
+        (1.0,           0.30),  # ≤1h: small (low avg X, thin vol)
+        (6.0,           0.70),  # 1–6h: moderate
+        (float("inf"),  1.00),  # >6h (workhorse 6h–7d cohort, best avg X)
+    ),
+    phase_stake_multipliers=(
+        (0.10, 0.50),  # opening_10pct: thin, dampen
+        (0.75, 1.30),  # middle: best cohort
+        (0.95, 1.30),  # late: best cohort
+        (1.00, 0.60),  # final ~5% of lifecycle approaching final_hour
     ),
 )
 
