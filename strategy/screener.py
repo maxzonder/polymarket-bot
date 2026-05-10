@@ -511,4 +511,37 @@ class Screener:
         }
         score = sum(w * components.get(name, 0.0) for name, w in self.mc.scoring_weights)
 
+        # Cluster (category × duration_bucket) bonus from issue #180 Phase A.
+        # Multiplicative on top of the weighted score; missing key = 1.0 (neutral).
+        if self.mc.cluster_score_multipliers:
+            score *= _cluster_multiplier(
+                category=m.category,
+                hours=hours,
+                table=self.mc.cluster_score_multipliers,
+            )
+
         return round(score, 4)
+
+
+def _duration_bucket(hours: float) -> str:
+    """Maps hours_to_close to the bucket labels used in #180 Phase A."""
+    if hours <= 0.5:
+        return "15m"
+    if hours <= 2.0:
+        return "1h"
+    if hours <= 6.0:
+        return "6h"
+    if hours <= 168.0:
+        return "1-7d"
+    return "long"
+
+
+def _cluster_multiplier(
+    *,
+    category: Optional[str],
+    hours: float,
+    table: dict,
+) -> float:
+    if not category:
+        return 1.0
+    return float(table.get((category, _duration_bucket(hours)), 1.0))

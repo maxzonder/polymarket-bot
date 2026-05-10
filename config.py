@@ -146,6 +146,13 @@ class ModeConfig:
     #   6h-7d: avg X 95x, best cohort — full stake
     duration_stake_multipliers: tuple[tuple[float, float], ...] = ()
 
+    # ── Cluster (category × duration) bonus table (issue #180 P2.2) ──────────
+    # Final-stage multiplier applied to total_score based on the market's
+    # (category, duration_bucket) cluster. Values centered at 1.0; >1 boosts,
+    # <1 dampens. Empty dict = no cluster scaling. Duration bucket is computed
+    # from hours_to_close (≤0.5h="15m", ≤2h="1h", ≤6h="6h", ≤168h="1-7d", else "long").
+    cluster_score_multipliers: dict = field(default_factory=dict)
+
     # ── Lifecycle (phase) stake multipliers (issue #180 P1.3) ────────────────
     # Multiplier applied based on lifecycle_fraction = (now - start) / duration
     # at order placement time. Tuple of (max_lifecycle_fraction, multiplier);
@@ -367,6 +374,18 @@ BLACK_SWAN_MODE = ModeConfig(
         (0.95, 1.30),  # late: best cohort
         (1.00, 0.60),  # final ~5% of lifecycle approaching final_hour
     ),
+    # Cluster bonuses from #180 Phase A "Main category × duration clusters".
+    # 1.0 = neutral; entries omitted from the dict default to 1.0 in scorer.
+    cluster_score_multipliers={
+        ("crypto",   "15m"):  0.70,  # avg 31x, $232 vol — worst cluster
+        ("crypto",   "1h"):   0.95,  # avg 50x — slightly below baseline
+        ("crypto",   "1-7d"): 1.20,  # avg 91x — better tail
+        ("sports",   "15m"):  0.95,  # avg 57x but noisy
+        ("sports",   "6h"):   1.05,  # avg 66x
+        ("sports",   "1-7d"): 1.00,  # avg 62x
+        ("weather",  "1-7d"): 1.30,  # avg 116x — best cluster
+        ("politics", "1-7d"): 1.20,  # avg ~120x small sample
+    },
 )
 
 MODES: dict[str, ModeConfig] = {
