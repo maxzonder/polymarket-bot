@@ -231,12 +231,16 @@ async def run_swan_live(
     clock = SystemClock()
 
     # ── Strategy ──────────────────────────────────────────────────────────────
+    # stale_order_ttl_seconds intentionally NOT overridden: each strategy class
+    # owns its TTL default (SwanConfig=1h, BlackSwanConfig=6h, chosen from
+    # buy_phase analytics in #180). Previously this was overridden to
+    # mode_config.max_hours_to_close*3600 (168h=7d for black_swan), defeating
+    # the purpose of the TTL.
     swan_config = config_class(
         strategy_id=strategy_id,
         max_open_resting_bids=mode_config.max_open_positions,
         max_resting_markets=mode_config.max_resting_markets,
         max_resting_per_cluster=mode_config.max_resting_per_cluster,
-        stale_order_ttl_seconds=float(mode_config.max_hours_to_close * 3600),
     )
     strategy = strategy_class(config=swan_config, clock=clock)
 
@@ -319,7 +323,13 @@ async def run_swan_live(
         from dataclasses import replace as _dc_replace
         effective_mc = _dc_replace(mode_config, max_hours_to_close=max_hours_to_close)
     screener_config = _ScreenerConfigOverride(bot_config, mode_config=effective_mc)
-    market_scorer = MarketScorer(min_score=mode_config.min_market_score)
+    # In black_swan mode, the analogy prior must be built from was_black_swan
+    # winners (matches the stricter universe filter). Other modes keep the
+    # broader label_20x prior. Issue #180 follow-up.
+    market_scorer = MarketScorer(
+        min_score=mode_config.min_market_score,
+        use_black_swan_label=(strategy_name == "black_swan"),
+    )
     screener = Screener(
         config=screener_config,
         db_path=str(_DB_DIR / "swan_screener_log.sqlite3"),

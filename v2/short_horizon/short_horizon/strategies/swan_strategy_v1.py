@@ -44,6 +44,11 @@ class SwanConfig:
     max_resting_per_cluster: int = 1  # max bids per neg-risk group (unused for now)
     max_total_stake_usdc: float = 500.0
     stale_order_ttl_seconds: float = 3600.0
+    # Cancel resting bids when a market enters its final N seconds to close.
+    # Issue #180 Phase B3: final_hour cohort has 54.7% hit-rate (worst), avoid
+    # filling there. Screener already filters at placement; this catches
+    # markets that aged into the danger zone after placement.
+    cancel_when_remaining_seconds_lt: float = 3600.0
 
 
 @dataclass
@@ -94,6 +99,15 @@ class SwanStrategyV1:
         # Cancel resting bids for markets that went inactive.
         if not event.is_active and event.market_id in self._bids_by_market:
             return self._cancel_market_bids(event.market_id, reason="market_no_longer_active")
+        # Cancel bids on markets that aged into the final-window danger zone.
+        if (event.market_id in self._bids_by_market
+                and event.end_time_ms is not None
+                and self.config.cancel_when_remaining_seconds_lt > 0):
+            remaining_s = (event.end_time_ms - self.clock.now_ms()) / 1000.0
+            if 0 < remaining_s < self.config.cancel_when_remaining_seconds_lt:
+                return self._cancel_market_bids(
+                    event.market_id, reason="market_entered_final_window"
+                )
         return []
 
     def detect_touches(self, event: BookUpdate) -> list[TouchSignal]:
