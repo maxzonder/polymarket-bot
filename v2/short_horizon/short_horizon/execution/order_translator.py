@@ -47,10 +47,9 @@ def translate_place_order(
         direction=policy.buy_price_rounding,
     )
     if rounded_price <= 0:
-        raise VenueTranslationError(
-            f"Intent {intent.intent_id} entry_price={intent.entry_price} rounds to zero "
-            f"with tick_size={venue_constraints.tick_size} direction={policy.buy_price_rounding}"
-        )
+        # Desired price is below the minimum tick — snap up to tick_size so the order
+        # participates in the queue at the cheapest valid price rather than being lost.
+        rounded_price = venue_constraints.tick_size
     target_notional = _target_buy_notional_from_values(
         notional_usdc=intent.notional_usdc,
         venue_constraints=venue_constraints,
