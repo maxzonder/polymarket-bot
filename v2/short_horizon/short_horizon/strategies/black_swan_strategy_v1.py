@@ -38,6 +38,11 @@ class BlackSwanConfig(SwanConfig):
     max_total_stake_usdc: float = 1000.0
     # Most events resolve within 6h of entry (final_6h cohort dominates).
     stale_order_ttl_seconds: float = 21600.0
+    # Match BLACK_SWAN_MODE.min_hours_to_close (0.4h = 24min) so existing
+    # bids are pulled at the same boundary the screener stops adding new
+    # ones. The 1h SwanConfig default would conflict for 45-60m markets
+    # that are now in scope.
+    cancel_when_remaining_seconds_lt: float = 1440.0
 
 
 class BlackSwanStrategyV1(SwanStrategyV1):

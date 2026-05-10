@@ -322,7 +322,12 @@ BLACK_SWAN_MODE = ModeConfig(
     max_resting_markets=20000,
     max_resting_per_cluster=1,
     max_cohort_size=5,
-    min_hours_to_close=1.0,
+    # 0.4h (24 min): captures 45-60m duration markets in their first 21-36 min.
+    # Excludes 15m markets (≤15min remaining always < 24min) — those use a
+    # separate strategy. Issue #180 follow-up: 45-60m cohort = 63.6% WR / 49x
+    # avg X / $245 vol, currently profitable; was being dropped by the prior
+    # 1.0h gate.
+    min_hours_to_close=0.4,
     max_hours_to_close=168.0,
     min_total_duration_hours=2.0,
     hours_to_close_null_default=48.0,
@@ -364,8 +369,11 @@ BLACK_SWAN_MODE = ModeConfig(
         "lol-", "league-of-legends-",
     ),
     duration_stake_multipliers=(
-        (1.0,           0.30),  # ≤1h: small (low avg X, thin vol)
-        (6.0,           0.70),  # 1–6h: moderate
+        # ≤1h: 45-60m bucket (15m excluded by min_hours_to_close gate).
+        # 63.6% WR / 49x avg X / $245 vol — solid but lower-volume than
+        # longer cohorts, so moderate dampen.
+        (1.0,           0.60),
+        (6.0,           0.70),  # 1–6h: moderate (52-72% WR depending on phase)
         (float("inf"),  1.00),  # >6h (workhorse 6h–7d cohort, best avg X)
     ),
     phase_stake_multipliers=(
