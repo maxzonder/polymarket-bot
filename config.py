@@ -125,6 +125,45 @@ class ModeConfig:
     # materially lower WR (<60%) in black_swan analysis.
     exclude_question_keywords: tuple[str, ...] = ()
 
+    # ── Slug prefix filters (issue #180 Phase A) ─────────────────────────────
+    # Asset-slug-based filtering. More reliable than question keywords because
+    # slugs follow consistent prefixes per league/type. Both lists default to
+    # empty (no slug filtering). When either is non-empty:
+    #   exclude_slug_prefixes — reject if slug starts with any of these
+    #   include_slug_prefixes — for sports markets only, REQUIRE slug to start
+    #     with one of these (allowlist). Non-sports categories are not gated
+    #     by include list. Keeps filter scope-bounded.
+    exclude_slug_prefixes: tuple[str, ...] = ()
+    include_slug_prefixes_for_sports: tuple[str, ...] = ()
+
+    # ── Duration-aware stake multipliers (issue #180 P1.2) ───────────────────
+    # Multiplier applied to per-level stake based on hours_to_close at screen time.
+    # Tuple of (max_hours, multiplier). First match wins. Last entry is the
+    # default cap (use float("inf") as max_hours). Empty tuple = no scaling.
+    # BLACK_SWAN_MODE rationale (issue #180 Phase A):
+    #   ≤1h: avg X 30x, thin volume — small stake
+    #   1-6h: avg X 50-66x — moderate
+    #   6h-7d: avg X 95x, best cohort — full stake
+    duration_stake_multipliers: tuple[tuple[float, float], ...] = ()
+
+    # ── Cluster (category × duration) bonus table (issue #180 P2.2) ──────────
+    # Final-stage multiplier applied to total_score based on the market's
+    # (category, duration_bucket) cluster. Values centered at 1.0; >1 boosts,
+    # <1 dampens. Empty dict = no cluster scaling. Duration bucket is computed
+    # from hours_to_close (≤0.5h="15m", ≤2h="1h", ≤6h="6h", ≤168h="1-7d", else "long").
+    cluster_score_multipliers: dict = field(default_factory=dict)
+
+    # ── Lifecycle (phase) stake multipliers (issue #180 P1.3) ────────────────
+    # Multiplier applied based on lifecycle_fraction = (now - start) / duration
+    # at order placement time. Tuple of (max_lifecycle_fraction, multiplier);
+    # first match wins. Empty tuple = no scaling.
+    # BLACK_SWAN_MODE rationale (issue #180 Phase B3):
+    #   <0.10 (opening_10pct): low EV, dampen
+    #   0.10-0.75 (middle): 75.6% WR, 99x avg X — boost
+    #   0.75-0.95 (late): 75.1% WR, 100x avg X — boost
+    #   >0.95: approaching final_hour, attenuate
+    phase_stake_multipliers: tuple[tuple[float, float], ...] = ()
+
 
 FAST_TP_MODE = ModeConfig(
     name="fast_tp_mode",
@@ -283,7 +322,12 @@ BLACK_SWAN_MODE = ModeConfig(
     max_resting_markets=20000,
     max_resting_per_cluster=1,
     max_cohort_size=5,
-    min_hours_to_close=1.0,
+    # 0.4h (24 min): captures 45-60m duration markets in their first 21-36 min.
+    # Excludes 15m markets (≤15min remaining always < 24min) — those use a
+    # separate strategy. Issue #180 follow-up: 45-60m cohort = 63.6% WR / 49x
+    # avg X / $245 vol, currently profitable; was being dropped by the prior
+    # 1.0h gate.
+    min_hours_to_close=0.4,
     max_hours_to_close=168.0,
     min_total_duration_hours=2.0,
     hours_to_close_null_default=48.0,
@@ -309,6 +353,47 @@ BLACK_SWAN_MODE = ModeConfig(
         "counter-strike", " cs2 ", "blast premier", "esl pro league",
         "valorant", " vct ",
     ),
+    # Slug prefix filters from issue #180 Phase A.
+    # Block weak subtypes; require strong subtypes for sports markets only.
+    exclude_slug_prefixes=(
+        "atp-", "wta-", "f1-", "grand-prix-",
+        "cfb-", "cbb-", "cs2-", "es2-", "val-",
+    ),
+    include_slug_prefixes_for_sports=(
+        # soccer leagues
+        "epl-", "lal-", "ucl-", "uel-", "bun-", "fl1-", "sea-", "elc-",
+        "spl-", "ere-", "bl2-", "tur-", "por-", "arg-", "mex-",
+        # major US leagues
+        "nba-", "nhl-", "mlb-", "nfl-", "mls-",
+        # esports (strong)
+        "lol-", "league-of-legends-",
+    ),
+    duration_stake_multipliers=(
+        # ≤1h: 45-60m bucket (15m excluded by min_hours_to_close gate).
+        # 63.6% WR / 49x avg X / $245 vol — solid but lower-volume than
+        # longer cohorts, so moderate dampen.
+        (1.0,           0.60),
+        (6.0,           0.70),  # 1–6h: moderate (52-72% WR depending on phase)
+        (float("inf"),  1.00),  # >6h (workhorse 6h–7d cohort, best avg X)
+    ),
+    phase_stake_multipliers=(
+        (0.10, 0.50),  # opening_10pct: thin, dampen
+        (0.75, 1.30),  # middle: best cohort
+        (0.95, 1.30),  # late: best cohort
+        (1.00, 0.60),  # final ~5% of lifecycle approaching final_hour
+    ),
+    # Cluster bonuses from #180 Phase A "Main category × duration clusters".
+    # 1.0 = neutral; entries omitted from the dict default to 1.0 in scorer.
+    cluster_score_multipliers={
+        ("crypto",   "15m"):  0.70,  # avg 31x, $232 vol — worst cluster
+        ("crypto",   "1h"):   0.95,  # avg 50x — slightly below baseline
+        ("crypto",   "1-7d"): 1.20,  # avg 91x — better tail
+        ("sports",   "15m"):  0.95,  # avg 57x but noisy
+        ("sports",   "6h"):   1.05,  # avg 66x
+        ("sports",   "1-7d"): 1.00,  # avg 62x
+        ("weather",  "1-7d"): 1.30,  # avg 116x — best cluster
+        ("politics", "1-7d"): 1.20,  # avg ~120x small sample
+    },
 )
 
 MODES: dict[str, ModeConfig] = {

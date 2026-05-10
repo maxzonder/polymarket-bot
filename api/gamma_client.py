@@ -39,6 +39,7 @@ class MarketInfo:
     hours_to_close: Optional[float]
     neg_risk: bool = False         # negRisk flag from Gamma (4.5x higher swan_rate)
     neg_risk_group_id: Optional[str] = None  # negRiskMarketID — parent group for cluster cap
+    slug: Optional[str] = None     # market slug (e.g. "epl-arsenal-vs-chelsea-2026-04-01")
 
 
 def _parse_float(val) -> Optional[float]:
@@ -211,6 +212,7 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
         hours_to_close=hours_to_close,
         neg_risk=neg_risk,
         neg_risk_group_id=neg_risk_group_id,
+        slug=(raw.get("slug") or None),
     )
 
 

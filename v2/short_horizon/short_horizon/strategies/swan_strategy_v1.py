@@ -23,6 +23,23 @@ TIMER_SCREENER_REFRESH = "swan_screener_refresh"
 TIMER_STALE_CLEANUP = "swan_stale_cleanup"
 
 
+def _phase_stake_multiplier(
+    lifecycle_fraction: float,
+    table: tuple[tuple[float, float], ...],
+) -> float:
+    """First-match multiplier from a (max_lifecycle, multiplier) table.
+
+    Empty table → 1.0 (no scaling). Sentinel: pass float('inf') as the last
+    max_lifecycle to bound the table.
+    """
+    if not table:
+        return 1.0
+    for max_lc, mult in table:
+        if lifecycle_fraction <= max_lc:
+            return mult
+    return 1.0
+
+
 @dataclass(frozen=True)
 class SwanCandidate:
     """A market candidate produced by the swan screener."""
@@ -44,6 +61,15 @@ class SwanConfig:
     max_resting_per_cluster: int = 1  # max bids per neg-risk group (unused for now)
     max_total_stake_usdc: float = 500.0
     stale_order_ttl_seconds: float = 3600.0
+    # Cancel resting bids when a market enters its final N seconds to close.
+    # Issue #180 Phase B3: final_hour cohort has 54.7% hit-rate (worst), avoid
+    # filling there. Screener already filters at placement; this catches
+    # markets that aged into the danger zone after placement.
+    cancel_when_remaining_seconds_lt: float = 3600.0
+
+    # Lifecycle (phase) stake multipliers (issue #180 P1.3). Tuple of
+    # (max_lifecycle_fraction, multiplier); first match wins. Empty = no scaling.
+    phase_stake_multipliers: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass
@@ -94,6 +120,15 @@ class SwanStrategyV1:
         # Cancel resting bids for markets that went inactive.
         if not event.is_active and event.market_id in self._bids_by_market:
             return self._cancel_market_bids(event.market_id, reason="market_no_longer_active")
+        # Cancel bids on markets that aged into the final-window danger zone.
+        if (event.market_id in self._bids_by_market
+                and event.end_time_ms is not None
+                and self.config.cancel_when_remaining_seconds_lt > 0):
+            remaining_s = (event.end_time_ms - self.clock.now_ms()) / 1000.0
+            if 0 < remaining_s < self.config.cancel_when_remaining_seconds_lt:
+                return self._cancel_market_bids(
+                    event.market_id, reason="market_entered_final_window"
+                )
         return []
 
     def detect_touches(self, event: BookUpdate) -> list[TouchSignal]:
@@ -196,6 +231,10 @@ class SwanStrategyV1:
         else:
             lifecycle = 0.5
 
+        notional = candidate.notional_usdc_per_level * _phase_stake_multiplier(
+            lifecycle, self.config.phase_stake_multipliers
+        )
+
         return OrderIntent(
             intent_id=str(uuid.uuid4()),
             strategy_id=self.config.strategy_id,
@@ -206,7 +245,7 @@ class SwanStrategyV1:
             asset_slug=candidate.asset_slug or "",
             level=level,
             entry_price=level,
-            notional_usdc=candidate.notional_usdc_per_level,
+            notional_usdc=notional,
             lifecycle_fraction=lifecycle,
             event_time_ms=now_ms,
             reason="swan_resting_bid",

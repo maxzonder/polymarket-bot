@@ -95,9 +95,18 @@ class MarketScorer:
     Refreshable with .refresh().
     """
 
-    def __init__(self, db_path=None, min_score: float = PASS_THRESHOLD):
+    def __init__(
+        self,
+        db_path=None,
+        min_score: float = PASS_THRESHOLD,
+        use_black_swan_label: bool = False,
+    ):
         self._db_path = str(db_path or DB_PATH)
         self.min_score = min_score
+        # When True, the analogy table is built on was_black_swan winners
+        # (strict subset) rather than label_20x; aligns ranking with the
+        # black_swan-only universe used by BlackSwanStrategyV1.
+        self._use_black_swan_label = use_black_swan_label
         self._analogy: dict[tuple[str, str], float] = {}
         self._analogy_yes_negrisk: dict[tuple[str, str], float] = {}
         self._loser_rates: dict[tuple[str, str], float] = {}
@@ -125,8 +134,15 @@ class MarketScorer:
                 r[1] for r in conn.execute("PRAGMA table_info(feature_mart_v1_1)").fetchall()
             }
 
-            # good_swan_rate and loser_rate per (category, vol_bucket)
-            rows = conn.execute("""
+            # good_swan_rate and loser_rate per (category, vol_bucket).
+            # In black_swan mode, swap label_20x for was_black_swan so the
+            # analogy prior matches the black_swan-only universe (issue #180).
+            good_col = "was_black_swan" if self._use_black_swan_label else "label_20x"
+            # was_black_swan only added in feature_mart_v1_1 schema migration;
+            # verify presence to avoid SQL error on stale DBs.
+            if self._use_black_swan_label and "was_black_swan" not in feature_cols:
+                good_col = "label_20x"
+            rows = conn.execute(f"""
                 SELECT
                     COALESCE(category, 'null') AS cat,
                     CASE
@@ -136,7 +152,7 @@ class MarketScorer:
                         ELSE                              '>1M'
                     END AS vol_bucket,
                     COUNT(*) AS total,
-                    SUM(label_20x) AS good,
+                    SUM({good_col}) AS good,
                     SUM(CASE WHEN was_swan = 1 AND (swan_is_winner = 0 OR swan_is_winner IS NULL)
                         THEN 1 ELSE 0 END) AS loser_swans,
                     SUM(was_swan) AS total_swans
@@ -147,7 +163,7 @@ class MarketScorer:
 
             neg_risk_yes_rows = []
             if "best_swan_is_yes_token" in feature_cols:
-                neg_risk_yes_rows = conn.execute("""
+                neg_risk_yes_rows = conn.execute(f"""
                     SELECT
                         COALESCE(category, 'null') AS cat,
                         CASE
@@ -157,7 +173,7 @@ class MarketScorer:
                             ELSE                              '>1M'
                         END AS vol_bucket,
                         COUNT(*) AS total,
-                        SUM(label_20x) AS good
+                        SUM({good_col}) AS good
                     FROM feature_mart_v1_1
                     WHERE neg_risk = 1
                       AND best_swan_is_yes_token = 1
