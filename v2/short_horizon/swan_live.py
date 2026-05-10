@@ -358,10 +358,19 @@ async def run_swan_live(
         min_score=mode_config.min_market_score,
         use_black_swan_label=(strategy_name == "black_swan"),
     )
+    # Phase E: pattern tracker is only active for black_swan strategy.
+    # For swan (big_swan_mode) the wider universe makes pattern gating too
+    # aggressive; black_swan already requires ≤5c + confirmed shock.
+    pattern_tracker = None
+    if strategy_name == "black_swan":
+        from strategy.market_pattern_tracker import MarketPatternTracker
+        pattern_tracker = MarketPatternTracker()
+        logger.info("market_pattern_tracker_enabled", strategy=strategy_name)
     screener = Screener(
         config=screener_config,
         db_path=str(_DB_DIR / "swan_screener_log.sqlite3"),
         market_scorer=market_scorer,
+        pattern_tracker=pattern_tracker,
     )
     # Per-level stake: venue minimum is 1.0 USDC notional; BIG_SWAN_MODE.stake_usdc
     # (0.05) is below that threshold so we use a configurable floor.

@@ -25,6 +25,7 @@ from api.clob_client import get_orderbook
 from api.data_api import get_last_trade_ts, get_recent_trades
 from config import BotConfig
 from strategy.market_scorer import MarketScore, MarketScorer
+from strategy.market_pattern_tracker import MarketPatternTracker
 from strategy.entry_levels import suggested_entry_levels
 from utils.logger import setup_logger
 from utils.paths import DATA_DIR
@@ -83,10 +84,12 @@ class Screener:
         db_path: Optional[Path] = None,
         market_scorer: Optional[MarketScorer] = None,
         skip_logging: bool = False,
+        pattern_tracker: Optional[MarketPatternTracker] = None,
     ):
         self.config = config
         self.mc = config.mode_config
         self.market_scorer = market_scorer
+        self.pattern_tracker = pattern_tracker
         self._db_path = str(db_path or DATA_DIR / "positions.db")
         self._skip_logging = skip_logging
 
@@ -270,6 +273,19 @@ class Screener:
                 _log("rejected_dead_market", ms=ms_obj.total if ms_obj else None)
                 return []
 
+        # Pattern gate (Phase E): fetch trade history, classify price-action pattern.
+        # mult == 0.0 means skip entirely (grind_down, no_floor_yet, bad category combo).
+        pattern_mult = 1.0
+        if self.pattern_tracker is not None:
+            pattern_mult = self.pattern_tracker.get_pattern_mult(m)
+            pattern_label = self.pattern_tracker.get_pattern_label(m.market_id) or "unknown"
+            if pattern_mult == 0.0:
+                _log("rejected_pattern", ms=ms_obj.total if ms_obj else None)
+                logger.debug(
+                    f"Pattern gate skip: {q[:50]!r} pattern={pattern_label} cat={m.category}"
+                )
+                return []
+
         candidates: list[EntryCandidate] = []
 
         # Each token (YES, NO) is evaluated separately
@@ -320,7 +336,7 @@ class Screener:
                 _log("rejected_market_score", token_id=token_id, ms=token_ms_obj.total)
                 continue
 
-            total_score = self._compute_total_score(m, token_ms_obj, hours=hours) * group_boost
+            total_score = self._compute_total_score(m, token_ms_obj, hours=hours) * group_boost * pattern_mult
 
             # Entry tiers are MAX acceptable prices, not strictly-below-current bids.
             # If the market is already cheaper than a tier, that tier remains valid and
@@ -342,10 +358,14 @@ class Screener:
             boost_info = f" boost={group_boost:.2f}" if group_boost != 1.0 else ""
             neg_risk_info = f" [neg-risk grp={m.neg_risk_group_id[:12]}]" if m.neg_risk_group_id else ""
             ms_str = f"{ms_score:.3f}" if ms_score is not None else "N/A"
+            pat_info = ""
+            if self.pattern_tracker is not None:
+                _pl = self.pattern_tracker.get_pattern_label(m.market_id) or "unknown"
+                pat_info = f" pat={_pl}({pattern_mult:.2f})"
             logger.info(
                 f"Candidate: {(m.question or '')[:60]!r} | "
                 f"{outcome_name} @ ${price:.4f} | "
-                f"score={total_score:.3f}{boost_info} ms={ms_str} | "
+                f"score={total_score:.3f}{boost_info}{pat_info} ms={ms_str} | "
                 f"cat={m.category} vol=${m.volume_usdc:.0f} hrs={hours:.1f}"
                 f"{neg_risk_info}"
             )
