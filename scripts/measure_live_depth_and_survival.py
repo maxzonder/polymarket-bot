@@ -704,17 +704,33 @@ class LiveDepthCollector:
 
         while True:
             for _attempt in range(8):
+                _disc_params: dict[str, Any] = {
+                    "limit": 100,
+                    "offset": offset,
+                    "active": "true",
+                    "closed": "false",
+                    "archived": "false",
+                    "order": self.args.discovery_order,
+                    "ascending": str(self.args.discovery_ascending).lower(),
+                }
+                # When duration_metric=time_remaining, push end_date window into the
+                # API query so the 20k-row scan reaches markets regardless of creation age.
+                if (
+                    getattr(self.args, "duration_metric", None) == "time_remaining"
+                    and getattr(self.args, "min_duration_seconds", None) is not None
+                    and getattr(self.args, "max_duration_seconds", None) is not None
+                ):
+                    import datetime as _dt
+                    _now = _dt.datetime.now(_dt.timezone.utc)
+                    _disc_params["end_date_min"] = (
+                        _now + _dt.timedelta(seconds=self.args.min_duration_seconds)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _disc_params["end_date_max"] = (
+                        _now + _dt.timedelta(seconds=self.args.max_duration_seconds)
+                    ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 resp = session.get(
                     f"{GAMMA_BASE}/markets",
-                    params={
-                        "limit": 100,
-                        "offset": offset,
-                        "active": "true",
-                        "closed": "false",
-                        "archived": "false",
-                        "order": self.args.discovery_order,
-                        "ascending": str(self.args.discovery_ascending).lower(),
-                    },
+                    params=_disc_params,
                     timeout=30,
                 )
                 if resp.status_code == 429:
