@@ -171,6 +171,22 @@ class Screener:
         try:
             conn = sqlite3.connect(self._db_path)
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS screener_log (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scanned_at  INTEGER,
+                    market_id   TEXT,
+                    token_id    TEXT,
+                    question    TEXT,
+                    category    TEXT,
+                    current_price REAL,
+                    hours_to_close REAL,
+                    volume_usdc REAL,
+                    outcome     TEXT,
+                    candidate_id TEXT,
+                    market_score REAL
+                )
+            """)
             conn.executemany(_SCREENER_LOG_INSERT, entries)
             conn.commit()
             conn.close()
