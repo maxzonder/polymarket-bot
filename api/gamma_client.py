@@ -112,6 +112,21 @@ _TAG_CATEGORY_MAP: dict[str, str] = {
 }
 
 
+# Keyword substrings for weather question detection.
+# Gamma daily weather markets (temperature, rainfall, etc.) carry no tags, so
+# we fall back to question-text matching after tag lookup fails.
+_WEATHER_QUESTION_KEYWORDS = (
+    "highest temperature", "lowest temperature", "highest temp", "lowest temp",
+    "°c ", "°c?", "°c on", "°f ", "°f?", "°f on",
+    "celsius", "fahrenheit",
+    "rainfall", "precipitation",
+    "wind speed", "wind gust",
+    "hurricane", "typhoon", "cyclone",
+    "snowfall", "snow accumulation",
+    "arctic sea ice", "sea ice extent",
+)
+
+
 def _category_from_tags(tags: list) -> Optional[str]:
     """
     Infer internal category string from the Gamma API tags array.
@@ -127,6 +142,17 @@ def _category_from_tags(tags: list) -> Optional[str]:
         cat = _TAG_CATEGORY_MAP.get(slug) or _TAG_CATEGORY_MAP.get(label)
         if cat:
             return cat
+    return None
+
+
+def _category_from_question(question: str) -> Optional[str]:
+    """
+    Keyword fallback for markets with no tags.  Only used when tag detection
+    returns None.  Conservative: only returns 'weather' for unambiguous phrases.
+    """
+    q = question.lower()
+    if any(kw in q for kw in _WEATHER_QUESTION_KEYWORDS):
+        return "weather"
     return None
 
 
@@ -171,6 +197,8 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
     if not category:
         tags = raw.get("tags") or []
         category = _category_from_tags(tags)
+    if not category:
+        category = _category_from_question(raw.get("question") or "")
 
     # End date
     from datetime import datetime, timezone, timedelta
