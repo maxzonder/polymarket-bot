@@ -236,6 +236,8 @@ async def run_swan_live(
     redeem_interval_seconds: float | None = None,
     stake_per_level: float | None = None,
     max_hours_to_close: float | None = None,
+    min_hours_to_close: float | None = None,
+    min_total_duration_hours: float | None = None,
     strategy_name: str = "swan",
 ) -> RunnerSummary:
     reg = _STRATEGY_REGISTRY.get(strategy_name)
@@ -286,7 +288,7 @@ async def run_swan_live(
         reconcile_runtime_orders(runtime=runtime, execution_client=execution_client, execution_mode=resolved_mode)
 
     # ── Market event source ───────────────────────────────────────────────────
-    _min_secs = int(mode_config.min_hours_to_close * 3600)
+    _min_secs = int((min_hours_to_close if min_hours_to_close is not None else mode_config.min_hours_to_close) * 3600)
     _max_secs = int(max_hours_to_close * 3600) if max_hours_to_close is not None else int(mode_config.max_hours_to_close * 3600)
     universe_filter = UniverseFilter(allowed_assets=())  # empty = all assets
     duration_window = DurationWindow(
@@ -348,9 +350,16 @@ async def run_swan_live(
     # Always override mode_config so the screener uses the selected strategy's
     # entry levels and price gates, not the default big_swan_mode from .env.
     effective_mc = mode_config
+    _overrides: dict = {}
     if max_hours_to_close is not None:
+        _overrides["max_hours_to_close"] = max_hours_to_close
+    if min_hours_to_close is not None:
+        _overrides["min_hours_to_close"] = min_hours_to_close
+    if min_total_duration_hours is not None:
+        _overrides["min_total_duration_hours"] = min_total_duration_hours
+    if _overrides:
         from dataclasses import replace as _dc_replace
-        effective_mc = _dc_replace(mode_config, max_hours_to_close=max_hours_to_close)
+        effective_mc = _dc_replace(mode_config, **_overrides)
     screener_config = _ScreenerConfigOverride(bot_config, mode_config=effective_mc)
     # In black_swan mode, the analogy prior must be built from was_black_swan
     # winners (matches the stricter universe filter). Other modes keep the
@@ -480,6 +489,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-hours-to-close", type=float, default=None,
                    dest="max_hours_to_close",
                    help="Override max hours to close from mode config")
+    p.add_argument("--min-hours-to-close", type=float, default=None,
+                   dest="min_hours_to_close",
+                   help="Override min hours to close from mode config")
+    p.add_argument("--min-total-duration-hours", type=float, default=None,
+                   dest="min_total_duration_hours",
+                   help="Override min total market lifespan (hours) from mode config")
     return p
 
 
@@ -496,5 +511,7 @@ if __name__ == "__main__":
             redeem_interval_seconds=args.redeem_interval_seconds,
             stake_per_level=args.stake_per_level,
             max_hours_to_close=args.max_hours_to_close,
+            min_hours_to_close=args.min_hours_to_close,
+            min_total_duration_hours=args.min_total_duration_hours,
         )
     )
