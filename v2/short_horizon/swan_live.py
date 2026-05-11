@@ -68,13 +68,20 @@ from short_horizon.venue_polymarket.execution_client import (
     PRIVATE_KEY_ENV_VAR,
     PolymarketExecutionClient,
 )
-from short_horizon.venue_polymarket.markets import DurationWindow, UniverseFilter
+from short_horizon.venue_polymarket.markets import (
+    DurationWindow,
+    UniverseFilter,
+    discover_short_horizon_markets_sync,
+)
+from short_horizon.venue_polymarket.book_channel import BookNormalizer
+from short_horizon.venue_polymarket.websocket import PolymarketWebsocket
 
 # Import old swan screener (reused as-is for market discovery).
 from config import BIG_SWAN_MODE, BLACK_SWAN_MODE, BotConfig, load_config
 from execution.order_manager import POSITIONS_DB
 from strategy.market_scorer import MarketScorer
 from strategy.screener import EntryCandidate, Screener
+from api.gamma_client import fetch_market
 
 _DB_DIR = Path(os.environ.get("POLYBOT_DATA_DIR", Path.home() / ".polybot" / "swan_v2"))
 
@@ -226,6 +233,178 @@ async def _cleanup_loop(
         ))
 
 
+_WS_UNIVERSE_INTERVAL_SECONDS = 300   # rebuild WS subscription universe every 5 min
+_WS_PRICE_THRESHOLD = 0.05            # trigger screener when best_ask ≤ this
+
+
+async def _ws_universe_builder_loop(
+    *,
+    ws: PolymarketWebsocket,
+    duration_window: DurationWindow,
+    universe_filter: UniverseFilter,
+    logger,
+    shutdown: asyncio.Event,
+) -> None:
+    """Periodically discovers markets in the time window and syncs CLOB WS subscription."""
+    subscribed: set[str] = set()
+    while not shutdown.is_set():
+        try:
+            markets = await asyncio.to_thread(
+                discover_short_horizon_markets_sync,
+                universe_filter,
+                duration_window,
+                5_000,
+            )
+            tokens: set[str] = set()
+            for m in markets:
+                if m.token_yes_id:
+                    tokens.add(m.token_yes_id)
+                if m.token_no_id:
+                    tokens.add(m.token_no_id)
+
+            to_add = tokens - subscribed
+            to_remove = subscribed - tokens
+            if to_add:
+                await ws.subscribe(list(to_add))
+            if to_remove:
+                await ws.unsubscribe(list(to_remove))
+            subscribed = tokens
+            logger.info(
+                "ws_universe_updated",
+                markets=len(markets),
+                tokens=len(tokens),
+                added=len(to_add),
+                removed=len(to_remove),
+            )
+        except Exception:
+            logger.exception("ws_universe_builder_error")
+
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=_WS_UNIVERSE_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _ws_price_monitor_loop(
+    *,
+    ws: PolymarketWebsocket,
+    screener: Screener,
+    strategy: SwanStrategyV1,
+    source: LiveEventSource,
+    clock: SystemClock,
+    stake_usdc_per_level: float,
+    duration_stake_multipliers: tuple[tuple[float, float], ...],
+    price_threshold: float,
+    logger,
+    shutdown: asyncio.Event,
+) -> None:
+    """Watches CLOB WS for best_ask crossing ≤ price_threshold; triggers per-market screener."""
+    normalizer = BookNormalizer(source="swan_ws_monitor")
+    below_threshold: set[str] = set()
+
+    while not shutdown.is_set():
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        except asyncio.TimeoutError:
+            continue
+        except Exception:
+            logger.exception("ws_price_monitor_recv_error")
+            continue
+
+        ingest_ms = clock.now_ms()
+        try:
+            updates = normalizer.normalize_frame(raw, ingest_time_ms=ingest_ms)
+        except Exception:
+            continue
+
+        for update in updates:
+            ask = update.best_ask
+            if ask is None:
+                continue
+            token_id = update.token_id
+            was_below = token_id in below_threshold
+            is_below = ask <= price_threshold
+
+            if is_below and not was_below:
+                below_threshold.add(token_id)
+                asyncio.create_task(
+                    _ws_trigger_screener(
+                        token_id=token_id,
+                        market_id=update.market_id,
+                        ask=ask,
+                        screener=screener,
+                        strategy=strategy,
+                        source=source,
+                        clock=clock,
+                        stake_usdc_per_level=stake_usdc_per_level,
+                        duration_stake_multipliers=duration_stake_multipliers,
+                        logger=logger,
+                    ),
+                    name=f"ws_trigger_{token_id[:12]}",
+                )
+            elif not is_below and was_below:
+                below_threshold.discard(token_id)
+
+
+async def _ws_trigger_screener(
+    *,
+    token_id: str,
+    market_id: str | None,
+    ask: float,
+    screener: Screener,
+    strategy: SwanStrategyV1,
+    source: LiveEventSource,
+    clock: SystemClock,
+    stake_usdc_per_level: float,
+    duration_stake_multipliers: tuple[tuple[float, float], ...],
+    logger,
+) -> None:
+    """Fetches market from Gamma, runs single-market screener eval, updates strategy."""
+    if not market_id:
+        return
+    try:
+        market_info = await asyncio.to_thread(fetch_market, market_id)
+    except Exception:
+        logger.warning("ws_trigger_fetch_failed", token_id=token_id, market_id=market_id)
+        return
+    if market_info is None:
+        return
+
+    log_entries: list[tuple] = []
+    try:
+        candidates = screener._evaluate_market(market_info, log_entries)
+    except Exception:
+        logger.exception("ws_trigger_eval_error", market_id=market_id)
+        return
+    finally:
+        if log_entries:
+            screener._flush_screener_log(log_entries)
+
+    if not candidates:
+        return
+
+    swan_cands = [
+        _entry_candidate_to_swan(c, stake_usdc_per_level=stake_usdc_per_level,
+                                 duration_stake_multipliers=duration_stake_multipliers)
+        for c in candidates
+    ]
+    strategy.update_candidates(swan_cands)
+    now_ms = clock.now_ms()
+    source.inject(TimerEvent(
+        event_time_ms=now_ms,
+        ingest_time_ms=now_ms,
+        timer_kind=TIMER_SCREENER_REFRESH,
+        source="swan_ws_price_trigger",
+    ))
+    logger.info(
+        "ws_price_trigger_candidates",
+        token_id=token_id,
+        ask=ask,
+        market_id=market_id,
+        candidates=len(swan_cands),
+    )
+
+
 async def run_swan_live(
     *,
     db_path: Path | str | None = None,
@@ -299,9 +478,13 @@ async def run_swan_live(
         max_seconds_to_end=_max_secs,
     )
 
-    # Swan does not use BookUpdate events (detect_touches returns []), so we
-    # stub out the WebSocket to avoid subscribing to potentially thousands of
-    # markets in the wide-universe discovery pass.
+    # Price-monitoring WS: separate from LiveEventSource (which uses NoopWebsocket
+    # for market-state events). This WS subscribes to the discovered universe and
+    # fires the screener when best_ask crosses ≤ _WS_PRICE_THRESHOLD.
+    price_monitor_ws = PolymarketWebsocket()
+
+    # LiveEventSource still uses a noop WS — swan strategy ignores BookUpdates and
+    # we don't want book frames doubling up in the main event log.
     class _NoopWebsocket:
         messages: asyncio.Queue = asyncio.Queue()
         async def connect(self) -> None: pass
@@ -309,7 +492,7 @@ async def run_swan_live(
         async def subscribe(self, token_ids) -> None: pass
         async def unsubscribe(self, token_ids) -> None: pass
         async def recv(self) -> str:
-            await asyncio.sleep(3600)  # never yields messages
+            await asyncio.sleep(3600)
             return ""
 
     if resolved_mode is ExecutionMode.LIVE:
@@ -426,6 +609,8 @@ async def run_swan_live(
             if callable(close):
                 close()
 
+    await price_monitor_ws.connect()
+
     screener_task = asyncio.create_task(
         _screener_loop(
             screener=screener,
@@ -449,17 +634,45 @@ async def run_swan_live(
         ),
         name="swan_cleanup_loop",
     )
+    ws_universe_task = asyncio.create_task(
+        _ws_universe_builder_loop(
+            ws=price_monitor_ws,
+            duration_window=duration_window,
+            universe_filter=universe_filter,
+            logger=logger,
+            shutdown=shutdown,
+        ),
+        name="swan_ws_universe_loop",
+    )
+    ws_monitor_task = asyncio.create_task(
+        _ws_price_monitor_loop(
+            ws=price_monitor_ws,
+            screener=screener,
+            strategy=strategy,
+            source=source,
+            clock=clock,
+            stake_usdc_per_level=_stake_per_level,
+            duration_stake_multipliers=mode_config.duration_stake_multipliers,
+            price_threshold=_WS_PRICE_THRESHOLD,
+            logger=logger,
+            shutdown=shutdown,
+        ),
+        name="swan_ws_monitor_loop",
+    )
 
     try:
         summary = await _run_event_stream()
     finally:
         screener_task.cancel()
         cleanup_task.cancel()
-        for t in (screener_task, cleanup_task):
+        ws_universe_task.cancel()
+        ws_monitor_task.cancel()
+        for t in (screener_task, cleanup_task, ws_universe_task, ws_monitor_task):
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
+        await price_monitor_ws.close()
 
     logger.info("swan_live_finished", run_id=run_id, events=summary.event_count)
     return summary
