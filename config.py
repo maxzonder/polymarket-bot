@@ -96,6 +96,11 @@ class ModeConfig:
     # from escaping the filter entirely. Default 48h = safe middle ground.
     hours_to_close_null_default: float = 48.0
 
+    # If True, reject markets where Gamma returns no end_date (hours_to_close is None)
+    # instead of falling back to hours_to_close_null_default. Use for strategies where
+    # unknown deadline = unknown risk (e.g. long-horizon election markets bypassing gates).
+    hours_to_close_null_reject: bool = False
+
     # ── Screener scoring weights ───────────────────────────────────────────────
     # Tuple of (component_name, weight) pairs. Weights should sum to 1.0.
     # Components: "market_score", "liq", "duration", "category"
@@ -247,6 +252,7 @@ BIG_SWAN_MODE = ModeConfig(
     min_hours_to_close=0.25,     # 15 min — allow short-lived markets
     max_hours_to_close=168.0,    # 7 days — big events need time to materialise
     hours_to_close_null_default=48.0,
+    hours_to_close_null_reject=True,   # reject markets with unknown end_date (#184)
     # v1.1: market_score gate — reject bottom-half markets
     min_market_score=0.25,
     # Conservative bankroll-aware sizing: full / half / quarter of the $0.50 market budget.
@@ -331,6 +337,7 @@ BLACK_SWAN_MODE = ModeConfig(
     max_hours_to_close=168.0,
     min_total_duration_hours=2.0,
     hours_to_close_null_default=48.0,
+    hours_to_close_null_reject=True,   # reject markets with unknown end_date (#184)
     # Lower prices = higher X: allocate more stake there
     stake_tiers=(
         (0.005, _BSV1_BUDGET * 0.40),  # 0.5c tier: 40¢

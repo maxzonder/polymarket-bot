@@ -210,6 +210,9 @@ class Screener:
             ))
 
         if m.hours_to_close is None:
+            if mc.hours_to_close_null_reject:
+                _log("rejected_hours_to_close_null")
+                return []
             _log("hours_to_close_null_default_applied")
         if hours < mc.min_hours_to_close:
             _log("rejected_hours_to_close_min")
