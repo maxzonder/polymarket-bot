@@ -369,9 +369,11 @@ BLACK_SWAN_MODE = ModeConfig(
         "lol-", "league-of-legends-",
     ),
     duration_stake_multipliers=(
-        # ≤1h: 45-60m bucket (15m excluded by min_hours_to_close gate).
-        # 63.6% WR / 49x avg X / $245 vol — solid but lower-volume than
-        # longer cohorts, so moderate dampen.
+        # ≤15m: no analytics yet — very short lifecycle, high variance.
+        # Gate currently at min_hours_to_close=0.4h so this is prep for
+        # when 15m markets are enabled.
+        (0.25,          0.40),
+        # ≤1h: 45-60m bucket (63.6% WR / 49x avg X / $245 vol).
         (1.0,           0.60),
         (6.0,           0.70),  # 1–6h: moderate (52-72% WR depending on phase)
         (float("inf"),  1.00),  # >6h (workhorse 6h–7d cohort, best avg X)
@@ -391,6 +393,7 @@ BLACK_SWAN_MODE = ModeConfig(
         ("sports",   "15m"):  0.95,  # avg 57x but noisy
         ("sports",   "6h"):   1.05,  # avg 66x
         ("sports",   "1-7d"): 1.00,  # avg 62x
+        ("weather",  "15m"):  1.00,  # no analytics yet — neutral placeholder
         ("weather",  "1-7d"): 1.30,  # avg 116x — best cluster
         ("politics", "1-7d"): 1.20,  # avg ~120x small sample
     },

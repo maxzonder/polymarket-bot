@@ -277,7 +277,7 @@ class Screener:
         # mult == 0.0 means skip entirely (grind_down, no_floor_yet, bad category combo).
         pattern_mult = 1.0
         if self.pattern_tracker is not None:
-            pattern_mult = self.pattern_tracker.get_pattern_mult(m)
+            pattern_mult = self.pattern_tracker.get_pattern_mult(m, hours)
             pattern_label = self.pattern_tracker.get_pattern_label(m.market_id) or "unknown"
             if pattern_mult == 0.0:
                 _log("rejected_pattern", ms=ms_obj.total if ms_obj else None)

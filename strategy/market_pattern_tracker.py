@@ -8,6 +8,11 @@ Lifecycle-fraction normalization: patterns are detected relative to
 (ts - first_trade_ts) / (end_date_ts - first_trade_ts) so that a "rapid
 collapse" means the same fraction of market life regardless of whether the
 market is 2 hours or 7 days long.
+
+Policy key: (pattern, category, duration_bucket) with None wildcards.
+Lookup order: (p,c,b) → (p,None,b) → (p,c,None) → (p,None,None).
+This lets 15m markets carry different multipliers without touching the
+classification algorithm itself.
 """
 
 from __future__ import annotations
@@ -32,54 +37,80 @@ PENNY_FLOOR_TOUCH     = "penny_floor_touch"
 NO_PRE_HISTORY        = "no_pre_history"
 NO_FLOOR_YET          = "no_floor_yet"
 
-# (pattern, category) → multiplier; None = any category fallback
-_POLICY: dict[tuple[str, Optional[str]], float] = {
-    # floor_accumulation: best pattern — long residence at floor with confirmed shock
-    (FLOOR_ACCUMULATION, "weather"): 1.5,
-    (FLOOR_ACCUMULATION, "crypto"):  1.2,
-    (FLOOR_ACCUMULATION, "sports"):  1.1,
-    (FLOOR_ACCUMULATION, None):      1.0,
-    # chop_then_floor: high pre-floor variance, then settled — good signal
-    (CHOP_THEN_FLOOR, "weather"): 1.5,
-    (CHOP_THEN_FLOOR, "crypto"):  1.1,
-    (CHOP_THEN_FLOOR, "sports"):  1.0,
-    (CHOP_THEN_FLOOR, None):      1.0,
-    # wick_floor_touch: brief dip, recovered — mild signal
-    (WICK_FLOOR_TOUCH, "weather"): 1.2,
-    (WICK_FLOOR_TOUCH, "crypto"):  1.1,
-    (WICK_FLOOR_TOUCH, "sports"):  0.8,
-    (WICK_FLOOR_TOUCH, None):      1.0,
-    # sudden_collapse: very recent crash to floor — uncertain direction
-    (SUDDEN_COLLAPSE, "weather"): 0.7,
-    (SUDDEN_COLLAPSE, "crypto"):  1.0,
-    (SUDDEN_COLLAPSE, "sports"):  0.6,
-    (SUDDEN_COLLAPSE, None):      0.8,
-    # grind_down_to_floor: slow bleed → SKIP universally (loser trajectory)
-    (GRIND_DOWN_TO_FLOOR, None): 0.0,
-    # penny_floor_touch: reached ≤ 0.02 → likely dead; skip except crypto
-    (PENNY_FLOOR_TOUCH, "weather"): 0.0,
-    (PENNY_FLOOR_TOUCH, "sports"):  0.0,
-    (PENNY_FLOOR_TOUCH, "crypto"):  0.4,
-    (PENNY_FLOOR_TOUCH, None):      0.0,
-    # no_pre_history: too few trades to judge; conservative
-    (NO_PRE_HISTORY, "sports"): 0.0,
-    (NO_PRE_HISTORY, None):     0.5,
-    # no_floor_yet: price never reached floor — don't seed yet
-    (NO_FLOOR_YET, None): 0.0,
-}
-
 _ALL_PATTERNS = frozenset({
     FLOOR_ACCUMULATION, CHOP_THEN_FLOOR, WICK_FLOOR_TOUCH,
     SUDDEN_COLLAPSE, GRIND_DOWN_TO_FLOOR, PENNY_FLOOR_TOUCH,
     NO_PRE_HISTORY, NO_FLOOR_YET,
 })
 
+# Policy key: (pattern, category, duration_bucket); None = wildcard for that axis.
+# Lookup order in _policy_mult: (p,c,b) → (p,None,b) → (p,c,None) → (p,None,None).
+_POLICY: dict[tuple[str, Optional[str], Optional[str]], float] = {
+
+    # ── floor_accumulation: long residence at floor, confirmed shock ──────────
+    (FLOOR_ACCUMULATION, "weather", None): 1.5,
+    (FLOOR_ACCUMULATION, "crypto",  None): 1.2,
+    (FLOOR_ACCUMULATION, "sports",  None): 1.1,
+    (FLOOR_ACCUMULATION, None,      None): 1.0,
+    # 15m: floor residence is only minutes — weaker signal
+    (FLOOR_ACCUMULATION, "weather", "15m"): 0.9,
+    (FLOOR_ACCUMULATION, "crypto",  "15m"): 0.8,
+    (FLOOR_ACCUMULATION, "sports",  "15m"): 0.7,
+    (FLOOR_ACCUMULATION, None,      "15m"): 0.8,
+
+    # ── chop_then_floor: high pre-floor variance then settled ─────────────────
+    (CHOP_THEN_FLOOR, "weather", None): 1.5,
+    (CHOP_THEN_FLOOR, "crypto",  None): 1.1,
+    (CHOP_THEN_FLOOR, "sports",  None): 1.0,
+    (CHOP_THEN_FLOOR, None,      None): 1.0,
+    # 15m: chop in minutes is less meaningful
+    (CHOP_THEN_FLOOR, None, "15m"): 0.7,
+
+    # ── wick_floor_touch: brief dip, recovered ────────────────────────────────
+    (WICK_FLOOR_TOUCH, "weather", None): 1.2,
+    (WICK_FLOOR_TOUCH, "crypto",  None): 1.1,
+    (WICK_FLOOR_TOUCH, "sports",  None): 0.8,
+    (WICK_FLOOR_TOUCH, None,      None): 1.0,
+    # 15m: a wick in minutes is noise
+    (WICK_FLOOR_TOUCH, None, "15m"): 0.7,
+
+    # ── sudden_collapse: floor first hit in last 20% of lifecycle ────────────
+    (SUDDEN_COLLAPSE, "weather", None): 0.7,
+    (SUDDEN_COLLAPSE, "crypto",  None): 1.0,
+    (SUDDEN_COLLAPSE, "sports",  None): 0.6,
+    (SUDDEN_COLLAPSE, None,      None): 0.8,
+    # 15m: fresh crash in final seconds = fresh price discovery, more interesting
+    (SUDDEN_COLLAPSE, "crypto",  "15m"): 1.3,
+    (SUDDEN_COLLAPSE, "weather", "15m"): 1.0,
+    (SUDDEN_COLLAPSE, "sports",  "15m"): 0.8,
+    (SUDDEN_COLLAPSE, None,      "15m"): 0.9,
+
+    # ── grind_down_to_floor: slow bleed → SKIP universally ───────────────────
+    (GRIND_DOWN_TO_FLOOR, None, None): 0.0,
+
+    # ── penny_floor_touch: ≤ 0.02 → likely dead ──────────────────────────────
+    (PENNY_FLOOR_TOUCH, "weather", None): 0.0,
+    (PENNY_FLOOR_TOUCH, "sports",  None): 0.0,
+    (PENNY_FLOOR_TOUCH, "crypto",  None): 0.4,
+    (PENNY_FLOOR_TOUCH, None,      None): 0.0,
+    # 15m: penny in a 15m market is almost certainly dead
+    (PENNY_FLOOR_TOUCH, "crypto",  "15m"): 0.3,
+
+    # ── no_pre_history: too few trades ───────────────────────────────────────
+    (NO_PRE_HISTORY, "sports", None): 0.0,
+    (NO_PRE_HISTORY, None,     None): 0.5,
+    # 15m: no trades in a 15m market = too risky, skip all categories
+    (NO_PRE_HISTORY, None, "15m"): 0.0,
+
+    # ── no_floor_yet: price never reached floor ───────────────────────────────
+    (NO_FLOOR_YET, None, None): 0.0,
+}
+
 
 @dataclass
 class _PatternState:
     condition_id: str
-    pattern: str
-    mult: float
+    pattern: str      # label only; mult is recomputed live (hours change each scan)
     fetched_at: float
     trade_count: int
 
@@ -87,26 +118,28 @@ class _PatternState:
 class MarketPatternTracker:
     """
     Stateful component that fetches trade history once per market and classifies
-    its price-action pattern.  All calls to get_pattern_mult() from a single
-    screener thread are safe; no concurrency locking is needed since only one
-    screener task exists.
+    its price-action pattern.  The pattern label is cached; the multiplier is
+    recomputed on each call using the current hours_to_close so that the
+    duration bucket reflects the actual remaining time.
     """
 
     def __init__(self) -> None:
         self._cache: dict[str, _PatternState] = {}
 
-    def get_pattern_mult(self, m) -> float:
+    def get_pattern_mult(self, m, hours: float) -> float:
         """
         Return the pattern multiplier (0.0 = skip, <1.0 = reduce, >1.0 = boost).
-        Fetches trades on first call; returns cached result for 30 min thereafter.
-        m must be a MarketInfo with .market_id, .condition_id, .category, .end_date_ts.
+        Pattern label is fetched/cached for 30 min; mult is looked up fresh each
+        call using current hours so the duration bucket stays accurate.
+        m must have .market_id, .condition_id, .category, .end_date_ts.
         """
         state = self._cache.get(m.market_id)
         now = time.time()
         if state is None or (now - state.fetched_at) > _CACHE_TTL_SECONDS:
             state = self._fetch_and_classify(m, now)
             self._cache[m.market_id] = state
-        return state.mult
+        bucket = _duration_bucket(hours)
+        return _policy_mult(state.pattern, m.category, bucket)
 
     def get_pattern_label(self, market_id: str) -> Optional[str]:
         state = self._cache.get(market_id)
@@ -115,14 +148,26 @@ class MarketPatternTracker:
     def _fetch_and_classify(self, m, now: float) -> _PatternState:
         trades = _fetch_trades(m.condition_id)
         pattern = _classify(trades, m.end_date_ts)
-        mult = _policy_mult(pattern, m.category)
         return _PatternState(
             condition_id=m.condition_id,
             pattern=pattern,
-            mult=mult,
             fetched_at=now,
             trade_count=len(trades),
         )
+
+
+# ── Duration bucket ───────────────────────────────────────────────────────────
+
+def _duration_bucket(hours: float) -> str:
+    if hours <= 0.5:
+        return "15m"
+    if hours <= 2.0:
+        return "1h"
+    if hours <= 6.0:
+        return "6h"
+    if hours <= 168.0:
+        return "1-7d"
+    return "long"
 
 
 # ── Trades fetch ──────────────────────────────────────────────────────────────
@@ -196,7 +241,6 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
     last_price = prices[-1]
 
     # ── 3. Wick floor touch: brief dip that recovered ────────────────────────
-    # floor_duration_frac < 10% of life AND latest price bounced above 0.08
     if floor_duration_frac < 0.10 and last_price > 0.08:
         return WICK_FLOOR_TOUCH
 
@@ -210,9 +254,9 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
         pre_floor_span_frac = lf(timestamps[first_floor_idx]) - lf(timestamps[0])
         if pre_floor_span_frac > 0.60:
             moves = [(b - a) for a, b in zip(pre_floor_prices, pre_floor_prices[1:])]
-            non_zero = [m for m in moves if m != 0]
+            non_zero = [mv for mv in moves if mv != 0]
             if non_zero:
-                down_frac = sum(1 for m in non_zero if m < 0) / len(non_zero)
+                down_frac = sum(1 for mv in non_zero if mv < 0) / len(non_zero)
                 if down_frac >= 0.65:
                     return GRIND_DOWN_TO_FLOOR
 
@@ -230,11 +274,20 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
 
 # ── Policy lookup ─────────────────────────────────────────────────────────────
 
-def _policy_mult(pattern: str, category: Optional[str]) -> float:
-    """Look up (pattern, category) → multiplier; fall back to (pattern, None)."""
+def _policy_mult(pattern: str, category: Optional[str], bucket: str) -> float:
+    """
+    Look up multiplier for (pattern, category, bucket).
+    Tries most-specific key first, falls back via wildcard chain.
+    """
     if pattern not in _ALL_PATTERNS:
         return 0.5
-    specific = _POLICY.get((pattern, category))
-    if specific is not None:
-        return specific
-    return _POLICY.get((pattern, None), 1.0)
+    for cat, bkt in (
+        (category, bucket),     # exact
+        (None,     bucket),     # any category, this bucket
+        (category, None),       # any bucket, this category
+        (None,     None),       # any category, any bucket
+    ):
+        val = _POLICY.get((pattern, cat, bkt))
+        if val is not None:
+            return val
+    return 1.0
