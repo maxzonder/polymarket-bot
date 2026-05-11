@@ -68,11 +68,7 @@ from short_horizon.venue_polymarket.execution_client import (
     PRIVATE_KEY_ENV_VAR,
     PolymarketExecutionClient,
 )
-from short_horizon.venue_polymarket.markets import (
-    DurationWindow,
-    UniverseFilter,
-    discover_short_horizon_markets_sync,
-)
+from short_horizon.venue_polymarket.markets import DurationWindow, UniverseFilter
 from short_horizon.venue_polymarket.book_channel import BookNormalizer
 from short_horizon.venue_polymarket.websocket import PolymarketWebsocket
 
@@ -240,20 +236,25 @@ _WS_PRICE_THRESHOLD = 0.05            # trigger screener when best_ask ≤ this
 async def _ws_universe_builder_loop(
     *,
     ws: PolymarketWebsocket,
+    shared_discovery,  # SharedMarketDiscovery — reuse existing cached snapshot
     duration_window: DurationWindow,
     universe_filter: UniverseFilter,
     logger,
     shutdown: asyncio.Event,
 ) -> None:
-    """Periodically discovers markets in the time window and syncs CLOB WS subscription."""
+    """Periodically syncs CLOB WS subscription to the already-discovered market universe.
+
+    Reuses SharedMarketDiscovery's cached snapshot to avoid extra Gamma API calls
+    (the main MarketRefreshLoop already keeps the snapshot fresh).
+    """
     subscribed: set[str] = set()
     while not shutdown.is_set():
         try:
-            markets = await asyncio.to_thread(
-                discover_short_horizon_markets_sync,
-                universe_filter,
-                duration_window,
-                5_000,
+            # Read from the shared snapshot (no extra Gamma request if cache is warm).
+            markets = await shared_discovery.get_markets(
+                universe_filter=universe_filter,
+                duration_window=duration_window,
+                max_rows=5_000,
             )
             tokens: set[str] = set()
             for m in markets:
@@ -637,6 +638,7 @@ async def run_swan_live(
     ws_universe_task = asyncio.create_task(
         _ws_universe_builder_loop(
             ws=price_monitor_ws,
+            shared_discovery=shared_discovery,
             duration_window=duration_window,
             universe_filter=universe_filter,
             logger=logger,
