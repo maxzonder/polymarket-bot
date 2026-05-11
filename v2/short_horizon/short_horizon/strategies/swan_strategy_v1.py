@@ -113,6 +113,10 @@ class SwanStrategyV1:
         with self._lock:
             self._pending_candidates = list(candidates)
 
+    def get_active_market_ids(self) -> frozenset[str]:
+        """Thread-safe: return the set of market_ids with live resting bids."""
+        return frozenset(self._bids_by_market)
+
     # ─── TouchStrategy protocol ───────────────────────────────────────────────
 
     def on_market_state(self, event: MarketStateUpdate) -> list[StrategyIntent]:

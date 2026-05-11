@@ -40,6 +40,9 @@ logger = setup_logger("order_manager")
 
 POSITIONS_DB = DATA_DIR / "positions.db"
 
+# Dry-run: cancel resting orders older than this (real CLOB GTC orders expire after ~30 days).
+_DRY_RUN_STALE_SECONDS = 30 * 86400
+
 # Minimum bid size at the top-of-book required to place a resting bid.
 # We check top-of-book activity, not depth at our (future) bid level,
 # because resting bids are placed BELOW current price — ask depth at our
@@ -1262,19 +1265,39 @@ class OrderManager:
     def cancel_stale_orders(self) -> int:
         """
         Cancel resting BUY orders whose market has resolved or closed.
-        No time-based TTL — resting bids are GTC and stay live until:
+        No time-based TTL for live mode — resting bids are GTC and stay live until:
           1. Market is gone from Gamma (market is None)
           2. Market has closed (hours_to_close <= 0)
+        Dry-run only: also cancels orders older than 30 days (real CLOB GTC orders expire).
 
         Returns count of cancelled orders.
         """
         conn = self._conn()
+        cancelled = 0
+
+        # Dry-run stale TTL: mark orders older than 30 days as cancelled.
+        # Prevents stale sessions from permanently blocking cluster slots.
+        if self.config.dry_run:
+            cutoff = int(time.time()) - _DRY_RUN_STALE_SECONDS
+            stale_rows = conn.execute(
+                "SELECT order_id FROM resting_orders WHERE status='live' AND created_at < ?",
+                (cutoff,),
+            ).fetchall()
+            for row in stale_rows:
+                conn.execute(
+                    "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
+                    (row["order_id"],),
+                )
+                cancelled += 1
+            if cancelled:
+                conn.commit()
+                logger.info(f"Dry-run stale TTL: cancelled {cancelled} resting orders older than 30 days")
 
         live_markets = conn.execute(
             "SELECT DISTINCT market_id FROM resting_orders WHERE status='live'"
         ).fetchall()
 
-        cancelled = 0
+        market_cancelled = 0
         for row in live_markets:
             market_id = row["market_id"]
             try:
@@ -1298,7 +1321,7 @@ class OrderManager:
                             "UPDATE resting_orders SET status='cancelled' WHERE order_id=?",
                             (o["order_id"],),
                         )
-                        cancelled += 1
+                        market_cancelled += 1
                         logger.info(
                             f"Cancelled resting bid ({reason}): "
                             f"{o['order_id'][:8]} token={o['token_id'][:16]}"
@@ -1309,9 +1332,9 @@ class OrderManager:
         conn.commit()
         conn.close()
 
-        if cancelled:
-            logger.info(f"Stale order cleanup: cancelled {cancelled} orders")
-        return cancelled
+        if market_cancelled:
+            logger.info(f"Stale order cleanup: cancelled {market_cancelled} orders")
+        return cancelled + market_cancelled
 
     def _get_balance_snapshot(self) -> dict:
         """Return current paper balance snapshot (for reporting)."""

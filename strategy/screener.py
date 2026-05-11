@@ -98,7 +98,11 @@ class Screener:
                 f"Mode {self.mc.name} must define scoring_weights; legacy ef/res fallback was removed"
             )
 
-    def scan(self, allowed_market_ids: Optional[set[str]] = None) -> list[EntryCandidate]:
+    def scan(
+        self,
+        allowed_market_ids: Optional[set[str]] = None,
+        active_market_ids: Optional[frozenset[str]] = None,
+    ) -> list[EntryCandidate]:
         """
         Fetch open markets, apply filters, score, return candidates sorted by total_score desc.
         All rejection reasons are recorded in screener_log for funnel analysis.
@@ -144,7 +148,7 @@ class Screener:
             candidates.extend(self._evaluate_market(m, log_entries))
 
         for group_id, group_markets in neg_risk_groups.items():
-            candidates.extend(self._evaluate_neg_risk_group(group_id, group_markets, log_entries))
+            candidates.extend(self._evaluate_neg_risk_group(group_id, group_markets, log_entries, active_market_ids))
 
         candidates.sort(key=lambda c: c.total_score, reverse=True)
 
@@ -396,6 +400,7 @@ class Screener:
         group_id: str,
         markets: list[MarketInfo],
         log_entries: list[tuple],
+        active_market_ids: Optional[frozenset[str]] = None,
     ) -> list[EntryCandidate]:
         """
         Group-aware evaluation of a neg-risk market group.
@@ -463,9 +468,18 @@ class Screener:
             if (m.best_ask or m.last_trade_price or 1.0) <= self.mc.entry_price_max
         ]
 
-        # Cap per group: take top N by volume (most liquid underdogs first)
+        # Cap per group: sticky preference for markets with live bids, then volume ranking.
+        # If screener switches underdogs each tick, SwanStrategyV1 cancels the old market
+        # and places on the new one — wasteful churn. Prefer the incumbent as long as it
+        # still qualifies (price in zone, pattern_mult > 0 checked later in _evaluate_market).
         max_underdogs = self.mc.max_resting_per_cluster if self.mc.max_resting_per_cluster > 0 else 10
-        underdog_markets = sorted(underdog_markets, key=lambda m: m.volume_usdc, reverse=True)
+        if active_market_ids:
+            incumbents = [m for m in underdog_markets if m.market_id in active_market_ids]
+            others = [m for m in underdog_markets if m.market_id not in active_market_ids]
+            others.sort(key=lambda m: m.volume_usdc, reverse=True)
+            underdog_markets = incumbents + others
+        else:
+            underdog_markets = sorted(underdog_markets, key=lambda m: m.volume_usdc, reverse=True)
         underdog_markets = underdog_markets[:max_underdogs]
 
         fav_q = (fav_market.question or "")[:50]

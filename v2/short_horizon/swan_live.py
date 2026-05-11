@@ -170,7 +170,8 @@ async def _screener_loop(
     """Runs the swan screener periodically and injects a timer event each time."""
     while not shutdown.is_set():
         try:
-            raw_candidates = await asyncio.to_thread(screener.scan)
+            active_market_ids = strategy.get_active_market_ids()
+            raw_candidates = await asyncio.to_thread(screener.scan, None, active_market_ids)
             swan_candidates = [
                 _entry_candidate_to_swan(
                     c,
