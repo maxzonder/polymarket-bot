@@ -42,6 +42,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from api.gamma_client import GAMMA_BASE
+from market_classifier import infer_market_category
 from utils.paths import DATA_DIR
 
 try:
@@ -1903,23 +1904,7 @@ def _keyword_set(values: Optional[list[str]]) -> set[str]:
 
 
 def _extract_category(raw: dict[str, Any], event0: Optional[dict[str, Any]]) -> Optional[str]:
-    candidates = [
-        raw.get("category"),
-        raw.get("categorySlug"),
-        raw.get("category_slug"),
-        (event0 or {}).get("category"),
-        (event0 or {}).get("categorySlug"),
-    ]
-    for value in candidates:
-        if value:
-            return str(value)
-    tags = raw.get("tags") or (event0 or {}).get("tags") or []
-    if isinstance(tags, list) and tags:
-        first = tags[0]
-        if isinstance(first, dict):
-            return str(first.get("slug") or first.get("label") or first.get("name") or "") or None
-        return str(first)
-    return None
+    return infer_market_category(raw, event0)
 
 
 def parse_iso_to_ts(value: Optional[str]) -> Optional[float]:

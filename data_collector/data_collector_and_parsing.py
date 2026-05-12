@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sqlite3
 import sys
 import time
@@ -35,6 +34,7 @@ else:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     from utils.logger import setup_logger
 
+from market_classifier import infer_market_category
 from utils.paths import DATABASE_DIR, DB_PATH, ensure_runtime_dirs
 
 ensure_runtime_dirs()
@@ -470,126 +470,6 @@ ON CONFLICT(token_id) DO UPDATE SET
     is_winner=excluded.is_winner
 """
 
-_CATEGORY_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("crypto", (
-        "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "doge", "xrp", "gold", "silver",
-        "oil", "nasdaq", "s&p", "spy", "qqq", "fed", "cpi", "rate cut", "treasury", "eur", "jpy", "rial",
-        # crypto tokens
-        "bnb", "hyperliquid", "hype", "ethena", "ena", "chainlink", "link", "avax", "avalanche",
-        "polygon", "matic", "arbitrum", "arb", "optimism", "op ", "sui ", "aptos", "apt ",
-        "pepe", "shib", "floki", "wif ", "bonk", "meme", "airdrop", "nft",
-        "litecoin", "ltc", "cardano", "ada", "polkadot", "dot ", "uniswap", "uni ",
-        "near ", "injective", "inj ", "sei ", "mantle", "mnt ",
-        # stock indices
-        "nikkei", "dow jones", "dji", "ftse", "dax", "hang seng", "hsi", "russell", "rut ",
-        "nya ", "nyk ",
-        # individual stocks
-        "palantir", "pltr", "airbnb", "abnb", "rocket lab", "rklb", "opendoor",
-        "coinbase", "coin ", "robinhood", "hood ", "rivian", "lucid", "rivn",
-        # commodities
-        "uranium", "natural gas", "copper", "platinum", "wheat", "corn ", "soybean",
-        "up or down",
-    )),
-    ("sports", (
-        "fc ", " vs ", "game ", "match ", "mlb", "nba", "nhl", "nfl", "uefa", "champions league",
-        "world cup", "premier league", "serie a", "la liga", "bundesliga", "tennis", "f1", "formula 1",
-        "ufc", "cricket", "afghanistan", "south africa", "win on ",
-        "sailgp", "sailing", "golf", "pga", "masters", "nascar", "indycar", "mls", "wnba",
-        "olympics", "wimbledon", "tour de france", "cycling", "swimming", "athletics",
-        "boxing", "wrestling", "esports", "league of legends", "dota", "cs2",
-        # chess
-        "chess", "fide", "world chess", "grand chess tour", "sinquefield cup", "candidates tournament",
-        # darts
-        "darts", "pdc", "bdo darts",
-        # motorsport
-        "motogp", "moto2", "moto3", "superbike", "wsbk",
-        # pickleball
-        "pickleball", "ppa",
-        # volleyball
-        "volleyball", "beach volleyball",
-        # basketball (non-NBA)
-        "basketball", "eurobasket", "fiba", "ncaa", "march madness",
-        # college sports
-        "college football", "college basketball", "cfp", "heisman", "big 10", "big ten", "sec ", "acc ",
-        "pac-12", "big 12", "carabao cup", "fa cup", "copa del rey", "dfb pokal",
-        # transfer windows / specific sports terms
-        "transfer window", "sign with", "sign for",
-        # esports (additional)
-        "valorant", "overwatch", "rocket league", "lck", "lpl", "cblol", "fncs", "fortnite championship",
-        "hltv", "blast", "iem ", "esl pro",
-        # other sports
-        "rugby", "handball", "snooker", "badminton", "table tennis", "archery", "equestrian",
-        "marathon", "triathlon", "ironman", "motocross",
-        # tennis tours (ATP/WTA often appear without the word "tennis")
-        "atp ", "wta ",
-        # horse racing
-        "horse racing", "ladbrokes", "jockey", "racecourse", "epsom", "kentucky derby",
-        "melbourne cup", "ascot", "cheltenham",
-        # additional leagues
-        "ligue 1", "ligue 2", "eredivisie", "a-league", "j-league", "k-league",
-        "super lig", "primeira liga",
-    )),
-    ("politics", (
-        "trump", "biden", "election", "senate", "house", "republican", "democrat", "white house",
-        "prime minister", "president", "governor", "mayor", "parliament", "minister",
-        "elon musk", "doge ", "department of",
-        "unemployment rate", "gdp", "inflation", "interest rate", "interest rates", "jobs report",
-        "nonfarm payroll", "add jobs", "bps after",
-        # specific politicians likely to appear in markets
-        "zelenskyy", "zelensky", "maduro", "macron", "scholz", "modi ", "erdogan", "netanyahu",
-        "sanders", "aoc ", "ocasio-cortez", "pelosi", "mcconnell", "schumer",
-        "south korea", "yoon ",
-        # policy topics
-        "tariff", "sanctions", "veto", "impeach", "resign", "cabinet",
-        "supreme court", "federal reserve", "powell", "yellen",
-        "bank of england", "european central bank", "ecb ", "bank of japan",
-        "redistrict", "border encounter", "border crossing",
-    )),
-    ("geopolitics", (
-        "iran", "iraq", "israel", "gaza", "hamas", "hezbollah", "ukraine", "russia", "china", "taiwan",
-        "strike", "missile", "nuclear", "military", "ceasefire", "war", "attack",
-        "venezuela", "north korea", "kim jong", "nato", "un security council",
-        "coup", "invasion", "occupation", "sanction", "airstrike",
-    )),
-    ("weather", (
-        "temperature", "°c", "°f", "highest temperature", "rain", "snow", "storm", "hurricane",
-        "tornado", "typhoon", "earthquake", "magnitude", "flood", "wildfire", "drought",
-        "tsa passengers",
-    )),
-    ("entertainment", (
-        "oscar", "grammy", "emmy", "sag awards", "box office", "movie", "album", "netflix", "actor", "actress",
-        "rotten tomatoes", "tomatometer", "box office", "spotify", "billboard",
-        "casino", "poker", "hustler",
-        # awards
-        "bafta", "golden globe", "tony award", "cma awards", "ama awards", "mtv awards",
-        "dga award", "directors guild", "film independent", "spirit award",
-        "goodreads", "book award", "literary award",
-        # events
-        "eurovision",
-        # artists / creators
-        "taylor swift", "beyonce", "drake ", "kanye", "rihanna",
-        "mrbeast", "youtube views", "tiktok views",
-        # tv shows (general patterns)
-        "season finale", "box office",
-    )),
-    ("tech", (
-        "openai", "chatgpt", "apple", "google", "microsoft", "nvidia", "tesla", "meta", "amazon",
-        "spacex", "starship", "falcon 9",
-        "tiktok", "bytedance",
-        "anthropic", "gemini", "grok", "deepseek", "claude",
-        "alphabet", "waymo", "x.com",
-        "ipo", "spac",
-        "earnings call", "quarterly earnings",
-    )),
-    ("health", (
-        "measles", "flu ", "influenza", "covid", "coronavirus", "pandemic", "epidemic",
-        "vaccine", "vaccination", "cdc ", "who ", "fda approval", "drug approval",
-        "hospitalization rate", "infection rate", "outbreak", "ebola", "mpox", "monkeypox",
-        "cancer", "clinical trial",
-    )),
-]
-
-
 def _parse_ts(s: Optional[str]) -> Optional[int]:
     if not s:
         return None
@@ -606,39 +486,7 @@ def _parse_ts(s: Optional[str]) -> Optional[int]:
 
 
 def _infer_category(data: dict) -> Optional[str]:
-    top = data.get("category")
-    if isinstance(top, str) and top.strip():
-        return top.strip().lower()
-
-    events = data.get("events") or []
-    if events:
-        ev = events[0] or {}
-        ev_cat = ev.get("category")
-        if isinstance(ev_cat, str) and ev_cat.strip():
-            return ev_cat.strip().lower()
-        for tag in (ev.get("tags") or []):
-            if not isinstance(tag, dict):
-                continue
-            for key in ("label", "slug", "name"):
-                val = tag.get(key)
-                if isinstance(val, str) and val.strip():
-                    return val.strip().lower()
-
-    ev0 = (events[0] or {}) if events else {}
-    haystack = " ".join(filter(None, [
-        str(data.get("question") or ""),
-        str(data.get("description") or ""),
-        str(data.get("slug") or ""),
-        str(ev0.get("title") or ""),
-        str(ev0.get("slug") or ""),
-        str(data.get("groupItemTitle") or ""),
-    ])).lower()
-
-    for category, keywords in _CATEGORY_KEYWORDS:
-        if any(re.search(rf"\b{re.escape(k)}\b", haystack) for k in keywords):
-            return category
-
-    return None
+    return infer_market_category(data)
 
 
 def _parse_market_row(data: dict) -> Optional[dict]:
