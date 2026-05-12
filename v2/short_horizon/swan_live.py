@@ -298,9 +298,15 @@ async def _ws_price_monitor_loop(
     price_threshold: float,
     logger,
     shutdown: asyncio.Event,
+    forward_market_events: bool = False,
 ) -> None:
     """Watches CLOB WS for best_ask crossing ≤ price_threshold; triggers per-market screener."""
-    normalizer = BookNormalizer(source="swan_ws_monitor")
+    # Reuse LiveEventSource normalizers instead of a private BookNormalizer so
+    # market/condition/token mappings registered by market refresh are shared.
+    # In dry-run this also forwards public market events into the main runtime
+    # queue, which is what the paper fill simulator consumes.
+    normalizer = source.book_normalizer
+    trade_normalizer = source.trade_normalizer
     below_threshold: set[str] = set()
 
     while not shutdown.is_set():
@@ -315,8 +321,13 @@ async def _ws_price_monitor_loop(
         ingest_ms = clock.now_ms()
         try:
             updates = normalizer.normalize_frame(raw, ingest_time_ms=ingest_ms)
+            trade_updates = trade_normalizer.normalize_frame(raw, ingest_time_ms=ingest_ms)
         except Exception:
             continue
+
+        if forward_market_events:
+            for event in [*updates, *trade_updates]:
+                source.inject(event)
 
         for update in updates:
             ask = update.best_ask
@@ -658,6 +669,7 @@ async def run_swan_live(
             price_threshold=_WS_PRICE_THRESHOLD,
             logger=logger,
             shutdown=shutdown,
+            forward_market_events=(resolved_mode is ExecutionMode.DRY_RUN),
         ),
         name="swan_ws_monitor_loop",
     )
