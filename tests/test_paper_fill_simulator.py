@@ -201,6 +201,152 @@ class PaperFillSimulatorTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_post_only_buy_requires_known_sell_aggressor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_post_only_unknown.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_unknown_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="maker_buy_unknown_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.05,
+                    size=20.0,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="maker_buy_unknown_001",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_001,
+                    remaining_size=20.0,
+                    venue_order_status="accepted",
+                    post_only=True,
+                )
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                simulator = PaperFillSimulator()
+
+                fills = simulator.on_trade_tick(
+                    TradeTick(
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        price=0.05,
+                        size=6.0,
+                        source="test.trade",
+                        aggressor_side=None,
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(fills, [])
+                order = store.load_order("maker_buy_unknown_001")
+                assert order is not None
+                self.assertEqual(order["state"], OrderState.ACCEPTED.value)
+                self.assertAlmostEqual(order["remaining_size"], 20.0)
+            finally:
+                store.close()
+
+    def test_post_only_trade_print_consumes_size_once_across_same_price_orders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_post_only_queue.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_queue_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                for idx in range(3):
+                    store.insert_order(
+                        order_id=f"maker_buy_queue_{idx}",
+                        market_id="m1",
+                        token_id="tok_yes",
+                        side="BUY",
+                        price=0.05,
+                        size=10.0,
+                        state=OrderState.ACCEPTED,
+                        client_order_id=f"maker_buy_queue_{idx}",
+                        intent_created_at_ms=225_000 + idx,
+                        last_state_change_at_ms=225_001 + idx,
+                        remaining_size=10.0,
+                        venue_order_status="accepted",
+                        post_only=True,
+                    )
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                simulator = PaperFillSimulator()
+
+                fills = simulator.on_trade_tick(
+                    TradeTick(
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        price=0.05,
+                        size=15.0,
+                        source="test.trade",
+                        aggressor_side=AggressorSide.SELL,
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(len(fills), 2)
+                self.assertAlmostEqual(sum(fill.fill_size for fill in fills), 15.0)
+                self.assertAlmostEqual(fills[0].fill_size, 10.0)
+                self.assertAlmostEqual(fills[1].fill_size, 5.0)
+                self.assertEqual(store.load_order("maker_buy_queue_0")["state"], OrderState.FILLED.value)
+                self.assertEqual(store.load_order("maker_buy_queue_1")["state"], OrderState.PARTIALLY_FILLED.value)
+                self.assertEqual(store.load_order("maker_buy_queue_2")["state"], OrderState.ACCEPTED.value)
+            finally:
+                store.close()
+
+    def test_post_only_buy_matches_trade_price_not_all_higher_bid_levels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_post_only_levels.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_levels_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                for idx, price in enumerate((0.01, 0.02, 0.03, 0.05)):
+                    store.insert_order(
+                        order_id=f"maker_buy_level_{idx}",
+                        market_id="m1",
+                        token_id="tok_yes",
+                        side="BUY",
+                        price=price,
+                        size=10.0,
+                        state=OrderState.ACCEPTED,
+                        client_order_id=f"maker_buy_level_{idx}",
+                        intent_created_at_ms=225_000 + idx,
+                        last_state_change_at_ms=225_001 + idx,
+                        remaining_size=10.0,
+                        venue_order_status="accepted",
+                        post_only=True,
+                    )
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                simulator = PaperFillSimulator()
+
+                fills = simulator.on_trade_tick(
+                    TradeTick(
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        price=0.01,
+                        size=25.0,
+                        source="test.trade",
+                        aggressor_side=AggressorSide.SELL,
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(len(fills), 1)
+                self.assertAlmostEqual(fills[0].fill_size, 10.0)
+                self.assertEqual(fills[0].order_id, "maker_buy_level_0")
+                self.assertEqual(store.load_order("maker_buy_level_0")["state"], OrderState.FILLED.value)
+                for idx in (1, 2, 3):
+                    order = store.load_order(f"maker_buy_level_{idx}")
+                    assert order is not None
+                    self.assertEqual(order["state"], OrderState.ACCEPTED.value)
+                    self.assertAlmostEqual(order["remaining_size"], 10.0)
+            finally:
+                store.close()
+
     def test_runner_applies_paper_fills_in_dry_run_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "runner.sqlite3"

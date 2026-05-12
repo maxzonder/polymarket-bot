@@ -61,8 +61,13 @@ class PaperFillSimulator:
         if self.config.model == "none":
             return []
         fills = []
+        remaining_trade_size = max(float(event.size), 0.0)
+        if remaining_trade_size <= 1e-12:
+            return []
         for order in self._matching_orders(event.market_id, event.token_id, execution=execution):
-            request = self._fill_request_from_trade(order, event)
+            if remaining_trade_size <= 1e-12:
+                break
+            request = self._fill_request_from_trade(order, event, max_fill_size=remaining_trade_size)
             if request is None:
                 continue
             key = (request.order_id, request.event_time_ms, request.source)
@@ -73,6 +78,7 @@ class PaperFillSimulator:
             except ExecutionTransitionError:
                 continue
             self._applied_keys.add(key)
+            remaining_trade_size = max(remaining_trade_size - float(fill.fill_size), 0.0)
             fills.append(fill)
         return fills
 
@@ -132,25 +138,35 @@ class PaperFillSimulator:
             liquidity_role="taker",
         )
 
-    def _fill_request_from_trade(self, order: dict, event: TradeTick) -> SyntheticFillRequest | None:
+    def _fill_request_from_trade(self, order: dict, event: TradeTick, *, max_fill_size: float | None = None) -> SyntheticFillRequest | None:
         side = str(order.get("side") or "").upper()
         limit_price = float(order.get("price") or 0.0)
         remaining_size = float(order.get("remaining_size") or order.get("size") or 0.0)
         trade_price = float(event.price)
         post_only = _is_post_only(order)
         aggressor_side = getattr(event.aggressor_side, "value", event.aggressor_side)
-        if side == "BUY" and trade_price > limit_price + 1e-12:
-            return None
-        if side == "SELL" and trade_price < limit_price - 1e-12:
-            return None
         if side not in {"BUY", "SELL"}:
             return None
         if post_only:
-            if side == "BUY" and str(aggressor_side or "").lower() == "buy":
+            # Maker/post-only fills require explicit contra-side taker flow and
+            # the trade print must be at our resting price.  A lower SELL print
+            # should not fill higher BUY bids: on a price-time priority book
+            # those higher bids would have printed at their own prices first.
+            normalized_aggressor = str(aggressor_side or "").lower()
+            if side == "BUY" and normalized_aggressor != "sell":
                 return None
-            if side == "SELL" and str(aggressor_side or "").lower() == "sell":
+            if side == "SELL" and normalized_aggressor != "buy":
+                return None
+            if abs(trade_price - limit_price) > 1e-12:
+                return None
+        else:
+            if side == "BUY" and trade_price > limit_price + 1e-12:
+                return None
+            if side == "SELL" and trade_price < limit_price - 1e-12:
                 return None
         fill_size = min(remaining_size, max(float(event.size), 0.0))
+        if max_fill_size is not None:
+            fill_size = min(fill_size, max(float(max_fill_size), 0.0))
         if fill_size <= 1e-12:
             return None
         return SyntheticFillRequest(
