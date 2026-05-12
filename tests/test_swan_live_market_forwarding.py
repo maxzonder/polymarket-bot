@@ -14,7 +14,7 @@ for p in (_REPO, _V2):
 from short_horizon.core.clock import SystemClock
 from short_horizon.core.events import BookUpdate, MarketStateUpdate, TradeTick
 from short_horizon.market_data import LiveEventSource
-from v2.short_horizon.swan_live import _ws_price_monitor_loop
+from v2.short_horizon.swan_live import _WsCandidateCache, _ws_price_monitor_loop
 
 
 class _FakeWs:
@@ -54,6 +54,12 @@ class _NoopLogger:
     def exception(self, *args, **kwargs):
         pass
 
+    def warning(self, *args, **kwargs):
+        pass
+
+    def info(self, *args, **kwargs):
+        pass
+
 
 class SwanLiveMarketForwardingTest(unittest.TestCase):
     def test_price_monitor_forwards_book_and_trade_events_to_runtime_source(self) -> None:
@@ -81,6 +87,9 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
                 stake_usdc_per_level=1.0,
                 duration_stake_multipliers=(),
                 price_threshold=0.01,
+                token_to_market_id={"tok_yes": "m1"},
+                token_to_side_index={"tok_yes": 0},
+                candidate_cache=_WsCandidateCache(),
                 logger=_NoopLogger(),
                 shutdown=shutdown,
                 forward_market_events=True,
