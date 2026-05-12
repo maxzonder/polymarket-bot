@@ -1280,7 +1280,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertIn("daily_pnl_usdc=", outputs[0].details)
         self.assertEqual(len(engine.store.intents), 0)
 
-    def test_runtime_emits_market_resolved_with_inventory_event(self) -> None:
+    def test_runtime_does_not_resolve_inventory_without_canonical_settlement(self) -> None:
         engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=InMemoryIntentStore())
         engine.on_market_state(self._market_state(token_id="tok_yes"))
         engine.store.insert_order(
@@ -1313,11 +1313,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
 
         self.assertEqual(outputs, [])
         resolved_events = [event for event in engine.store.events if isinstance(event, MarketResolvedWithInventory)]
-        self.assertEqual(len(resolved_events), 1)
-        self.assertEqual(resolved_events[0].market_id, "m1")
-        self.assertEqual(resolved_events[0].token_id, "tok_yes")
-        self.assertEqual(resolved_events[0].outcome_price, 0.15)
-        self.assertAlmostEqual(resolved_events[0].estimated_pnl_usdc, -4.7)
+        self.assertEqual(resolved_events, [])
 
     def test_runtime_prefers_canonical_resolution_settlement_over_last_bid_mark(self) -> None:
         engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=InMemoryIntentStore())

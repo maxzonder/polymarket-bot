@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any
+
+import requests
 
 from ..config import MarketDiscoveryConfig
 from ..core.events import MarketStateUpdate, MarketStatus
@@ -12,6 +17,15 @@ from .markets import DurationWindow, MarketMetadata, UniverseFilter, discover_sh
 
 
 DiscoveryFn = Callable[[UniverseFilter | None, DurationWindow | None, int], Awaitable[list[MarketMetadata]]]
+ResolutionSnapshotFn = Callable[[str], Awaitable["MarketResolutionSnapshot | None"]]
+
+
+@dataclass(frozen=True)
+class MarketResolutionSnapshot:
+    is_active: bool | None = None
+    status: MarketStatus | None = None
+    settlement_prices: dict[str, float] | None = None
+    resolved_token_id: str | None = None
 
 
 class MarketRefreshLoop:
@@ -26,6 +40,7 @@ class MarketRefreshLoop:
         retry_backoff_initial_seconds: float = 5.0,
         retry_backoff_max_seconds: float = 120.0,
         max_consecutive_failures: int = 5,
+        resolution_snapshot_fn: ResolutionSnapshotFn | None = None,
     ):
         config = MarketDiscoveryConfig()
         self.discovery_fn = discovery_fn or discover_short_horizon_markets
@@ -40,6 +55,7 @@ class MarketRefreshLoop:
         self.retry_backoff_initial_seconds = float(retry_backoff_initial_seconds)
         self.retry_backoff_max_seconds = float(retry_backoff_max_seconds)
         self.max_consecutive_failures = int(max_consecutive_failures)
+        self.resolution_snapshot_fn = resolution_snapshot_fn or _fetch_market_resolution_snapshot
         self.logger = get_logger("short_horizon.venue_polymarket.market_refresh")
         self._queue: asyncio.Queue[MarketStateUpdate | object] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
@@ -155,12 +171,17 @@ class MarketRefreshLoop:
             if market_id in latest_by_id:
                 continue
             dropped_count += 1
+            resolution_snapshot = await self.resolution_snapshot_fn(market_id)
+            snapshot_active = resolution_snapshot.is_active if resolution_snapshot is not None else None
+            snapshot_status = resolution_snapshot.status if resolution_snapshot is not None else None
             event = _to_market_state_update(
                 previous,
                 event_time_ms=now_ms,
                 ingest_time_ms=now_ms,
-                is_active=False,
-                status=MarketStatus.CLOSED,
+                is_active=snapshot_active if snapshot_active is not None else False,
+                status=snapshot_status or MarketStatus.CLOSED,
+                resolved_token_id=resolution_snapshot.resolved_token_id if resolution_snapshot is not None else None,
+                settlement_prices=resolution_snapshot.settlement_prices if resolution_snapshot is not None else None,
             )
             queued_events.append(event)
             await self._queue.put(event)
@@ -199,6 +220,8 @@ def _to_market_state_update(
     ingest_time_ms: int,
     is_active: bool | None = None,
     status: MarketStatus | None = None,
+    resolved_token_id: str | None = None,
+    settlement_prices: dict[str, float] | None = None,
 ) -> MarketStateUpdate:
     resolved_is_active = market.is_active if is_active is None else is_active
     resolved_status = status or (MarketStatus.ACTIVE if resolved_is_active else MarketStatus.CLOSED)
@@ -225,7 +248,78 @@ def _to_market_state_update(
         is_active=resolved_is_active,
         metadata_is_fresh=True,
         fee_metadata_age_ms=0,
+        resolved_token_id=resolved_token_id,
+        settlement_prices=settlement_prices,
     )
+
+
+async def _fetch_market_resolution_snapshot(market_id: str) -> MarketResolutionSnapshot | None:
+    return await asyncio.to_thread(_fetch_market_resolution_snapshot_sync, market_id)
+
+
+def _fetch_market_resolution_snapshot_sync(market_id: str) -> MarketResolutionSnapshot | None:
+    try:
+        response = requests.get(f"https://gamma-api.polymarket.com/markets/{market_id}", timeout=20)
+        response.raise_for_status()
+        payload: Any = response.json()
+    except Exception:
+        return None
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if not isinstance(payload, dict):
+        return None
+
+    is_closed = bool(payload.get("closed"))
+    is_active = bool(payload.get("active", not is_closed)) and not is_closed
+    uma_status = str(payload.get("umaResolutionStatus") or "").lower()
+    status = MarketStatus.RESOLVED if uma_status == "resolved" else (MarketStatus.CLOSED if is_closed else MarketStatus.ACTIVE)
+
+    settlement_prices, resolved_token_id = _extract_binary_settlement(payload)
+    return MarketResolutionSnapshot(
+        is_active=is_active,
+        status=status,
+        settlement_prices=settlement_prices,
+        resolved_token_id=resolved_token_id,
+    )
+
+
+def _extract_binary_settlement(payload: dict[str, Any]) -> tuple[dict[str, float] | None, str | None]:
+    if str(payload.get("umaResolutionStatus") or "").lower() != "resolved" and not bool(payload.get("closed")):
+        return None, None
+    token_ids = _load_json_list(payload.get("clobTokenIds"))
+    prices = _load_json_list(payload.get("outcomePrices"))
+    if len(token_ids) != len(prices) or not token_ids:
+        return None, None
+    settlement_prices: dict[str, float] = {}
+    resolved_token_id: str | None = None
+    for token_id, raw_price in zip(token_ids, prices):
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            return None, None
+        if abs(price - 1.0) <= 1e-9:
+            resolved_token_id = str(token_id)
+            price = 1.0
+        elif abs(price) <= 1e-9:
+            price = 0.0
+        else:
+            return None, None
+        settlement_prices[str(token_id)] = price
+    if resolved_token_id is None:
+        return None, None
+    return settlement_prices, resolved_token_id
+
+
+def _load_json_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 __all__ = ["MarketRefreshLoop"]

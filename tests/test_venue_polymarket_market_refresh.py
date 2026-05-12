@@ -12,6 +12,7 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
 
 from short_horizon.core import EventType, MarketStatus
 from short_horizon.venue_polymarket import MarketMetadata, MarketRefreshLoop
+from short_horizon.venue_polymarket.market_refresh import MarketResolutionSnapshot
 
 
 class MarketRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
@@ -51,7 +52,14 @@ class MarketRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
         async def fake_discovery(*_args, **_kwargs):
             return snapshots.pop(0)
 
-        loop = MarketRefreshLoop(discovery_fn=fake_discovery, refresh_interval_seconds=999)
+        async def no_resolution_snapshot(_market_id: str):
+            return None
+
+        loop = MarketRefreshLoop(
+            discovery_fn=fake_discovery,
+            refresh_interval_seconds=999,
+            resolution_snapshot_fn=no_resolution_snapshot,
+        )
 
         first_events = await loop.refresh_once()
         self.assertEqual(len(first_events), 2)
@@ -85,6 +93,41 @@ class MarketRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
 
         queued_second = [await loop.__anext__(), await loop.__anext__(), await loop.__anext__()]
         self.assertEqual({event.market_id for event in queued_second}, {"m1", "m2", "m3"})
+
+    async def test_market_refresh_loop_attaches_binary_settlement_for_dropped_resolved_market(self) -> None:
+        snapshots = [
+            [self._market("m1", asset_slug="bitcoin", end_time_ms=1_776_694_500_000)],
+            [],
+        ]
+
+        async def fake_discovery(*_args, **_kwargs):
+            return snapshots.pop(0)
+
+        async def fake_resolution_snapshot(market_id: str):
+            self.assertEqual(market_id, "m1")
+            return MarketResolutionSnapshot(
+                is_active=False,
+                status=MarketStatus.RESOLVED,
+                settlement_prices={"m1_yes": 0.0, "m1_no": 1.0},
+                resolved_token_id="m1_no",
+            )
+
+        loop = MarketRefreshLoop(
+            discovery_fn=fake_discovery,
+            refresh_interval_seconds=999,
+            resolution_snapshot_fn=fake_resolution_snapshot,
+        )
+
+        await loop.refresh_once()
+        dropped_events = await loop.refresh_once()
+
+        self.assertEqual(len(dropped_events), 1)
+        dropped = dropped_events[0]
+        self.assertEqual(dropped.market_id, "m1")
+        self.assertEqual(dropped.status, MarketStatus.RESOLVED)
+        self.assertFalse(dropped.is_active)
+        self.assertEqual(dropped.resolved_token_id, "m1_no")
+        self.assertEqual(dropped.settlement_prices, {"m1_yes": 0.0, "m1_no": 1.0})
 
     async def test_market_refresh_loop_retries_after_transient_failure(self) -> None:
         calls = 0

@@ -70,7 +70,7 @@ class StrategyRuntime:
         self.store.append_event(event)
         if event.best_bid is not None:
             self.latest_best_bid_by_market_token[(event.market_id, event.token_id)] = float(event.best_bid)
-        log.info(
+        log.debug(
             "book_update_ingested",
             best_bid=event.best_bid,
             best_ask=event.best_ask,
@@ -359,12 +359,22 @@ class StrategyRuntime:
             if resolved_key in self._reported_resolved_inventory:
                 continue
             outcome_price = _canonical_settlement_price(event=event, token_id=str(token_id))
-            event_source = "runtime.market_resolution_settlement"
             if outcome_price is None:
-                outcome_price = self.latest_best_bid_by_market_token.get(resolved_key)
-                event_source = "runtime.market_resolved_holding"
-            if outcome_price is None:
+                # A market leaving the active universe or being marked closed by Gamma is
+                # not enough to settle binary inventory.  For markets like equity
+                # Up/Down, last BBO marks can be non-binary during the close/proposal
+                # window; treating that mark as resolution fabricates PnL.  Emit a
+                # resolved-inventory event only once canonical settlement is available
+                # via explicit settlement prices or a resolved token id.
+                self.logger.debug(
+                    "market_resolution_pending_canonical_settlement",
+                    market_id=str(market_id),
+                    token_id=str(token_id),
+                    status=event.status,
+                    is_active=event.is_active,
+                )
                 continue
+            event_source = "runtime.market_resolution_settlement"
             total_size = sum(float(size) for size, _unit_cost in lots)
             if total_size <= 1e-12:
                 continue
