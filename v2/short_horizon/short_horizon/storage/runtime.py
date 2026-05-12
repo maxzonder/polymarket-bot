@@ -122,6 +122,9 @@ class RuntimeStore(Protocol):
     ) -> None:
         ...
 
+    def load_fill(self, fill_id: str) -> dict[str, Any] | None:
+        ...
+
     def load_order(self, order_id: str) -> dict[str, Any] | None:
         ...
 
@@ -290,7 +293,7 @@ class InMemoryIntentStore:
         liquidity_role: str | None = None,
         venue_fill_id: str | None = None,
     ) -> None:
-        self.fills[fill_id] = {
+        self.fills.setdefault(fill_id, {
             "fill_id": fill_id,
             "order_id": order_id,
             "run_id": self.run_id,
@@ -303,7 +306,11 @@ class InMemoryIntentStore:
             "filled_at": iso_from_ms(filled_at_ms),
             "source": source,
             "venue_fill_id": venue_fill_id,
-        }
+        })
+
+    def load_fill(self, fill_id: str) -> dict[str, Any] | None:
+        row = self.fills.get(fill_id)
+        return dict(row) if row is not None else None
 
     def load_order(self, order_id: str) -> dict[str, Any] | None:
         row = self.orders.get(order_id)
@@ -644,7 +651,7 @@ class SQLiteRuntimeStore:
         self._ensure_market_stub(market_id)
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO fills (
+            INSERT OR IGNORE INTO fills (
                 fill_id, order_id, run_id, market_id, token_id, price, size,
                 fee_paid_usdc, liquidity_role, filled_at, source, venue_fill_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -665,6 +672,13 @@ class SQLiteRuntimeStore:
             ),
         )
         self.conn.commit()
+
+    def load_fill(self, fill_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM fills WHERE run_id = ? AND fill_id = ? LIMIT 1",
+            (self.run.run_id, fill_id),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def load_non_terminal_orders(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(

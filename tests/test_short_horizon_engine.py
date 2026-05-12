@@ -1690,6 +1690,72 @@ class ExecutionEngineTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_synthetic_fill_is_idempotent_after_store_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "short_horizon.sqlite3"
+            run = RunContext(
+                run_id="run_exec_idempotent_fill_001",
+                strategy_id="short_horizon_15m_touch_v1",
+                config_hash="test-config",
+            )
+            store = SQLiteRuntimeStore(db_path, run=run)
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="ord_exec_idempotent_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.05,
+                    size=20.0,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="ord_exec_idempotent_001",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_001,
+                    remaining_size=20.0,
+                    venue_order_status="accepted",
+                    post_only=True,
+                )
+                execution = ExecutionEngine(store=store)
+                request = SyntheticFillRequest(
+                    order_id="ord_exec_idempotent_001",
+                    event_time_ms=225_100,
+                    fill_size=10.0,
+                    fill_price=0.05,
+                    source="replay",
+                    liquidity_role="maker",
+                )
+                first_fill = execution.apply_fill(request)
+                self.assertIsNotNone(first_fill)
+            finally:
+                store.close()
+
+            restarted_store = SQLiteRuntimeStore(db_path, run=run)
+            try:
+                restarted_execution = ExecutionEngine(store=restarted_store)
+                duplicate_fill = restarted_execution.apply_fill(request)
+                self.assertIsNone(duplicate_fill)
+
+                conn = sqlite3.connect(db_path)
+                try:
+                    order_row = conn.execute(
+                        "SELECT state, cumulative_filled_size, remaining_size FROM orders WHERE order_id = 'ord_exec_idempotent_001'"
+                    ).fetchone()
+                    fill_count = conn.execute("SELECT COUNT(*) FROM fills WHERE order_id = 'ord_exec_idempotent_001'").fetchone()[0]
+                    filled_events = conn.execute(
+                        "SELECT COUNT(*) FROM events_log WHERE run_id = 'run_exec_idempotent_fill_001' AND event_type = 'OrderFilled'"
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+
+                self.assertEqual(order_row[0], OrderState.PARTIALLY_FILLED.value)
+                self.assertAlmostEqual(order_row[1], 10.0)
+                self.assertAlmostEqual(order_row[2], 10.0)
+                self.assertEqual(fill_count, 1)
+                self.assertEqual(filled_events, 1)
+            finally:
+                restarted_store.close()
+
     def test_execution_boundary_rejects_illegal_intent_to_filled_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "short_horizon.sqlite3"

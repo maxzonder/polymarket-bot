@@ -53,6 +53,8 @@ class PaperFillSimulator:
                 fill = execution.apply_fill(request)
             except ExecutionTransitionError:
                 continue
+            if fill is None:
+                continue
             self._applied_keys.add(key)
             fills.append(fill)
         return fills
@@ -76,6 +78,8 @@ class PaperFillSimulator:
             try:
                 fill = execution.apply_fill(request)
             except ExecutionTransitionError:
+                continue
+            if fill is None:
                 continue
             self._applied_keys.add(key)
             remaining_trade_size = max(remaining_trade_size - float(fill.fill_size), 0.0)

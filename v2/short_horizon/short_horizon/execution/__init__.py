@@ -118,6 +118,7 @@ class SyntheticFillRequest:
     fee_paid_usdc: float | None = None
     source: str = "replay"
     liquidity_role: str | LiquidityRole | None = LiquidityRole.TAKER
+    fill_id: str | None = None
 
 
 class ExecutionVenueClient(Protocol):
@@ -194,6 +195,9 @@ class ExecutionStore(Protocol):
         liquidity_role: str | None = None,
         venue_fill_id: str | None = None,
     ) -> None:
+        ...
+
+    def load_fill(self, fill_id: str) -> dict[str, Any] | None:
         ...
 
     def load_order(self, order_id: str) -> dict | None:
@@ -512,18 +516,28 @@ class ExecutionEngine:
             size=order_request.size,
         )
 
-    def apply_fill(self, request: SyntheticFillRequest) -> OrderFilled:
+    def apply_fill(self, request: SyntheticFillRequest) -> OrderFilled | None:
         order_row = self._require_order(request.order_id)
+        order_size = float(order_row["size"] or 0.0)
+        cumulative_before = float(order_row.get("cumulative_filled_size") or 0.0)
+        remaining_before = float(order_row.get("remaining_size") or order_size)
+        fill_size = float(request.fill_size if request.fill_size is not None else remaining_before)
+        fill_id = request.fill_id or self._synthetic_fill_id(request=request, fill_size=fill_size)
+        if self.store.load_fill(fill_id) is not None:
+            self.logger.info(
+                "synthetic_order_fill_duplicate_ignored",
+                order_id=request.order_id,
+                fill_id=fill_id,
+                event_time_ms=request.event_time_ms,
+            )
+            return None
+
         current_state = self._state_from_row(order_row)
         if current_state not in {OrderState.ACCEPTED, OrderState.PARTIALLY_FILLED}:
             raise ExecutionTransitionError(
                 f"Cannot fill order {request.order_id} from state {current_state.value}"
             )
 
-        order_size = float(order_row["size"] or 0.0)
-        cumulative_before = float(order_row.get("cumulative_filled_size") or 0.0)
-        remaining_before = float(order_row.get("remaining_size") or order_size)
-        fill_size = float(request.fill_size if request.fill_size is not None else remaining_before)
         if fill_size <= 0 or fill_size > remaining_before + 1e-12:
             raise ExecutionTransitionError(
                 f"Invalid synthetic fill size {fill_size} for remaining {remaining_before} on {request.order_id}"
@@ -533,7 +547,6 @@ class ExecutionEngine:
         remaining_after = max(order_size - cumulative_after, 0.0)
         next_state = OrderState.FILLED if remaining_after <= 1e-12 else OrderState.PARTIALLY_FILLED
         fill_price = float(request.fill_price if request.fill_price is not None else order_row["price"])
-        fill_id = f"{request.order_id}:fill:{request.event_time_ms}:{int(round(fill_size * 1_000_000))}"
         liquidity_role = request.liquidity_role.value if hasattr(request.liquidity_role, "value") else request.liquidity_role
         self.store.insert_fill(
             fill_id=fill_id,
@@ -583,6 +596,10 @@ class ExecutionEngine:
             event_time_ms=request.event_time_ms,
         )
         return event
+
+    @staticmethod
+    def _synthetic_fill_id(*, request: SyntheticFillRequest, fill_size: float) -> str:
+        return f"{request.order_id}:fill:{request.event_time_ms}:{int(round(float(fill_size) * 1_000_000))}"
 
     def cancel(self, *, market_id: str, token_id: str, event_time_ms: int | None = None, reason: str = "") -> OrderCanceled | None:
         order_row = self._find_open_order(market_id=market_id, token_id=token_id)
