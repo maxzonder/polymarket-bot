@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
 from datetime import datetime
 from enum import StrEnum
+import re
 from typing import Any, Callable, Protocol
 
 from ..core.clock import Clock, SystemClock
@@ -107,6 +108,11 @@ class LiveSubmitGuardRejected(ExecutionValidationError):
 
 
 LiveSubmitGuard = Callable[[OrderIntent, VenueOrderRequest, dict[str, Any]], None]
+
+
+def _fill_id_component(value: object) -> str:
+    text = str(value or "none")
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)[:120] or "none"
 
 
 @dataclass(frozen=True)
@@ -599,7 +605,9 @@ class ExecutionEngine:
 
     @staticmethod
     def _synthetic_fill_id(*, request: SyntheticFillRequest, fill_size: float) -> str:
-        return f"{request.order_id}:fill:{request.event_time_ms}:{int(round(float(fill_size) * 1_000_000))}"
+        price_component = "na" if request.fill_price is None else int(round(float(request.fill_price) * 1_000_000))
+        source_component = _fill_id_component(request.source)
+        return f"{request.order_id}:fill:{source_component}:{request.event_time_ms}:{price_component}:{int(round(float(fill_size) * 1_000_000))}"
 
     def cancel(self, *, market_id: str, token_id: str, event_time_ms: int | None = None, reason: str = "") -> OrderCanceled | None:
         order_row = self._find_open_order(market_id=market_id, token_id=token_id)

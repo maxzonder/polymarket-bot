@@ -296,6 +296,89 @@ class PaperFillSimulatorTest(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_same_ms_distinct_trade_ticks_do_not_collide(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_same_ms_trades.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_same_ms_trades_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="maker_buy_same_ms_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.05,
+                    size=15.0,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="maker_buy_same_ms_001",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_001,
+                    remaining_size=15.0,
+                    venue_order_status="accepted",
+                    post_only=True,
+                )
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                simulator = PaperFillSimulator()
+
+                first_fills = simulator.on_trade_tick(
+                    TradeTick(
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        price=0.05,
+                        size=5.0,
+                        source="test.trade",
+                        trade_id="trade-a",
+                        aggressor_side=AggressorSide.SELL,
+                    ),
+                    execution=execution,
+                )
+                second_fills = simulator.on_trade_tick(
+                    TradeTick(
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_111,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        price=0.05,
+                        size=5.0,
+                        source="test.trade",
+                        trade_id="trade-b",
+                        aggressor_side=AggressorSide.SELL,
+                    ),
+                    execution=execution,
+                )
+                duplicate_first_fills = simulator.on_trade_tick(
+                    TradeTick(
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        price=0.05,
+                        size=5.0,
+                        source="test.trade",
+                        trade_id="trade-a",
+                        aggressor_side=AggressorSide.SELL,
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(len(first_fills), 1)
+                self.assertEqual(len(second_fills), 1)
+                self.assertEqual(duplicate_first_fills, [])
+                fill_rows = store.load_fills()
+                self.assertEqual(len(fill_rows), 2)
+                self.assertEqual(len({row["fill_id"] for row in fill_rows}), 2)
+                self.assertTrue(any("trade_trade-a" in row["fill_id"] for row in fill_rows))
+                self.assertTrue(any("trade_trade-b" in row["fill_id"] for row in fill_rows))
+                order = store.load_order("maker_buy_same_ms_001")
+                assert order is not None
+                self.assertEqual(order["state"], OrderState.PARTIALLY_FILLED.value)
+                self.assertAlmostEqual(order["cumulative_filled_size"], 10.0)
+                self.assertAlmostEqual(order["remaining_size"], 5.0)
+            finally:
+                store.close()
+
     def test_post_only_buy_matches_trade_price_not_all_higher_bid_levels(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "paper_post_only_levels.sqlite3"

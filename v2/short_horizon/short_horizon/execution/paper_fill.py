@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from ..core.events import BookLevel, BookUpdate, TradeTick
 from ..core.order_state import OrderState
@@ -36,7 +37,7 @@ class PaperFillSimulator:
 
     def __init__(self, config: PaperFillModelConfig | None = None):
         self.config = config or PaperFillModelConfig()
-        self._applied_keys: set[tuple[str, int, str]] = set()
+        self._applied_keys: set[tuple[str, int, str, str]] = set()
 
     def on_book_update(self, event: BookUpdate, *, execution: ExecutionEngine):
         if self.config.model == "none":
@@ -46,7 +47,7 @@ class PaperFillSimulator:
             request = self._fill_request_from_book(order, event)
             if request is None:
                 continue
-            key = (request.order_id, request.event_time_ms, request.source)
+            key = (request.order_id, request.event_time_ms, request.source, request.fill_id or "")
             if key in self._applied_keys:
                 continue
             try:
@@ -72,7 +73,7 @@ class PaperFillSimulator:
             request = self._fill_request_from_trade(order, event, max_fill_size=remaining_trade_size)
             if request is None:
                 continue
-            key = (request.order_id, request.event_time_ms, request.source)
+            key = (request.order_id, request.event_time_ms, request.source, request.fill_id or "")
             if key in self._applied_keys:
                 continue
             try:
@@ -140,6 +141,7 @@ class PaperFillSimulator:
             fill_price=fill_price,
             source=self.config.source_prefix,
             liquidity_role="taker",
+            fill_id=_book_fill_id(order=order, event=event, fill_size=fill_size, fill_price=fill_price, source=self.config.source_prefix),
         )
 
     def _fill_request_from_trade(self, order: dict, event: TradeTick, *, max_fill_size: float | None = None) -> SyntheticFillRequest | None:
@@ -180,6 +182,7 @@ class PaperFillSimulator:
             fill_price=trade_price,
             source=self.config.source_prefix,
             liquidity_role="maker" if post_only else "taker",
+            fill_id=_trade_fill_id(order=order, event=event, fill_size=fill_size, source=self.config.source_prefix),
         )
 
     def _consume_book_levels(
@@ -223,6 +226,67 @@ def _is_post_only(order: dict) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}
     return bool(value)
+
+
+def _trade_fill_id(*, order: dict, event: TradeTick, fill_size: float, source: str) -> str:
+    identity = _trade_identity(event)
+    return ":".join(
+        [
+            str(order["order_id"]),
+            "trade_fill",
+            _fill_id_component(source),
+            str(int(event.event_time_ms)),
+            identity,
+            str(int(round(float(event.price) * 1_000_000))),
+            str(int(round(float(fill_size) * 1_000_000))),
+        ]
+    )
+
+
+def _trade_identity(event: TradeTick) -> str:
+    if event.trade_id:
+        return f"trade_{_fill_id_component(event.trade_id)}"
+    if event.venue_seq is not None:
+        return f"seq_{int(event.venue_seq)}"
+    aggressor = getattr(event.aggressor_side, "value", event.aggressor_side)
+    return ":".join(
+        [
+            "fallback",
+            str(int(event.ingest_time_ms)),
+            _fill_id_component(aggressor),
+            str(int(round(float(event.size) * 1_000_000))),
+        ]
+    )
+
+
+def _book_fill_id(*, order: dict, event: BookUpdate, fill_size: float, fill_price: float, source: str) -> str:
+    if event.book_seq is not None:
+        identity = f"seq_{int(event.book_seq)}"
+    else:
+        identity = ":".join(
+            [
+                "fallback",
+                str(int(event.ingest_time_ms)),
+                str(int(round(float(event.best_bid or 0.0) * 1_000_000))),
+                str(int(round(float(event.best_ask or 0.0) * 1_000_000))),
+            ]
+        )
+    return ":".join(
+        [
+            str(order["order_id"]),
+            "book_fill",
+            _fill_id_component(source),
+            str(int(event.event_time_ms)),
+            identity,
+            str(int(round(float(fill_price) * 1_000_000))),
+            str(int(round(float(fill_size) * 1_000_000))),
+        ]
+    )
+
+
+def _fill_id_component(value: object) -> str:
+    text = str(value or "none")
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text)[:120] or "none"
 
 
 __all__ = ["PaperFillModelConfig", "PaperFillSimulator"]
