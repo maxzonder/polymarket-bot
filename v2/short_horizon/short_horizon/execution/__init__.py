@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Any, Callable, Protocol
 
 from ..core.clock import Clock, SystemClock
-from ..core.events import OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, OrderSide, TimerEvent
+from ..core.events import LiquidityRole, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, OrderSide, TimerEvent
 from ..core.models import OrderIntent
 from ..core.order_state import OrderState
 from ..strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
@@ -117,6 +117,7 @@ class SyntheticFillRequest:
     fill_price: float | None = None
     fee_paid_usdc: float | None = None
     source: str = "replay"
+    liquidity_role: str | LiquidityRole | None = LiquidityRole.TAKER
 
 
 class ExecutionVenueClient(Protocol):
@@ -332,7 +333,7 @@ class ExecutionEngine:
             order_id=order_row["order_id"],
             market_id=order_row["market_id"],
             token_id=order_row["token_id"],
-            side=order_row["side"],
+            side=order_request.side,
             price=order_request.price,
             size=order_request.size,
             state=order_row["state"],
@@ -343,6 +344,8 @@ class ExecutionEngine:
             remaining_size=order_request.size,
             parent_order_id=order_row.get("parent_order_id"),
             venue_order_status=order_row.get("venue_order_status") or "intent",
+            time_in_force=order_request.time_in_force,
+            post_only=order_request.post_only,
             reconciliation_required=bool(order_row.get("reconciliation_required")),
         )
         return self._require_order(intent.intent_id)
@@ -364,11 +367,13 @@ class ExecutionEngine:
             order_id=intent.intent_id,
             market_id=intent.market_id,
             token_id=intent.token_id,
-            side=OrderSide.BUY,
+            side=OrderSide(str(order_row["side"])),
             price=float(order_row["price"]),
             size=float(order_row["size"]),
             source=source,
             client_order_id=order_row.get("client_order_id") or intent.intent_id,
+            time_in_force=order_row.get("time_in_force"),
+            post_only=bool(order_row.get("post_only")) if order_row.get("post_only") is not None else None,
             venue_status="accepted",
             run_id=self.store.current_run_id,
         )
@@ -399,11 +404,13 @@ class ExecutionEngine:
             order_id=refreshed["order_id"],
             market_id=intent.market_id,
             token_id=intent.token_id,
-            side=OrderSide.BUY,
+            side=OrderSide(str(refreshed["side"])),
             price=float(refreshed["price"]),
             size=float(refreshed["size"]),
             source="execution.live_accept",
             client_order_id=refreshed.get("client_order_id"),
+            time_in_force=refreshed.get("time_in_force"),
+            post_only=bool(refreshed.get("post_only")) if refreshed.get("post_only") is not None else None,
             venue_status=place_result.status,
             run_id=self.store.current_run_id,
         )
@@ -451,7 +458,7 @@ class ExecutionEngine:
             ingest_time_ms=send_time_ms,
             market_id=intent.market_id,
             token_id=intent.token_id,
-            side=OrderSide.BUY,
+            side=OrderSide(str(refreshed["side"])),
             source="execution.live_reject" if self.mode is ExecutionMode.LIVE else "execution.dry_run_reject",
             client_order_id=refreshed.get("client_order_id"),
             price=float(refreshed["price"]) if refreshed.get("price") is not None else None,
@@ -527,6 +534,7 @@ class ExecutionEngine:
         next_state = OrderState.FILLED if remaining_after <= 1e-12 else OrderState.PARTIALLY_FILLED
         fill_price = float(request.fill_price if request.fill_price is not None else order_row["price"])
         fill_id = f"{request.order_id}:fill:{request.event_time_ms}:{int(round(fill_size * 1_000_000))}"
+        liquidity_role = request.liquidity_role.value if hasattr(request.liquidity_role, "value") else request.liquidity_role
         self.store.insert_fill(
             fill_id=fill_id,
             order_id=request.order_id,
@@ -537,7 +545,7 @@ class ExecutionEngine:
             filled_at_ms=request.event_time_ms,
             source=request.source,
             fee_paid_usdc=request.fee_paid_usdc,
-            liquidity_role="taker",
+            liquidity_role=liquidity_role,
         )
         self._transition(
             order_row,
@@ -561,7 +569,7 @@ class ExecutionEngine:
             source=request.source,
             client_order_id=order_row.get("client_order_id"),
             fee_paid_usdc=request.fee_paid_usdc,
-            liquidity_role="taker",
+            liquidity_role=LiquidityRole(str(liquidity_role)) if liquidity_role is not None else None,
             run_id=self.store.current_run_id,
         )
         self.store.append_event_log(event, order_id=request.order_id)
@@ -648,12 +656,12 @@ class ExecutionEngine:
         order_row = self.store.load_order(intent.intent_id)
         if order_row is not None:
             return order_row
-        size = intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None
+        size = intent.size_shares if intent.size_shares is not None else (intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None)
         self.store.insert_order(
             order_id=intent.intent_id,
             market_id=intent.market_id,
             token_id=intent.token_id,
-            side=OrderSide.BUY.value,
+            side=OrderSide(str(intent.side)).value,
             price=intent.entry_price,
             size=size,
             state=OrderState.INTENT,
@@ -661,6 +669,8 @@ class ExecutionEngine:
             intent_created_at_ms=intent.event_time_ms,
             last_state_change_at_ms=intent.event_time_ms,
             remaining_size=size,
+            time_in_force=intent.time_in_force,
+            post_only=intent.post_only,
             venue_order_status="intent",
         )
         return self._require_order(intent.intent_id)

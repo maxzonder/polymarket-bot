@@ -116,6 +116,8 @@ def parse_event_record(payload: dict[str, Any]) -> NormalizedEvent:
             is_active=bool(is_active) if is_active is not None else None,
             metadata_is_fresh=bool(payload.get("metadata_is_fresh", True)),
             fee_metadata_age_ms=_parse_optional_int(payload.get("fee_metadata_age_ms")),
+            resolved_token_id=_parse_optional_str(payload.get("resolved_token_id")),
+            settlement_prices={str(k): float(v) for k, v in payload.get("settlement_prices", {}).items()} if isinstance(payload.get("settlement_prices"), dict) else None,
         )
 
     if event_type == EventType.TIMER_EVENT:
@@ -159,6 +161,10 @@ def parse_event_record(payload: dict[str, Any]) -> NormalizedEvent:
             notional_usdc=float(payload["notional_usdc"]),
             lifecycle_fraction=float(payload.get("lifecycle_fraction", 0.0)),
             reason=_parse_optional_str(payload.get("reason")) or "ascending_first_touch",
+            side=OrderSide(str(payload.get("side", OrderSide.BUY))),
+            size_shares=_parse_optional_float(payload.get("size_shares")),
+            time_in_force=str(payload.get("time_in_force", "GTC")),
+            post_only=_parse_optional_bool(payload.get("post_only")) or False,
             source=str(payload.get("source", "runtime.order_intent")),
             run_id=_parse_optional_str(payload.get("run_id")),
         )

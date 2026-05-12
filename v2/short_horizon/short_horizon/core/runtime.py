@@ -358,7 +358,11 @@ class StrategyRuntime:
             resolved_key = (str(market_id), str(token_id))
             if resolved_key in self._reported_resolved_inventory:
                 continue
-            outcome_price = self.latest_best_bid_by_market_token.get(resolved_key)
+            outcome_price = _canonical_settlement_price(event=event, token_id=str(token_id))
+            event_source = "runtime.market_resolution_settlement"
+            if outcome_price is None:
+                outcome_price = self.latest_best_bid_by_market_token.get(resolved_key)
+                event_source = "runtime.market_resolved_holding"
             if outcome_price is None:
                 continue
             total_size = sum(float(size) for size, _unit_cost in lots)
@@ -377,6 +381,7 @@ class StrategyRuntime:
                 outcome_price=float(outcome_price),
                 average_entry_price=average_entry_price,
                 estimated_pnl_usdc=estimated_pnl_usdc,
+                source=event_source,
                 run_id=self.store.current_run_id,
             )
             self.store.append_event_log(resolved_event)
@@ -527,7 +532,19 @@ def _order_intent_event(intent: OrderIntent) -> OrderIntentEvent:
         notional_usdc=float(intent.notional_usdc),
         lifecycle_fraction=float(intent.lifecycle_fraction),
         reason=intent.reason,
+        side=OrderSide(str(intent.side)),
+        size_shares=float(intent.size_shares) if intent.size_shares is not None else None,
+        time_in_force=intent.time_in_force,
+        post_only=bool(intent.post_only),
     )
+
+
+def _canonical_settlement_price(*, event: MarketStateUpdate, token_id: str) -> float | None:
+    if event.settlement_prices is not None and token_id in event.settlement_prices:
+        return float(event.settlement_prices[token_id])
+    if event.resolved_token_id is not None:
+        return 1.0 if token_id == str(event.resolved_token_id) else 0.0
+    return None
 
 
 def _skip_decision_event(decision: SkipDecision) -> SkipDecisionEvent:

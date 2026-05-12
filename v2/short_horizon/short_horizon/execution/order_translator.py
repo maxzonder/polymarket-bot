@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 from uuid import NAMESPACE_URL, uuid5
 
+from ..core.events import OrderSide
 from ..core.models import OrderIntent
 from ..venue_polymarket.execution_client import VenueOrderRequest
 from ..venue_polymarket.markets import MarketMetadata
@@ -41,22 +42,26 @@ def translate_place_order(
     if intent.entry_price <= 0:
         raise VenueTranslationError(f"Intent {intent.intent_id} has non-positive entry_price={intent.entry_price}")
 
+    side = OrderSide(str(intent.side))
+    price_rounding = policy.buy_price_rounding if side is OrderSide.BUY else policy.sell_price_rounding
     rounded_price = _round_price(
         price=intent.entry_price,
         tick_size=venue_constraints.tick_size,
-        direction=policy.buy_price_rounding,
+        direction=price_rounding,
     )
     if rounded_price <= 0:
         # Desired price is below the minimum tick — snap up to tick_size so the order
         # participates in the queue at the cheapest valid price rather than being lost.
         rounded_price = venue_constraints.tick_size
-    target_notional = _target_buy_notional_from_values(
+    target_notional = _target_order_notional_from_values(
+        side=side,
         notional_usdc=intent.notional_usdc,
         venue_constraints=venue_constraints,
         rounded_price=rounded_price,
     )
-    raw_size = target_notional / rounded_price
-    rounded_size = _round_size(raw_size, decimals=venue_constraints.size_decimals, direction="up")
+    raw_size = float(intent.size_shares) if intent.size_shares is not None else target_notional / rounded_price
+    size_rounding = "up" if side is OrderSide.BUY and intent.size_shares is None else "down"
+    rounded_size = _round_size(raw_size, decimals=venue_constraints.size_decimals, direction=size_rounding)
     effective_notional = rounded_price * rounded_size
     minimum_notional = venue_constraints.min_order_size
     if effective_notional + 1e-12 < minimum_notional:
@@ -72,12 +77,12 @@ def translate_place_order(
     client_order_id = _client_order_id(intent=intent, seed=client_order_id_seed)
     return VenueOrderRequest(
         token_id=intent.token_id,
-        side="BUY",
+        side=side.value,
         price=rounded_price,
         size=rounded_size,
         client_order_id=client_order_id,
-        time_in_force="GTC",
-        post_only=False,
+        time_in_force=intent.time_in_force,
+        post_only=bool(intent.post_only),
     )
 
 
@@ -125,6 +130,22 @@ def _target_buy_notional_from_values(
     if float(notional_usdc) >= minimum_notional - 1e-12:
         buffered_minimum = minimum_notional + max(float(venue_constraints.min_notional_buffer), 0.0)
     return max(float(notional_usdc), buffered_minimum, minimum_shares_notional)
+
+
+def _target_order_notional_from_values(
+    *,
+    side: OrderSide,
+    notional_usdc: float,
+    venue_constraints: VenueConstraints,
+    rounded_price: float,
+) -> float:
+    if side is OrderSide.BUY:
+        return _target_buy_notional_from_values(
+            notional_usdc=notional_usdc,
+            venue_constraints=venue_constraints,
+            rounded_price=rounded_price,
+        )
+    return float(notional_usdc)
 
 
 def estimate_effective_buy_notional(

@@ -10,6 +10,7 @@ from .core.events import BookUpdate, MarketStateUpdate, OrderAccepted, OrderCanc
 from .core.models import OrderIntent
 from .core.runtime import StrategyRuntime
 from .execution import ExecutionEngine, ExecutionMode, ExecutionVenueClient, LiveSubmitGuard
+from .execution.paper_fill import PaperFillSimulator
 from .strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 from .telemetry import get_logger
 
@@ -43,13 +44,19 @@ def drive_runtime_events(
         clock=runtime.clock,
         venue_min_order_shares_fallback=getattr(runtime, "venue_min_order_shares_fallback", 0.0),
     )
+    paper_fill_simulator = PaperFillSimulator() if resolved_mode is ExecutionMode.DRY_RUN else None
     event_count = 0
     order_intents = 0
     synthetic_order_events = 0
 
     for event in events:
         event_count += 1
-        intent_count, synthetic_count = _handle_runtime_event(event=event, runtime=runtime, execution=execution)
+        intent_count, synthetic_count = _handle_runtime_event(
+            event=event,
+            runtime=runtime,
+            execution=execution,
+            paper_fill_simulator=paper_fill_simulator,
+        )
         order_intents += intent_count
         synthetic_order_events += synthetic_count
 
@@ -93,6 +100,7 @@ async def drive_runtime_event_stream(
         clock=runtime.clock,
         venue_min_order_shares_fallback=getattr(runtime, "venue_min_order_shares_fallback", 0.0),
     )
+    paper_fill_simulator = PaperFillSimulator() if resolved_mode is ExecutionMode.DRY_RUN else None
     event_count = 0
     order_intents = 0
     synthetic_order_events = 0
@@ -113,7 +121,12 @@ async def drive_runtime_event_stream(
             break
 
         event_count += 1
-        intent_count, synthetic_count = _handle_runtime_event(event=event, runtime=runtime, execution=execution)
+        intent_count, synthetic_count = _handle_runtime_event(
+            event=event,
+            runtime=runtime,
+            execution=execution,
+            paper_fill_simulator=paper_fill_simulator,
+        )
         order_intents += intent_count
         synthetic_order_events += synthetic_count
         if after_event_callback is not None:
@@ -138,7 +151,13 @@ async def drive_runtime_event_stream(
     )
 
 
-def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution: ExecutionEngine) -> tuple[int, int]:
+def _handle_runtime_event(
+    *,
+    event: object,
+    runtime: StrategyRuntime,
+    execution: ExecutionEngine,
+    paper_fill_simulator: PaperFillSimulator | None = None,
+) -> tuple[int, int]:
     event_time_ms = getattr(event, "event_time_ms", None)
     if event_time_ms is not None:
         advance_clock(runtime.clock, int(event_time_ms))
@@ -168,16 +187,27 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
                         execution=execution,
                         fallback_event_time_ms=emitted_event.event_time_ms,
                     )
+        synthetic_order_events += _apply_paper_fills(
+            paper_fill_simulator.on_book_update(event, execution=execution) if paper_fill_simulator is not None else [],
+            runtime=runtime,
+            execution=execution,
+        )
         return order_intents, synthetic_order_events
 
     if isinstance(event, TradeTick):
         runtime.store.append_event(event)
-        return 0, apply_strategy_intents(
+        synthetic_order_events = apply_strategy_intents(
             runtime.strategy.on_market_event(event),
             runtime=runtime,
             execution=execution,
             fallback_event_time_ms=event.event_time_ms,
         )
+        synthetic_order_events += _apply_paper_fills(
+            paper_fill_simulator.on_trade_tick(event, execution=execution) if paper_fill_simulator is not None else [],
+            runtime=runtime,
+            execution=execution,
+        )
+        return 0, synthetic_order_events
 
     if isinstance(event, TimerEvent):
         runtime.store.append_event(event)
@@ -208,6 +238,19 @@ def _handle_runtime_event(*, event: object, runtime: StrategyRuntime, execution:
         )
 
     raise TypeError(f"Unsupported runner event: {type(event)!r}")
+
+
+def _apply_paper_fills(fill_events: list[OrderFilled], *, runtime: StrategyRuntime, execution: ExecutionEngine) -> int:
+    synthetic_events = 0
+    for fill_event in fill_events:
+        synthetic_events += 1
+        synthetic_events += apply_strategy_intents(
+            runtime.strategy.on_order_event(fill_event),
+            runtime=runtime,
+            execution=execution,
+            fallback_event_time_ms=fill_event.event_time_ms,
+        )
+    return synthetic_events
 
 
 def apply_strategy_intents(intents: list[StrategyIntent], *, runtime: StrategyRuntime, execution: ExecutionEngine, fallback_event_time_ms: int) -> int:

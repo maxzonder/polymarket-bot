@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS orders (
     client_order_id TEXT,
     venue_order_id TEXT,
     parent_order_id TEXT,
+    time_in_force TEXT,
+    post_only INTEGER,
     intent_created_at TEXT NOT NULL,
     last_state_change_at TEXT NOT NULL,
     venue_order_status TEXT,

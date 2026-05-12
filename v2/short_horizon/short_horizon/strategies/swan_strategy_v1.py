@@ -9,6 +9,7 @@ from ..core.clock import Clock, SystemClock
 from ..core.events import (
     BookUpdate,
     MarketStateUpdate,
+    OrderSide,
     OrderAccepted,
     OrderCanceled,
     OrderFilled,
@@ -70,6 +71,12 @@ class SwanConfig:
     # Lifecycle (phase) stake multipliers (issue #180 P1.3). Tuple of
     # (max_lifecycle_fraction, multiplier); first match wins. Empty = no scaling.
     phase_stake_multipliers: tuple[tuple[float, float], ...] = ()
+
+    # Optional take-profit exit. Resolution-only remains the default; paper/live
+    # lifecycle tests can enable this to verify SELL paths end-to-end.
+    sell_exit_enabled: bool = False
+    sell_exit_price: float = 0.99
+    sell_exit_post_only: bool = True
 
 
 @dataclass
@@ -161,7 +168,7 @@ class SwanStrategyV1:
         elif isinstance(event, OrderCanceled):
             self._on_canceled(event)
         elif isinstance(event, OrderFilled):
-            self._on_filled(event)
+            return self._on_filled(event)
         elif isinstance(event, OrderRejected):
             self._on_rejected(event)
         return []
@@ -253,6 +260,8 @@ class SwanStrategyV1:
             lifecycle_fraction=lifecycle,
             event_time_ms=now_ms,
             reason="swan_resting_bid",
+            side=OrderSide.BUY,
+            post_only=True,
         )
 
     def _cancel_market_bids(self, market_id: str, reason: str = "") -> list[StrategyIntent]:
@@ -288,12 +297,38 @@ class SwanStrategyV1:
             self._bids_by_market.get(bid.market_id, set()).discard(event.order_id)
         self._pending_place.pop(event.order_id, None)
 
-    def _on_filled(self, event: OrderFilled) -> None:
+    def _on_filled(self, event: OrderFilled) -> list[StrategyIntent]:
+        intents: list[StrategyIntent] = []
         if event.remaining_size <= 0:
             bid = self._resting_bids.pop(event.order_id, None)
             if bid:
                 self._bids_by_market.get(bid.market_id, set()).discard(event.order_id)
+        if event.side is OrderSide.SELL:
+            self._positions[event.token_id] = max(self._positions.get(event.token_id, 0.0) - event.fill_size, 0.0)
+            return intents
+
         self._positions[event.token_id] = self._positions.get(event.token_id, 0.0) + event.fill_size
+        if self.config.sell_exit_enabled and event.fill_size > 0:
+            exit_price = float(self.config.sell_exit_price)
+            intents.append(PlaceOrder(intent=OrderIntent(
+                intent_id=str(uuid.uuid4()),
+                strategy_id=self.config.strategy_id,
+                market_id=event.market_id,
+                token_id=event.token_id,
+                condition_id=None,
+                question=None,
+                asset_slug="",
+                level=exit_price,
+                entry_price=exit_price,
+                notional_usdc=exit_price * float(event.fill_size),
+                lifecycle_fraction=1.0,
+                event_time_ms=event.event_time_ms,
+                reason="swan_exit_sell",
+                side=OrderSide.SELL,
+                size_shares=float(event.fill_size),
+                post_only=bool(self.config.sell_exit_post_only),
+            )))
+        return intents
 
     def _on_rejected(self, event: OrderRejected) -> None:
         # OrderRejected has client_order_id (=intent_id), not order_id

@@ -383,6 +383,30 @@ class CoreTypesTest(unittest.TestCase):
 
         self.assertEqual(parsed, event)
 
+    def test_market_state_resolution_fields_round_trip_through_replay_parser(self) -> None:
+        event = MarketStateUpdate(
+            event_time_ms=230_000,
+            ingest_time_ms=230_050,
+            market_id="m1",
+            token_id="tok_yes",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            start_time_ms=229_000,
+            end_time_ms=230_000,
+            duration_seconds=1,
+            token_yes_id="tok_yes",
+            token_no_id="tok_no",
+            is_active=False,
+            resolved_token_id="tok_yes",
+            settlement_prices={"tok_yes": 1.0, "tok_no": 0.0},
+            run_id="run1",
+        )
+
+        payload = normalize_event_payload(event)
+        parsed = parse_event_record(payload)
+
+        self.assertEqual(parsed, event)
+
 
 class StrategyApiContractTest(unittest.TestCase):
     def test_runner_persists_spot_price_update_without_strategy_output(self) -> None:
@@ -1294,6 +1318,58 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(resolved_events[0].token_id, "tok_yes")
         self.assertEqual(resolved_events[0].outcome_price, 0.15)
         self.assertAlmostEqual(resolved_events[0].estimated_pnl_usdc, -4.7)
+
+    def test_runtime_prefers_canonical_resolution_settlement_over_last_bid_mark(self) -> None:
+        engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=InMemoryIntentStore())
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_buy_settle_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.60,
+            size=10.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_buy_settle_001",
+            intent_created_at_ms=200_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+        engine.store.insert_fill(
+            fill_id="fill_buy_settle_001",
+            order_id="ord_buy_settle_001",
+            market_id="m1",
+            token_id="tok_yes",
+            price=0.60,
+            size=10.0,
+            filled_at_ms=210_000,
+            source="test",
+            fee_paid_usdc=0.20,
+        )
+        self.assertEqual(engine.on_book_update(self._book(event_time_ms=220_000, best_bid=0.15, best_ask=0.54)), [])
+
+        outputs = engine.on_market_state(MarketStateUpdate(
+            event_time_ms=230_000,
+            ingest_time_ms=230_050,
+            market_id="m1",
+            token_id="tok_yes",
+            token_yes_id="tok_yes",
+            token_no_id="tok_no",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            status="resolved",
+            is_active=False,
+            end_time_ms=230_000,
+            resolved_token_id="tok_yes",
+        ))
+
+        self.assertEqual(outputs, [])
+        resolved_events = [event for event in engine.store.events if isinstance(event, MarketResolvedWithInventory)]
+        self.assertEqual(len(resolved_events), 1)
+        self.assertEqual(resolved_events[0].outcome_price, 1.0)
+        self.assertEqual(resolved_events[0].source, "runtime.market_resolution_settlement")
+        self.assertAlmostEqual(resolved_events[0].estimated_pnl_usdc, 3.8)
 
     def test_runtime_blocks_new_intent_when_max_consecutive_rejects_reached(self) -> None:
         engine = ShortHorizonEngine(
@@ -3977,7 +4053,7 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(summary.run_id, "live_dry_run_test_001")
             self.assertEqual(summary.event_count, 3)
             self.assertEqual(summary.order_intents, 1)
-            self.assertEqual(summary.synthetic_order_events, 1)
+            self.assertEqual(summary.synthetic_order_events, 2)
 
             conn = sqlite3.connect(db_path)
             try:
@@ -3987,16 +4063,21 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                 order_row = conn.execute(
                     "SELECT state, client_order_id, venue_order_id, venue_order_status FROM orders WHERE run_id = 'live_dry_run_test_001' AND order_id = 'm1:tok_yes:0.55:225000'"
                 ).fetchone()
+                fill_count = conn.execute(
+                    "SELECT COUNT(*) FROM fills WHERE run_id = 'live_dry_run_test_001' AND order_id = 'm1:tok_yes:0.55:225000'"
+                ).fetchone()[0]
             finally:
                 conn.close()
 
             event_types = [row[0] for row in event_rows]
             self.assertEqual(event_types.count("TimerEvent"), 1)
             self.assertEqual(event_types.count("OrderAccepted"), 1)
-            self.assertEqual(order_row[0], "accepted")
+            self.assertEqual(event_types.count("OrderFilled"), 1)
+            self.assertEqual(fill_count, 1)
+            self.assertEqual(order_row[0], "filled")
             self.assertIsNotNone(order_row[1])
             self.assertIsNone(order_row[2])
-            self.assertEqual(order_row[3], "accepted")
+            self.assertEqual(order_row[3], "filled")
             timer_payloads = [json.loads(row[1]) for row in event_rows if row[0] == "TimerEvent"]
             self.assertTrue(any(payload.get("timer_kind") == "dry_run_order_logged" for payload in timer_payloads))
 

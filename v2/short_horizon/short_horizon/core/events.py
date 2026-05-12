@@ -178,6 +178,8 @@ class MarketStateUpdate:
     is_active: bool | None = None
     metadata_is_fresh: bool = True
     fee_metadata_age_ms: int | None = None
+    resolved_token_id: TokenId | None = None
+    settlement_prices: dict[str, float] | None = None
     event_type: EventType = field(default=EventType.MARKET_STATE_UPDATE, init=False)
 
     def __post_init__(self) -> None:
@@ -216,6 +218,10 @@ class OrderIntentEvent:
     notional_usdc: float
     lifecycle_fraction: float
     reason: str = "ascending_first_touch"
+    side: OrderSide = OrderSide.BUY
+    size_shares: float | None = None
+    time_in_force: str = "GTC"
+    post_only: bool = False
     source: str = "runtime.order_intent"
     run_id: RunId | None = None
     event_type: EventType = field(default=EventType.ORDER_INTENT, init=False)

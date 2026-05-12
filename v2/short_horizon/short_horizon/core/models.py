@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .events import FeeInfo
+from .events import FeeInfo, OrderSide
 from .ids import EventTime, MarketId, StrategyId, TokenId
 
 
@@ -51,6 +51,10 @@ class OrderIntent:
     lifecycle_fraction: float
     event_time_ms: EventTime
     reason: str = "ascending_first_touch"
+    side: OrderSide | str = OrderSide.BUY
+    size_shares: float | None = None
+    time_in_force: str = "GTC"
+    post_only: bool = False
 
 
 @dataclass(frozen=True)

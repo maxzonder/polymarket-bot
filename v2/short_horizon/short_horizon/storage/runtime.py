@@ -180,12 +180,12 @@ class InMemoryIntentStore:
 
     def persist_intent(self, intent: OrderIntent) -> None:
         self.intents.append(intent)
-        size = intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None
+        size = intent.size_shares if intent.size_shares is not None else (intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None)
         self.insert_order(
             order_id=intent.intent_id,
             market_id=intent.market_id,
             token_id=intent.token_id,
-            side="BUY",
+            side=str(intent.side),
             price=intent.entry_price,
             size=size,
             state=OrderState.INTENT,
@@ -193,6 +193,8 @@ class InMemoryIntentStore:
             intent_created_at_ms=intent.event_time_ms,
             last_state_change_at_ms=intent.event_time_ms,
             remaining_size=size,
+            time_in_force=intent.time_in_force,
+            post_only=intent.post_only,
         )
 
     def insert_order(
@@ -212,6 +214,8 @@ class InMemoryIntentStore:
         remaining_size: float | None = None,
         parent_order_id: str | None = None,
         venue_order_status: str | None = None,
+        time_in_force: str | None = None,
+        post_only: bool | None = None,
         reconciliation_required: bool = False,
     ) -> None:
         state_value = state.value if isinstance(state, OrderState) else str(state)
@@ -227,6 +231,8 @@ class InMemoryIntentStore:
             "client_order_id": client_order_id,
             "venue_order_id": venue_order_id,
             "parent_order_id": parent_order_id,
+            "time_in_force": time_in_force,
+            "post_only": post_only,
             "intent_created_at": iso_from_ms(intent_created_at_ms),
             "last_state_change_at": iso_from_ms(last_state_change_at_ms),
             "venue_order_status": venue_order_status,
@@ -474,12 +480,12 @@ class SQLiteRuntimeStore:
         self.conn.commit()
 
     def persist_intent(self, intent: OrderIntent) -> None:
-        size = intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None
+        size = intent.size_shares if intent.size_shares is not None else (intent.notional_usdc / intent.entry_price if intent.entry_price > 0 else None)
         self.insert_order(
             order_id=intent.intent_id,
             market_id=intent.market_id,
             token_id=intent.token_id,
-            side="BUY",
+            side=str(intent.side),
             price=intent.entry_price,
             size=size,
             state=OrderState.INTENT,
@@ -487,6 +493,8 @@ class SQLiteRuntimeStore:
             intent_created_at_ms=intent.event_time_ms,
             last_state_change_at_ms=intent.event_time_ms,
             remaining_size=size,
+            time_in_force=intent.time_in_force,
+            post_only=intent.post_only,
         )
 
     def insert_order(
@@ -506,6 +514,8 @@ class SQLiteRuntimeStore:
         remaining_size: float | None = None,
         parent_order_id: str | None = None,
         venue_order_status: str | None = None,
+        time_in_force: str | None = None,
+        post_only: bool | None = None,
         reconciliation_required: bool = False,
     ) -> None:
         self._ensure_market_stub(market_id)
@@ -524,13 +534,15 @@ class SQLiteRuntimeStore:
                 client_order_id,
                 venue_order_id,
                 parent_order_id,
+                time_in_force,
+                post_only,
                 intent_created_at,
                 last_state_change_at,
                 venue_order_status,
                 cumulative_filled_size,
                 remaining_size,
                 reconciliation_required
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(order_id) DO UPDATE SET
                 side = excluded.side,
                 price = excluded.price,
@@ -539,6 +551,8 @@ class SQLiteRuntimeStore:
                 client_order_id = COALESCE(excluded.client_order_id, orders.client_order_id),
                 venue_order_id = COALESCE(excluded.venue_order_id, orders.venue_order_id),
                 parent_order_id = excluded.parent_order_id,
+                time_in_force = COALESCE(excluded.time_in_force, orders.time_in_force),
+                post_only = COALESCE(excluded.post_only, orders.post_only),
                 last_state_change_at = excluded.last_state_change_at,
                 venue_order_status = COALESCE(excluded.venue_order_status, orders.venue_order_status),
                 remaining_size = excluded.remaining_size,
@@ -556,6 +570,8 @@ class SQLiteRuntimeStore:
                 client_order_id,
                 venue_order_id,
                 parent_order_id,
+                time_in_force,
+                int(post_only) if post_only is not None else None,
                 iso_from_ms(intent_created_at_ms),
                 iso_from_ms(last_state_change_at_ms),
                 venue_order_status,
@@ -774,6 +790,10 @@ class SQLiteRuntimeStore:
         }
         if "venue_order_id" not in columns:
             self.conn.execute("ALTER TABLE orders ADD COLUMN venue_order_id TEXT")
+        if "time_in_force" not in columns:
+            self.conn.execute("ALTER TABLE orders ADD COLUMN time_in_force TEXT")
+        if "post_only" not in columns:
+            self.conn.execute("ALTER TABLE orders ADD COLUMN post_only INTEGER")
         if precreate:
             return
         self.conn.execute(

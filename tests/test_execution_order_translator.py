@@ -9,6 +9,7 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
+from short_horizon.core.events import OrderSide
 from short_horizon.core.models import OrderIntent
 from short_horizon.execution import (
     VenueConstraints,
@@ -128,6 +129,27 @@ class ExecutionOrderTranslatorTest(unittest.TestCase):
         )
 
         self.assertEqual(request_a.client_order_id, request_b.client_order_id)
+
+    def test_translate_sell_intent_rounds_price_up_and_preserves_size(self) -> None:
+        request = translate_place_order(
+            self._intent(side=OrderSide.SELL, entry_price=0.551, notional_usdc=5.51, size_shares=10.0),
+            self._market(),
+            VenueConstraints(tick_size=0.01, min_order_size=1.0),
+        )
+
+        self.assertEqual(request.side, "SELL")
+        self.assertAlmostEqual(request.price, 0.56)
+        self.assertAlmostEqual(request.size, 10.0)
+
+    def test_translate_swan_post_only_flag_reaches_venue_request(self) -> None:
+        request = translate_place_order(
+            self._intent(reason="swan_resting_bid", post_only=True),
+            self._market(),
+            VenueConstraints(tick_size=0.01, min_order_size=1.0),
+        )
+
+        self.assertTrue(request.post_only)
+        self.assertEqual(request.time_in_force, "GTC")
 
 
 class EstimateEffectiveBuyNotionalTest(unittest.TestCase):
