@@ -84,7 +84,7 @@ _DB_DIR = Path(os.environ.get("POLYBOT_DATA_DIR", Path.home() / ".polybot" / "sw
 
 _SCREENER_INTERVAL_SECONDS = 300   # 5 min
 _CLEANUP_INTERVAL_SECONDS = 1800   # 30 min
-_DEFAULT_STAKE_PER_LEVEL = 5.0     # floor above 1.0 USDC venue minimum
+_DEFAULT_STAKE_PER_LEVEL = 1.0     # target ~1 USDC notional per entry level (~5 USDC/market ladder)
 
 _STRATEGY_REGISTRY = {
     "swan": {
@@ -757,8 +757,8 @@ async def run_swan_live(
         market_scorer=market_scorer,
         pattern_tracker=pattern_tracker,
     )
-    # Per-level stake: venue minimum is 1.0 USDC notional; BIG_SWAN_MODE.stake_usdc
-    # (0.05) is below that threshold so we use a configurable floor.
+    # Per-level stake: default targets ~1 USDC per level, i.e. ~5 USDC
+    # per full 5-level black_swan ladder before duration/phase multipliers.
     _stake_per_level = stake_per_level if stake_per_level is not None else _DEFAULT_STAKE_PER_LEVEL
 
     # ── Redeem sweeper ────────────────────────────────────────────────────────
@@ -906,7 +906,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Seconds between resolved-position redeem sweeps (live mode only)")
     p.add_argument("--stake-per-level", type=float, default=None,
                    dest="stake_per_level",
-                   help="USDC notional per entry level (default: 5.0)")
+                   help="USDC notional per entry level (default: 1.0)")
     p.add_argument("--max-hours-to-close", type=float, default=None,
                    dest="max_hours_to_close",
                    help="Override max hours to close from mode config")
