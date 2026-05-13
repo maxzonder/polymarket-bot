@@ -114,12 +114,12 @@ _POLICY: dict[tuple[str, Optional[str], Optional[str]], float] = {
     # Current >2c after touching penny: rebound is meaningfully different from
     # a dead penny print. Allow as a soft-penalized candidate instead of hard
     # rejecting whole non-crypto categories.
-    (PENNY_REBOUND, "weather", None): 0.7,
-    (PENNY_REBOUND, "sports",  None): 0.5,
-    (PENNY_REBOUND, "crypto",  None): 0.6,
-    (PENNY_REBOUND, None,      None): 0.5,
+    (PENNY_REBOUND, "weather", None): 0.85,
+    (PENNY_REBOUND, "sports",  None): 0.7,
+    (PENNY_REBOUND, "crypto",  None): 0.8,
+    (PENNY_REBOUND, None,      None): 0.7,
     # 15m rebound is noisy; allow but keep a stronger penalty.
-    (PENNY_REBOUND, None, "15m"): 0.4,
+    (PENNY_REBOUND, None, "15m"): 0.6,
 
     # ── no_pre_history: too few trades ───────────────────────────────────────
     (NO_PRE_HISTORY, "sports", None): 0.0,

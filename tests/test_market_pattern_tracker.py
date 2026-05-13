@@ -69,9 +69,9 @@ def test_penny_rebound_policy_softens_non_crypto_hard_skip():
     assert mpt._policy_mult(mpt.PENNY_DEAD, "weather", "1-7d") == 0.0
     assert mpt._policy_mult(mpt.PENNY_FLOOR, "weather", "1-7d") == 0.25
     assert mpt._policy_mult(mpt.PENNY_FLOOR, "crypto", "1-7d") == 0.4
-    assert mpt._policy_mult(mpt.PENNY_REBOUND, "weather", "1-7d") == 0.7
-    assert mpt._policy_mult(mpt.PENNY_REBOUND, "sports", "1-7d") == 0.5
-    assert mpt._policy_mult(mpt.PENNY_REBOUND, "crypto", "15m") == 0.4
+    assert mpt._policy_mult(mpt.PENNY_REBOUND, "weather", "1-7d") == 0.85
+    assert mpt._policy_mult(mpt.PENNY_REBOUND, "sports", "1-7d") == 0.7
+    assert mpt._policy_mult(mpt.PENNY_REBOUND, "crypto", "15m") == 0.6
 
 
 def test_tracker_classifies_and_scores_per_token_side(monkeypatch):
