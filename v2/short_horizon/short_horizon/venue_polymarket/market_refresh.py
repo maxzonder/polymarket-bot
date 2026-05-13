@@ -167,6 +167,9 @@ class MarketRefreshLoop:
                 queued_events.append(event)
                 await self._queue.put(event)
 
+        next_previous_markets = dict(latest_by_id)
+        pending_resolution_count = 0
+
         for market_id, previous in self._previous_markets.items():
             if market_id in latest_by_id:
                 continue
@@ -185,13 +188,17 @@ class MarketRefreshLoop:
             )
             queued_events.append(event)
             await self._queue.put(event)
+            if _should_keep_pending_resolution(resolution_snapshot):
+                pending_resolution_count += 1
+                next_previous_markets[market_id] = previous
 
-        self._previous_markets = latest_by_id
+        self._previous_markets = next_previous_markets
         self.logger.info(
             "market_refresh_completed",
             eligible_markets=len(latest_by_id),
             new=new_count,
             dropped=dropped_count,
+            pending_resolution=pending_resolution_count,
             updated=updated_count,
         )
         return queued_events
@@ -211,6 +218,14 @@ def _market_changed(previous: MarketMetadata, current: MarketMetadata) -> bool:
         or previous.tick_size != current.tick_size
         or previous.min_order_size != current.min_order_size
     )
+
+
+def _should_keep_pending_resolution(snapshot: MarketResolutionSnapshot | None) -> bool:
+    if snapshot is None:
+        return True
+    if snapshot.is_active:
+        return True
+    return snapshot.settlement_prices is None or snapshot.resolved_token_id is None
 
 
 def _to_market_state_update(

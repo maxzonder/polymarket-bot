@@ -129,6 +129,77 @@ class MarketRefreshLoopTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dropped.resolved_token_id, "m1_no")
         self.assertEqual(dropped.settlement_prices, {"m1_yes": 0.0, "m1_no": 1.0})
 
+    async def test_dropped_active_market_stays_pending_until_settlement(self) -> None:
+        snapshots = [
+            [self._market("m1", asset_slug="bitcoin", end_time_ms=1_776_694_500_000)],
+            [],
+            [],
+        ]
+        resolution_snapshots = [
+            MarketResolutionSnapshot(is_active=True, status=MarketStatus.ACTIVE),
+            MarketResolutionSnapshot(
+                is_active=False,
+                status=MarketStatus.RESOLVED,
+                settlement_prices={"m1_yes": 1.0, "m1_no": 0.0},
+                resolved_token_id="m1_yes",
+            ),
+        ]
+
+        async def fake_discovery(*_args, **_kwargs):
+            return snapshots.pop(0)
+
+        async def fake_resolution_snapshot(market_id: str):
+            self.assertEqual(market_id, "m1")
+            return resolution_snapshots.pop(0)
+
+        loop = MarketRefreshLoop(
+            discovery_fn=fake_discovery,
+            refresh_interval_seconds=999,
+            resolution_snapshot_fn=fake_resolution_snapshot,
+        )
+
+        await loop.refresh_once()
+        dropped_active_events = await loop.refresh_once()
+
+        self.assertEqual(len(dropped_active_events), 1)
+        self.assertEqual(dropped_active_events[0].status, MarketStatus.ACTIVE)
+        self.assertIn("m1", loop._previous_markets)
+
+        resolved_events = await loop.refresh_once()
+
+        self.assertEqual(len(resolved_events), 1)
+        self.assertEqual(resolved_events[0].status, MarketStatus.RESOLVED)
+        self.assertEqual(resolved_events[0].resolved_token_id, "m1_yes")
+        self.assertEqual(resolved_events[0].settlement_prices, {"m1_yes": 1.0, "m1_no": 0.0})
+        self.assertNotIn("m1", loop._previous_markets)
+
+    async def test_dropped_closed_market_without_binary_settlement_stays_pending(self) -> None:
+        snapshots = [
+            [self._market("m1", asset_slug="bitcoin", end_time_ms=1_776_694_500_000)],
+            [],
+        ]
+
+        async def fake_discovery(*_args, **_kwargs):
+            return snapshots.pop(0)
+
+        async def fake_resolution_snapshot(market_id: str):
+            self.assertEqual(market_id, "m1")
+            return MarketResolutionSnapshot(is_active=False, status=MarketStatus.CLOSED)
+
+        loop = MarketRefreshLoop(
+            discovery_fn=fake_discovery,
+            refresh_interval_seconds=999,
+            resolution_snapshot_fn=fake_resolution_snapshot,
+        )
+
+        await loop.refresh_once()
+        dropped_closed_events = await loop.refresh_once()
+
+        self.assertEqual(len(dropped_closed_events), 1)
+        self.assertEqual(dropped_closed_events[0].status, MarketStatus.CLOSED)
+        self.assertIsNone(dropped_closed_events[0].settlement_prices)
+        self.assertIn("m1", loop._previous_markets)
+
     async def test_market_refresh_loop_retries_after_transient_failure(self) -> None:
         calls = 0
 
