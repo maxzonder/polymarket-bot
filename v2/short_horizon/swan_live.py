@@ -642,7 +642,7 @@ async def run_swan_live(
         max_open_resting_bids=mode_config.max_open_positions,
         max_resting_markets=mode_config.max_resting_markets,
         max_resting_per_cluster=mode_config.max_resting_per_cluster,
-        phase_stake_multipliers=mode_config.phase_stake_multipliers,
+        phase_stake_multipliers=(),  # keep live/paper stake flat: --stake-per-level is final per-level notional
     )
     strategy = strategy_class(config=swan_config, clock=clock)
 
@@ -821,7 +821,7 @@ async def run_swan_live(
                 logger=logger,
                 shutdown=shutdown,
                 stake_usdc_per_level=_stake_per_level,
-                duration_stake_multipliers=mode_config.duration_stake_multipliers,
+                duration_stake_multipliers=(),  # keep live/paper stake flat: --stake-per-level is final per-level notional
             ),
             name="swan_screener_loop",
         )
@@ -855,7 +855,7 @@ async def run_swan_live(
             source=source,
             clock=clock,
             stake_usdc_per_level=_stake_per_level,
-            duration_stake_multipliers=mode_config.duration_stake_multipliers,
+            duration_stake_multipliers=(),  # keep live/paper stake flat: --stake-per-level is final per-level notional
             price_threshold=mode_config.entry_price_max,
             token_to_market_id=token_to_market_id,
             token_to_side_index=token_to_side_index,
