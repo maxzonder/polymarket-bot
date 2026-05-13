@@ -165,10 +165,10 @@ def load_token_meta(
         if wanted_categories and category not in wanted_categories:
             continue
         closed_ts = int(row["closed_time"] or 0)
-        start_ts = int(round(closed_ts - duration_hours * 3600.0))
-        if start_ts_filter is not None and closed_ts < start_ts_filter:
+        market_start_ts = int(round(closed_ts - duration_hours * 3600.0))
+        if start_ts is not None and closed_ts < start_ts:
             continue
-        if end_ts_filter is not None and start_ts > end_ts_filter:
+        if end_ts is not None and market_start_ts > end_ts:
             continue
         token_id = str(row["token_id"])
         metas[token_id] = TokenMeta(
@@ -178,7 +178,7 @@ def load_token_meta(
             category=category,
             is_winner=int(row["is_winner"] or 0),
             duration_hours=duration_hours,
-            start_ts=start_ts,
+            start_ts=market_start_ts,
             closed_ts=closed_ts,
         )
         if max_tokens is not None and len(metas) >= max_tokens:
