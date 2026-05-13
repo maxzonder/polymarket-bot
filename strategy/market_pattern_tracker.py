@@ -104,12 +104,12 @@ _POLICY: dict[tuple[str, Optional[str], Optional[str]], float] = {
     # Current <=1c: almost always dead, keep hard skip.
     (PENNY_DEAD, None, None): 0.0,
 
-    # Current 1-2c after touching penny: still weak. Keep non-crypto hard skip;
-    # crypto gets the previous coarse soft penalty because 15m/hour crypto can
-    # reprice quickly, but keep it below normal floor patterns.
+    # Current 1-2c after touching penny: still weak, but for a black-swan
+    # strategy the missed-winner cost is higher than the extra noise. Keep a
+    # soft penalty instead of a hard skip outside crypto.
     (PENNY_FLOOR, "crypto", None): 0.4,
     (PENNY_FLOOR, "crypto", "15m"): 0.3,
-    (PENNY_FLOOR, None, None): 0.0,
+    (PENNY_FLOOR, None, None): 0.25,
 
     # Current >2c after touching penny: rebound is meaningfully different from
     # a dead penny print. Allow as a soft-penalized candidate instead of hard
