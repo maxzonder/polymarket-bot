@@ -41,6 +41,39 @@ def test_filter_token_trades_falls_back_to_outcome_fields():
     assert len(mpt._filter_token_trades(trades, token_id="NO_TOKEN", outcome_name="No", outcome_index=1)) == 1
 
 
+def test_penny_touch_is_split_by_current_price():
+    base = 1000
+
+    dead = [
+        {"price": 0.50, "timestamp": base},
+        {"price": 0.015, "timestamp": base + 100},
+        {"price": 0.009, "timestamp": base + 200},
+    ]
+    floor = [
+        {"price": 0.50, "timestamp": base},
+        {"price": 0.015, "timestamp": base + 100},
+        {"price": 0.018, "timestamp": base + 200},
+    ]
+    rebound = [
+        {"price": 0.50, "timestamp": base},
+        {"price": 0.015, "timestamp": base + 100},
+        {"price": 0.035, "timestamp": base + 200},
+    ]
+
+    assert mpt._classify(dead, end_date_ts=base + 1000) == mpt.PENNY_DEAD
+    assert mpt._classify(floor, end_date_ts=base + 1000) == mpt.PENNY_FLOOR
+    assert mpt._classify(rebound, end_date_ts=base + 1000) == mpt.PENNY_REBOUND
+
+
+def test_penny_rebound_policy_softens_non_crypto_hard_skip():
+    assert mpt._policy_mult(mpt.PENNY_DEAD, "weather", "1-7d") == 0.0
+    assert mpt._policy_mult(mpt.PENNY_FLOOR, "weather", "1-7d") == 0.0
+    assert mpt._policy_mult(mpt.PENNY_FLOOR, "crypto", "1-7d") == 0.4
+    assert mpt._policy_mult(mpt.PENNY_REBOUND, "weather", "1-7d") == 0.7
+    assert mpt._policy_mult(mpt.PENNY_REBOUND, "sports", "1-7d") == 0.5
+    assert mpt._policy_mult(mpt.PENNY_REBOUND, "crypto", "15m") == 0.4
+
+
 def test_tracker_classifies_and_scores_per_token_side(monkeypatch):
     trades = [
         {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.50, "timestamp": 1000},

@@ -27,19 +27,24 @@ DATA_API_BASE = "https://data-api.polymarket.com"
 _TRADES_TIMEOUT = 15
 _CACHE_TTL_SECONDS = 1800  # re-classify every 30 min
 
-# Pattern labels (8 total)
+# Pattern labels
 FLOOR_ACCUMULATION    = "floor_accumulation"
 CHOP_THEN_FLOOR       = "chop_then_floor"
 WICK_FLOOR_TOUCH      = "wick_floor_touch"
 SUDDEN_COLLAPSE       = "sudden_collapse"
 GRIND_DOWN_TO_FLOOR   = "grind_down_to_floor"
+# Legacy coarse label kept in policy for backward compatibility with old logs/reports.
 PENNY_FLOOR_TOUCH     = "penny_floor_touch"
+PENNY_DEAD            = "penny_dead"       # touched <=2c and current <=1c
+PENNY_FLOOR           = "penny_floor"      # touched <=2c and current still 1-2c
+PENNY_REBOUND         = "penny_rebound"    # touched <=2c but recovered above 2c
 NO_PRE_HISTORY        = "no_pre_history"
 NO_FLOOR_YET          = "no_floor_yet"
 
 _ALL_PATTERNS = frozenset({
     FLOOR_ACCUMULATION, CHOP_THEN_FLOOR, WICK_FLOOR_TOUCH,
     SUDDEN_COLLAPSE, GRIND_DOWN_TO_FLOOR, PENNY_FLOOR_TOUCH,
+    PENNY_DEAD, PENNY_FLOOR, PENNY_REBOUND,
     NO_PRE_HISTORY, NO_FLOOR_YET,
 })
 
@@ -88,13 +93,33 @@ _POLICY: dict[tuple[str, Optional[str], Optional[str]], float] = {
     # ── grind_down_to_floor: slow bleed → SKIP universally ───────────────────
     (GRIND_DOWN_TO_FLOOR, None, None): 0.0,
 
-    # ── penny_floor_touch: ≤ 0.02 → likely dead ──────────────────────────────
+    # ── legacy penny_floor_touch: ≤ 0.02 coarse label ────────────────────────
     (PENNY_FLOOR_TOUCH, "weather", None): 0.0,
     (PENNY_FLOOR_TOUCH, "sports",  None): 0.0,
     (PENNY_FLOOR_TOUCH, "crypto",  None): 0.4,
     (PENNY_FLOOR_TOUCH, None,      None): 0.0,
-    # 15m: penny in a 15m market is almost certainly dead
     (PENNY_FLOOR_TOUCH, "crypto",  "15m"): 0.3,
+
+    # ── penny subtypes (issue #197): distinguish dead floor vs rebound ───────
+    # Current <=1c: almost always dead, keep hard skip.
+    (PENNY_DEAD, None, None): 0.0,
+
+    # Current 1-2c after touching penny: still weak. Keep non-crypto hard skip;
+    # crypto gets the previous coarse soft penalty because 15m/hour crypto can
+    # reprice quickly, but keep it below normal floor patterns.
+    (PENNY_FLOOR, "crypto", None): 0.4,
+    (PENNY_FLOOR, "crypto", "15m"): 0.3,
+    (PENNY_FLOOR, None, None): 0.0,
+
+    # Current >2c after touching penny: rebound is meaningfully different from
+    # a dead penny print. Allow as a soft-penalized candidate instead of hard
+    # rejecting whole non-crypto categories.
+    (PENNY_REBOUND, "weather", None): 0.7,
+    (PENNY_REBOUND, "sports",  None): 0.5,
+    (PENNY_REBOUND, "crypto",  None): 0.6,
+    (PENNY_REBOUND, None,      None): 0.5,
+    # 15m rebound is noisy; allow but keep a stronger penalty.
+    (PENNY_REBOUND, None, "15m"): 0.4,
 
     # ── no_pre_history: too few trades ───────────────────────────────────────
     (NO_PRE_HISTORY, "sports", None): 0.0,
@@ -387,9 +412,17 @@ def _classify_details(trades: list[dict], end_date_ts: Optional[int]) -> Pattern
             last_price=last_price,
         )
 
-    # ── 1. Penny touch: any price ≤ 0.02 ─────────────────────────────────────
+    # ── 1. Penny touch subtypes: historical <=2c touch, split by current price ─
+    # Prefix replay showed the coarse penny label mixed dead tokens with useful
+    # rebounds: current <=1c is near-dead, 1-2c is still weak, >2c has materially
+    # better future winner concentration and should be soft-penalized, not hard
+    # rejected.
     if any(p <= 0.02 for p in prices):
-        return info(PENNY_FLOOR_TOUCH)
+        if last_price <= 0.01:
+            return info(PENNY_DEAD)
+        if last_price <= 0.02:
+            return info(PENNY_FLOOR)
+        return info(PENNY_REBOUND)
 
     # ── 2. No floor yet: price never reached ≤ 0.05 ──────────────────────────
     floor_indices = [i for i, p in enumerate(prices) if p <= 0.05]
