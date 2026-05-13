@@ -328,6 +328,7 @@ def main() -> int:
     # Current paper DB.
     paper_summary: list[str] = []
     open_market_ids: list[str] = []
+    open_order_pairs: list[tuple[str, str]] = []
     if paper and table_exists(paper, "orders"):
         run = rows(paper, "select run_id, started_at, finished_at, mode, strategy_id, git_sha from runs order by started_at desc limit 1")
         if run:
@@ -341,6 +342,11 @@ def main() -> int:
 
         open_filter = "coalesce(remaining_size,size)>0 and upper(state) not in ('CANCELED','CANCEL_CONFIRMED','REJECTED','FILLED')"
         open_market_ids = [r[0] for r in rows(paper, f"select distinct market_id from orders where {open_filter}")]
+        open_order_pairs = [
+            (str(r["market_id"]), str(r["token_id"]))
+            for r in rows(paper, f"select distinct market_id, token_id from orders where {open_filter}")
+            if r["market_id"] is not None and r["token_id"] is not None
+        ]
         open_count = len(open_market_ids)
         max_order_price = scalar(paper, f"select max(price) from orders where {open_filter}")
         non_post_only = scalar(paper, "select count(*) from orders where coalesce(post_only,0) != 1") if "post_only" in columns(paper, "orders") else None
@@ -399,16 +405,22 @@ def main() -> int:
     # Screener log checks for open markets.
     screener_summary: list[str] = []
     open_score_rows: list[sqlite3.Row] = []
-    if slog and table_exists(slog, "screener_log") and open_market_ids:
-        placeholders = ",".join("?" for _ in open_market_ids)
-        open_score_rows = rows(slog, f"""
+    if slog and table_exists(slog, "screener_log") and open_order_pairs:
+        # Compare each open order to the latest screener row for the same
+        # market+token.  Market-level latest rows are misleading for binary
+        # markets: the opposite token can be rejected_price_above_entry_max
+        # while the resting token is still a valid low-tail candidate.
+        for market_id, token_id in open_order_pairs:
+            latest = rows(slog, """
             select market_id, question, category, current_price, hours_to_close, volume_usdc,
-                   outcome, market_score, max(scanned_at) scanned_at
+                   outcome, market_score, scanned_at, token_id
             from screener_log
-            where market_id in ({placeholders})
-            group by market_id
-            order by scanned_at desc
-        """, open_market_ids)
+            where market_id = ? and token_id = ?
+            order by scanned_at desc, id desc
+            limit 1
+            """, (market_id, token_id))
+            if latest:
+                open_score_rows.append(latest[0])
         matched = len(open_score_rows)
         scores = [float(r["market_score"]) for r in open_score_rows if r["market_score"] is not None]
         htc = [float(r["hours_to_close"]) for r in open_score_rows if r["hours_to_close"] is not None]
@@ -418,9 +430,9 @@ def main() -> int:
         add_check(
             checks,
             "paper_vs_screener",
-            STATUS_OK if matched == len(open_market_ids) else STATUS_WARN,
-            "open paper markets have screener provenance rows",
-            f"matched={matched}/{len(open_market_ids)} in screener_log={screener_db}",
+            STATUS_OK if matched == len(open_order_pairs) else STATUS_WARN,
+            "open paper order tokens have screener provenance rows",
+            f"matched={matched}/{len(open_order_pairs)} in screener_log={screener_db}",
         )
         add_check(
             checks,
