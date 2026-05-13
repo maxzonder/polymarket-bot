@@ -108,6 +108,25 @@ def test_tracker_classifies_and_scores_per_token_side(monkeypatch):
     assert calls == ["c1"]  # raw market trades fetched once; token labels cached separately
 
 
+def test_pattern_state_ttl_is_duration_aware():
+    now = 1_000.0
+
+    # For short/near-close markets transient labels refresh much faster than the
+    # old fixed 60s fallback: 3% of 10m = 18s.
+    assert mpt._state_ttl_seconds(mpt.NO_FLOOR_YET, now=now, end_date_ts=1_600) == 18
+
+    # Very short remaining windows clamp to a safe minimum instead of zero.
+    assert mpt._state_ttl_seconds(mpt.NO_PRE_HISTORY, now=now, end_date_ts=1_300) == 15
+
+    # Long markets clamp transient states to a small max and mature states to the
+    # mature max/fallback.
+    assert mpt._state_ttl_seconds(mpt.NO_FLOOR_YET, now=now, end_date_ts=100_000) == 120
+    assert mpt._state_ttl_seconds(mpt.FLOOR_ACCUMULATION, now=now, end_date_ts=100_000) == 1800
+
+    # Mature labels near close refresh on a smaller cadence too.
+    assert mpt._state_ttl_seconds(mpt.FLOOR_ACCUMULATION, now=now, end_date_ts=1_600) == 60
+
+
 def test_transient_pattern_state_uses_short_ttl_and_refreshes_raw_trades(monkeypatch):
     first = [
         {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.50, "timestamp": 1000},
@@ -134,7 +153,7 @@ def test_transient_pattern_state_uses_short_ttl_and_refreshes_raw_trades(monkeyp
         market_id="m-transient",
         condition_id="c-transient",
         category="weather",
-        end_date_ts=1300,
+        end_date_ts=11_000,
     )
 
     assert tracker.get_pattern_mult(market, 24.0, token_id="YES", outcome_name="Yes", outcome_index=0) == 0.0
@@ -145,7 +164,7 @@ def test_transient_pattern_state_uses_short_ttl_and_refreshes_raw_trades(monkeyp
     assert tracker.get_pattern_mult(market, 24.0, token_id="YES", outcome_name="Yes", outcome_index=0) == 0.0
     assert calls == ["c-transient"]
 
-    now[0] += mpt._TRANSIENT_CACHE_TTL_SECONDS + 1
+    now[0] += mpt._TRANSIENT_CACHE_TTL_MAX_SECONDS + 1
     assert tracker.get_pattern_mult(market, 24.0, token_id="YES", outcome_name="Yes", outcome_index=0) == 1.5
     assert tracker.get_pattern_label("m-transient", "YES") == mpt.FLOOR_ACCUMULATION
     assert calls == ["c-transient", "c-transient"]

@@ -13,7 +13,9 @@ for p in (_REPO, _V2):
         sys.path.insert(0, str(p))
 
 from short_horizon.strategies.swan_strategy_v1 import _phase_stake_multiplier
-from v2.short_horizon.swan_live import _duration_stake_multiplier
+from types import SimpleNamespace
+
+from v2.short_horizon.swan_live import _duration_stake_multiplier, _ws_pattern_retry_delay_seconds
 
 
 # Mirrors BLACK_SWAN_MODE.duration_stake_multipliers
@@ -79,3 +81,14 @@ def test_phase_above_table_max_returns_unity():
     """Defensive: lifecycle > all table entries → no-op (table should bound to 1.0)."""
     short_table = ((0.5, 0.7),)
     assert _phase_stake_multiplier(0.9, short_table) == 1.0
+
+
+def test_ws_pattern_retry_delay_uses_remaining_time():
+    assert _ws_pattern_retry_delay_seconds(SimpleNamespace(hours_to_close=10 / 60)) == 30
+    assert _ws_pattern_retry_delay_seconds(SimpleNamespace(hours_to_close=1.0)) == 90
+    assert _ws_pattern_retry_delay_seconds(SimpleNamespace(hours_to_close=None, end_date_ts=1_600), now_s=1_000.0) == 30
+    assert _ws_pattern_retry_delay_seconds(SimpleNamespace(hours_to_close=None, end_date_ts=None)) == 90
+
+
+def test_ws_pattern_retry_delay_clamps_short_markets():
+    assert _ws_pattern_retry_delay_seconds(SimpleNamespace(hours_to_close=1 / 60)) == 20

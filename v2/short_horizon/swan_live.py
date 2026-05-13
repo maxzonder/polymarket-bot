@@ -231,8 +231,38 @@ async def _cleanup_loop(
 
 
 _WS_UNIVERSE_INTERVAL_SECONDS = 300   # rebuild WS subscription universe every 5 min
-_WS_PATTERN_RETRY_DELAY_SECONDS = 90
+_WS_PATTERN_RETRY_DELAY_SECONDS = 90  # fallback/max retry delay
+_WS_PATTERN_RETRY_DELAY_MIN_SECONDS = 20
+_WS_PATTERN_RETRY_DELAY_FRACTION_OF_REMAINING = 0.05
 _WS_PATTERN_RETRY_MAX_ATTEMPTS = 3
+
+
+
+
+def _ws_pattern_retry_delay_seconds(market_info: MarketInfo, *, now_s: float | None = None) -> int:
+    remaining_seconds: float | None = None
+    hours_to_close = getattr(market_info, "hours_to_close", None)
+    if hours_to_close is not None:
+        try:
+            remaining_seconds = max(0.0, float(hours_to_close) * 3600.0)
+        except (TypeError, ValueError):
+            remaining_seconds = None
+    if remaining_seconds is None:
+        end_date_ts = getattr(market_info, "end_date_ts", None)
+        if end_date_ts is not None:
+            try:
+                remaining_seconds = max(0.0, float(end_date_ts) - float(now_s if now_s is not None else time.time()))
+            except (TypeError, ValueError):
+                remaining_seconds = None
+    if remaining_seconds is None:
+        return _WS_PATTERN_RETRY_DELAY_SECONDS
+    return int(round(max(
+        float(_WS_PATTERN_RETRY_DELAY_MIN_SECONDS),
+        min(
+            float(_WS_PATTERN_RETRY_DELAY_SECONDS),
+            remaining_seconds * _WS_PATTERN_RETRY_DELAY_FRACTION_OF_REMAINING,
+        ),
+    )))
 
 
 class _WsCandidateCache:
@@ -491,15 +521,16 @@ async def _ws_trigger_screener(
         )
         if deferred_pattern and retry_attempt < _WS_PATTERN_RETRY_MAX_ATTEMPTS:
             next_attempt = retry_attempt + 1
+            retry_delay_seconds = _ws_pattern_retry_delay_seconds(market_info)
             logger.info(
                 "ws_price_trigger_deferred_pattern_retry_scheduled",
                 token_id=token_id,
                 ask=ask,
                 market_id=market_id,
                 retry_attempt=next_attempt,
-                delay_seconds=_WS_PATTERN_RETRY_DELAY_SECONDS,
+                delay_seconds=retry_delay_seconds,
             )
-            await asyncio.sleep(_WS_PATTERN_RETRY_DELAY_SECONDS)
+            await asyncio.sleep(retry_delay_seconds)
             try:
                 from api.clob_client import get_orderbook
                 orderbook = await asyncio.to_thread(get_orderbook, token_id)

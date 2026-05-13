@@ -25,8 +25,13 @@ import requests
 
 DATA_API_BASE = "https://data-api.polymarket.com"
 _TRADES_TIMEOUT = 15
-_CACHE_TTL_SECONDS = 1800  # re-classify mature states every 30 min
-_TRANSIENT_CACHE_TTL_SECONDS = 60  # transient prefix states mature quickly
+_CACHE_TTL_SECONDS = 1800  # fallback/max mature-state cache TTL
+_TRANSIENT_CACHE_TTL_SECONDS = 60  # fallback transient-state cache TTL
+_MATURE_CACHE_TTL_MIN_SECONDS = 60
+_MATURE_CACHE_TTL_FRACTION_OF_REMAINING = 0.10
+_TRANSIENT_CACHE_TTL_MIN_SECONDS = 15
+_TRANSIENT_CACHE_TTL_MAX_SECONDS = 120
+_TRANSIENT_CACHE_TTL_FRACTION_OF_REMAINING = 0.03
 
 # Pattern labels
 FLOOR_ACCUMULATION    = "floor_accumulation"
@@ -57,13 +62,46 @@ def is_transient_pattern(label: Optional[str]) -> bool:
 
     These labels mean "not enough / not confirmed evidence yet", not a final
     negative pattern.  They are safe to defer and retry, but should not be
-    cached for the same 30-minute horizon as mature labels.
+    cached on the same cadence as mature labels.
     """
     return label in _TRANSIENT_PATTERNS
 
 
-def _state_ttl_seconds(pattern: str) -> int:
-    return _TRANSIENT_CACHE_TTL_SECONDS if is_transient_pattern(pattern) else _CACHE_TTL_SECONDS
+def _clamp_seconds(value: float, *, minimum: int, maximum: int) -> int:
+    return int(round(max(float(minimum), min(float(maximum), float(value)))))
+
+
+def _remaining_seconds(*, now: float, end_date_ts: Optional[int]) -> Optional[float]:
+    if end_date_ts is None:
+        return None
+    try:
+        return max(0.0, float(end_date_ts) - float(now))
+    except (TypeError, ValueError):
+        return None
+
+
+def _mature_state_ttl_seconds(*, now: float, end_date_ts: Optional[int]) -> int:
+    remaining = _remaining_seconds(now=now, end_date_ts=end_date_ts)
+    if remaining is None:
+        return _CACHE_TTL_SECONDS
+    return _clamp_seconds(
+        remaining * _MATURE_CACHE_TTL_FRACTION_OF_REMAINING,
+        minimum=_MATURE_CACHE_TTL_MIN_SECONDS,
+        maximum=_CACHE_TTL_SECONDS,
+    )
+
+
+def _state_ttl_seconds(pattern: str, *, now: float, end_date_ts: Optional[int]) -> int:
+    remaining = _remaining_seconds(now=now, end_date_ts=end_date_ts)
+    if is_transient_pattern(pattern):
+        if remaining is None:
+            return _TRANSIENT_CACHE_TTL_SECONDS
+        return _clamp_seconds(
+            remaining * _TRANSIENT_CACHE_TTL_FRACTION_OF_REMAINING,
+            minimum=_TRANSIENT_CACHE_TTL_MIN_SECONDS,
+            maximum=_TRANSIENT_CACHE_TTL_MAX_SECONDS,
+        )
+    return _mature_state_ttl_seconds(now=now, end_date_ts=end_date_ts)
 
 # Policy key: (pattern, category, duration_bucket); None = wildcard for that axis.
 # Lookup order in _policy_mult: (p,c,b) → (p,None,b) → (p,c,None) → (p,None,None).
@@ -205,9 +243,9 @@ class MarketPatternTracker:
     ) -> float:
         """
         Return the token-side pattern multiplier (0.0 = skip, <1.0 = reduce,
-        >1.0 = boost). Pattern labels are fetched/cached for 30 min per
-        (market_id, token_id); mult is looked up fresh each call using current
-        hours so the duration bucket stays accurate.
+        >1.0 = boost). Pattern labels are fetched/cached per
+        (market_id, token_id) on a duration-aware cadence; mult is looked up
+        fresh each call using current hours so the duration bucket stays accurate.
 
         m must have .market_id, .condition_id, .category, .end_date_ts.
         token_id/outcome_* should identify the candidate side being evaluated.
@@ -249,16 +287,20 @@ class MarketPatternTracker:
         key = _cache_key(m.market_id, token_id)
         state = self._cache.get(key)
         now = time.time()
-        ttl_seconds = _state_ttl_seconds(state.pattern) if state is not None else _CACHE_TTL_SECONDS
+        end_date_ts = getattr(m, "end_date_ts", None)
+        ttl_seconds = (
+            _state_ttl_seconds(state.pattern, now=now, end_date_ts=end_date_ts)
+            if state is not None
+            else _mature_state_ttl_seconds(now=now, end_date_ts=end_date_ts)
+        )
         if state is None or (now - state.fetched_at) > ttl_seconds:
-            force_trade_refresh = state is not None and is_transient_pattern(state.pattern)
             state = self._fetch_and_classify(
                 m,
                 now,
                 token_id=token_id,
                 outcome_name=outcome_name,
                 outcome_index=outcome_index,
-                force_trade_refresh=force_trade_refresh,
+                trade_cache_ttl_seconds=ttl_seconds,
             )
             self._cache[key] = state
         return state
@@ -271,10 +313,10 @@ class MarketPatternTracker:
         token_id: Optional[str],
         outcome_name: Optional[str],
         outcome_index: Optional[int],
-        force_trade_refresh: bool = False,
+        trade_cache_ttl_seconds: int,
     ) -> _PatternState:
         trades_state = self._trades_cache.get(m.market_id)
-        if force_trade_refresh or trades_state is None or (now - trades_state.fetched_at) > _CACHE_TTL_SECONDS:
+        if trades_state is None or (now - trades_state.fetched_at) > trade_cache_ttl_seconds:
             trades_state = _TradesState(
                 condition_id=m.condition_id,
                 fetched_at=now,
