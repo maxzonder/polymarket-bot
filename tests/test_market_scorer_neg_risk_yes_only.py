@@ -221,6 +221,57 @@ class MarketScorerNegRiskYesOnlyTests(unittest.TestCase):
             self.assertAlmostEqual(binary_score.analogy_score, 2.0 / 3.0, places=4)
             self.assertAlmostEqual(neg_risk_no_score.analogy_score, 2.0 / 3.0, places=4)
 
+    def test_black_swan_mode_uses_strict_was_black_swan_label(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "dataset.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE feature_mart_v1_1 (
+                    market_id TEXT PRIMARY KEY,
+                    category TEXT,
+                    volume_usdc REAL,
+                    log_volume REAL,
+                    was_swan INTEGER,
+                    swan_is_winner INTEGER,
+                    best_swan_is_yes_token INTEGER,
+                    label_20x INTEGER,
+                    was_black_swan INTEGER,
+                    neg_risk INTEGER
+                )
+                """
+            )
+            rows = []
+            for i in range(20):
+                # Broad 20x winners, but not strict black swans.
+                rows.append((f"sports_{i}", "sports", 20000.0, 1.0, 1, 1, None, 1, 0, 0))
+                # Strict black swans, but not broad label_20x in this synthetic split.
+                rows.append((f"weather_{i}", "weather", 20000.0, 1.0, 1, 1, None, 0, 1, 0))
+            conn.executemany(
+                "INSERT INTO feature_mart_v1_1 (market_id, category, volume_usdc, log_volume, was_swan, swan_is_winner, best_swan_is_yes_token, label_20x, was_black_swan, neg_risk) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+            conn.close()
+
+            broad = MarketScorer(db_path=db_path)
+            strict = MarketScorer(db_path=db_path, use_black_swan_label=True)
+
+            self.assertEqual(broad._analogy[("sports", "10k-100k")], 1.0)
+            self.assertEqual(broad._analogy[("weather", "10k-100k")], 0.0)
+            self.assertEqual(strict._analogy[("sports", "10k-100k")], 0.0)
+            self.assertEqual(strict._analogy[("weather", "10k-100k")], 1.0)
+
+    def test_black_swan_strict_label_missing_marks_scorer_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "dataset.db"
+            self._build_dataset(db_path, include_neg_risk_yes=True)
+
+            scorer = MarketScorer(db_path=db_path, use_black_swan_label=True)
+
+            self.assertFalse(scorer.is_ready)
+            self.assertEqual(scorer._analogy, {})
+
     def test_comment_count_no_longer_affects_market_score(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "dataset.db"

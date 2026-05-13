@@ -156,6 +156,14 @@ def infer_market_category(raw: dict[str, Any], event0: dict[str, Any] | None = N
     """Infer the internal strategy category for a Gamma market payload."""
     event0 = event0 if event0 is not None else _first_event(raw)
 
+    # Gamma category/tags can be stale or plainly wrong for some live markets
+    # (weather questions tagged as politics, Eurovision tagged as crypto, etc.).
+    # Only apply high-confidence semantic overrides before raw metadata; broader
+    # keyword inference still remains a fallback below.
+    question_override = _high_confidence_question_category(raw, event0)
+    if question_override:
+        return question_override
+
     explicit = _normalize_category(raw.get("category") or raw.get("categorySlug") or raw.get("category_slug"))
     if explicit:
         return explicit
@@ -188,6 +196,49 @@ def infer_category_from_text(text: str) -> str | None:
     for category, keywords in _CATEGORY_KEYWORDS:
         if any(_keyword_matches(haystack, keyword) for keyword in keywords):
             return category
+    return None
+
+
+def _high_confidence_question_category(raw: dict[str, Any], event0: dict[str, Any] | None = None) -> str | None:
+    question = " ".join(
+        str(part or "")
+        for part in (
+            raw.get("question"),
+            raw.get("title"),
+            raw.get("groupItemTitle"),
+            (event0 or {}).get("title"),
+        )
+    ).lower()
+    padded = f" {question} "
+
+    if (
+        " temperature " in padded
+        or "°c" in padded
+        or "°f" in padded
+        or " fahrenheit" in padded
+        or " celsius" in padded
+        or " high temperature" in padded
+        or " highest temperature" in padded
+        or " low temperature" in padded
+        or " lowest temperature" in padded
+    ):
+        return "weather"
+    if any(term in padded for term in (" hurricane", " rainfall", " snow", " tornado", " earthquake")):
+        return "weather"
+    if "eurovision" in padded:
+        return "entertainment"
+
+    crypto_assets = (
+        " bitcoin ", " btc ", " ethereum ", " eth ", " solana ", " sol ",
+        " xrp ", " dogecoin ", " doge ", " cardano ", " ada ",
+    )
+    crypto_predicates = (
+        " price ", " above ", " below ", " greater than ", " less than ",
+        " reach ", " dip ", " hit ",
+    )
+    if any(asset in padded for asset in crypto_assets) and any(pred in padded for pred in crypto_predicates):
+        return "crypto"
+
     return None
 
 

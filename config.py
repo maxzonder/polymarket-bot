@@ -338,6 +338,10 @@ BLACK_SWAN_MODE = ModeConfig(
     min_total_duration_hours=2.0,
     hours_to_close_null_default=48.0,
     hours_to_close_null_reject=True,   # reject markets with unknown end_date (#184)
+    # #196 audit: keep MarketScorer as a real hard gate, not just a ranking log.
+    # Conservative starting threshold; revisit with score-bucket replay once more
+    # paper outcomes accumulate.
+    min_market_score=0.25,
     # Lower prices = higher X: allocate more stake there
     stake_tiers=(
         (0.005, _BSV1_BUDGET * 0.40),  # 0.5c tier: 40¢
@@ -479,31 +483,32 @@ class BotConfig:
     max_volume_usdc: float = float("inf")  # no upper cap: hit rate rises with volume (300k-1M: 19.8%, >1M: 19.2%)
     dead_market_hours: float = 48.0    # reject markets with no trades in this many hours
 
-    # ── Category EV weights (recalibrated from black_swan=1 data, issue #180) ──
-    # Source: strict black_swan universe (4639 winners, 2051 strict losers).
+    # ── Category EV weights (recalibrated from black_swan=1 data, issue #196) ──
+    # Source: corrected strict black_swan universe excluding true 15m markets
+    # (duration_hours IS NOT NULL AND abs(duration_hours - 0.25) <= 1e-6).
     # hit_rate = winners / (winners + strict_losers) per category.
-    # avg_x from #180 analysis (2025-08-01 → 2026-04-26).
+    # avg_x from #196 analysis (2025-08-01 → 2026-05-08).
     #
-    # category      hit_rate  avg_x  weight
-    # weather        84.7%   116.9x   1.5
-    # geopolitics    83.7%    86.1x   1.5
-    # politics       77.4%   121.4x   1.4
-    # crypto         72.6%    57.6x   1.1
-    # entertainment  72.2%   148.3x   1.0  (small sample)
-    # health         n/a      52.8x   1.0  (small sample)
-    # esports        n/a       n/a    0.9  (no black_swan data)
-    # sports         64.6%    59.5x   0.5  (largest source, noisiest)
-    # tech           58.7%    85.0x   0.4
+    # category      winners  losers  hit_rate  avg_x   weight
+    # weather          470      85     84.7%   112.4x   1.5
+    # geopolitics       42       8     84.0%    85.3x   1.5  (small sample)
+    # politics         154      48     76.2%   121.0x   1.4
+    # entertainment     44      16     73.3%   136.1x   1.2  (small sample, high X)
+    # crypto          1439     584     71.1%    63.6x   1.1
+    # health             3       1     75.0%    52.8x   1.0  (tiny sample)
+    # sports          2449    1356     64.4%    60.8x   0.8  (largest source, noisy)
+    # tech              48      35     57.8%    85.3x   0.6
+    # esports          n/a     n/a       n/a      n/a   0.8  (no direct #196 data)
     category_weights: dict = field(default_factory=lambda: {
         "weather":      1.5,
         "geopolitics":  1.5,
         "politics":     1.4,
+        "entertainment":1.2,
         "crypto":       1.1,
-        "entertainment":1.0,
         "health":       1.0,
-        "esports":      0.9,
-        "sports":       0.5,
-        "tech":         0.4,
+        "sports":       0.8,
+        "tech":         0.6,
+        "esports":      0.8,
     })
 
     @property

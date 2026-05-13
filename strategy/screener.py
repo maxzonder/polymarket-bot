@@ -236,6 +236,14 @@ class Screener:
         if hours > mc.max_hours_to_close:
             _log("rejected_hours_to_close_max")
             return []
+        total_duration_hours = getattr(m, "total_duration_hours", None)
+        if (
+            mc.min_total_duration_hours > 0
+            and total_duration_hours is not None
+            and total_duration_hours < mc.min_total_duration_hours
+        ):
+            _log("rejected_total_duration_min")
+            return []
 
         # Question-keyword exclusion (e.g. weak sports subtypes).
         if mc.exclude_question_keywords:

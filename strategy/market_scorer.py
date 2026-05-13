@@ -91,6 +91,9 @@ class MarketScorer:
     """
     Computes market_score for a MarketInfo object.
 
+    For black_swan mode, pass use_black_swan_label=True so analogy cohorts use
+    feature_mart_v1_1.was_black_swan instead of the broader label_20x target.
+
     Must be initialised once (loads analogy table from feature_mart_v1_1).
     Refreshable with .refresh().
     """
@@ -134,14 +137,17 @@ class MarketScorer:
                 r[1] for r in conn.execute("PRAGMA table_info(feature_mart_v1_1)").fetchall()
             }
 
-            # good_swan_rate and loser_rate per (category, vol_bucket).
-            # In black_swan mode, swap label_20x for was_black_swan so the
-            # analogy prior matches the black_swan-only universe (issue #180).
             good_col = "was_black_swan" if self._use_black_swan_label else "label_20x"
-            # was_black_swan only added in feature_mart_v1_1 schema migration;
-            # verify presence to avoid SQL error on stale DBs.
-            if self._use_black_swan_label and "was_black_swan" not in feature_cols:
+            if good_col not in feature_cols:
+                if self._use_black_swan_label:
+                    self._analogy = {}
+                    self._analogy_yes_negrisk = {}
+                    self._ready = False
+                    conn.close()
+                    return
                 good_col = "label_20x"
+
+            # good_swan_rate and loser_rate per (category, vol_bucket).
             rows = conn.execute(f"""
                 SELECT
                     COALESCE(category, 'null') AS cat,

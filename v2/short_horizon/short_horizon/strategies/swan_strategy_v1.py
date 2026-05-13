@@ -18,6 +18,7 @@ from ..core.events import (
     TradeTick,
 )
 from ..core.models import OrderIntent, SkipDecision, TouchSignal
+from ..core.order_state import OrderState
 from ..strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 
 TIMER_SCREENER_REFRESH = "swan_screener_refresh"
@@ -123,6 +124,58 @@ class SwanStrategyV1:
     def get_active_market_ids(self) -> frozenset[str]:
         """Thread-safe: return the set of market_ids with live resting bids."""
         return frozenset(self._bids_by_market)
+
+    def hydrate_open_orders(self, rows: Iterable[dict]) -> None:
+        """Restore open resting-bid state after startup reconciliation.
+
+        The v2 live runner reconciles persisted orders before the first screener
+        refresh.  Without hydration, restarted swan runs know nothing about
+        still-open resting bids, so markets that no longer pass the screener do
+        not get canceled on the next candidate diff.
+        """
+        active_states = {
+            OrderState.ACCEPTED.value,
+            OrderState.PARTIALLY_FILLED.value,
+            OrderState.UNKNOWN.value,
+        }
+        self._resting_bids.clear()
+        self._bids_by_market.clear()
+        self._pending_place.clear()
+        self._active_candidates.clear()
+
+        for row in rows:
+            if str(row.get("state") or "") not in active_states:
+                continue
+            market_id = str(row.get("market_id") or "")
+            token_id = str(row.get("token_id") or "")
+            order_id = str(row.get("order_id") or row.get("venue_order_id") or row.get("client_order_id") or "")
+            if not market_id or not token_id or not order_id:
+                continue
+            level = float(row.get("price") or 0.0)
+            size = float(row.get("size") or 0.0)
+            notional = level * size if level > 0 and size > 0 else 0.0
+            bid = _RestingBid(
+                market_id=market_id,
+                token_id=token_id,
+                level=level,
+                order_id=order_id,
+                notional_usdc=notional,
+                placed_at_ms=self.clock.now_ms(),
+            )
+            self._resting_bids[order_id] = bid
+            self._bids_by_market.setdefault(market_id, set()).add(order_id)
+            self._active_candidates.setdefault(
+                market_id,
+                SwanCandidate(
+                    market_id=market_id,
+                    condition_id=str(row.get("condition_id") or "") or None,
+                    token_id=token_id,
+                    question=str(row.get("question") or ""),
+                    asset_slug=str(row.get("asset_slug") or "") or None,
+                    entry_levels=(level,) if level > 0 else (),
+                    notional_usdc_per_level=notional,
+                ),
+            )
 
     # ─── TouchStrategy protocol ───────────────────────────────────────────────
 

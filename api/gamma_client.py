@@ -42,6 +42,7 @@ class MarketInfo:
     neg_risk: bool = False         # negRisk flag from Gamma (4.5x higher swan_rate)
     neg_risk_group_id: Optional[str] = None  # negRiskMarketID — parent group for cluster cap
     slug: Optional[str] = None     # market slug (e.g. "epl-arsenal-vs-chelsea-2026-04-01")
+    total_duration_hours: Optional[float] = None  # market/event start → end duration when available
 
 
 def _parse_float(val) -> Optional[float]:
@@ -66,6 +67,21 @@ def _load_json_list(val) -> list:
         return json.loads(val or "[]")
     except Exception:
         return []
+
+
+def _parse_iso_ts(val) -> Optional[int]:
+    if not val:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        raw = str(val).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+    except Exception:
+        return None
 
 
 def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
@@ -103,21 +119,26 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
     # screener filters/priors use the same internal strategy buckets.
     category = infer_market_category(raw, events[0] if events and isinstance(events[0], dict) else None)
 
-    # End date
-    from datetime import datetime, timezone, timedelta
+    # Start/end date and total duration.
     end_date_ts = None
     hours_to_close = None
+    total_duration_hours = None
+    event0 = events[0] if events and isinstance(events[0], dict) else {}
+    start_date_raw = (
+        raw.get("startDate")
+        or raw.get("startDateIso")
+        or raw.get("gameStartTime")
+        or event0.get("startTime")
+        or event0.get("startDate")
+        or event0.get("eventStartTime")
+    )
+    start_date_ts = _parse_iso_ts(start_date_raw)
     end_date_raw = raw.get("endDate") or raw.get("endDateIso")
-    if end_date_raw:
-        try:
-            ed = end_date_raw.replace("Z", "+00:00")
-            dt = datetime.fromisoformat(ed)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            end_date_ts = int(dt.timestamp())
-            hours_to_close = (end_date_ts - now_ts) / 3600.0
-        except Exception:
-            pass
+    end_date_ts = _parse_iso_ts(end_date_raw)
+    if end_date_ts is not None:
+        hours_to_close = (end_date_ts - now_ts) / 3600.0
+    if start_date_ts is not None and end_date_ts is not None and end_date_ts > start_date_ts:
+        total_duration_hours = (end_date_ts - start_date_ts) / 3600.0
 
     fees_enabled = bool(raw.get("feesEnabled"))
     neg_risk = bool(raw.get("negRisk", False))
@@ -144,6 +165,7 @@ def _parse_market(raw: dict, now_ts: float) -> Optional[MarketInfo]:
         neg_risk=neg_risk,
         neg_risk_group_id=neg_risk_group_id,
         slug=(raw.get("slug") or None),
+        total_duration_hours=total_duration_hours,
     )
 
 
