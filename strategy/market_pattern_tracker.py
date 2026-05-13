@@ -25,7 +25,8 @@ import requests
 
 DATA_API_BASE = "https://data-api.polymarket.com"
 _TRADES_TIMEOUT = 15
-_CACHE_TTL_SECONDS = 1800  # re-classify every 30 min
+_CACHE_TTL_SECONDS = 1800  # re-classify mature states every 30 min
+_TRANSIENT_CACHE_TTL_SECONDS = 60  # transient prefix states mature quickly
 
 # Pattern labels
 FLOOR_ACCUMULATION    = "floor_accumulation"
@@ -47,6 +48,22 @@ _ALL_PATTERNS = frozenset({
     PENNY_DEAD, PENNY_FLOOR, PENNY_REBOUND,
     NO_PRE_HISTORY, NO_FLOOR_YET,
 })
+
+_TRANSIENT_PATTERNS = frozenset({NO_PRE_HISTORY, NO_FLOOR_YET})
+
+
+def is_transient_pattern(label: Optional[str]) -> bool:
+    """Return True for prefix states that should be rechecked soon.
+
+    These labels mean "not enough / not confirmed evidence yet", not a final
+    negative pattern.  They are safe to defer and retry, but should not be
+    cached for the same 30-minute horizon as mature labels.
+    """
+    return label in _TRANSIENT_PATTERNS
+
+
+def _state_ttl_seconds(pattern: str) -> int:
+    return _TRANSIENT_CACHE_TTL_SECONDS if is_transient_pattern(pattern) else _CACHE_TTL_SECONDS
 
 # Policy key: (pattern, category, duration_bucket); None = wildcard for that axis.
 # Lookup order in _policy_mult: (p,c,b) → (p,None,b) → (p,c,None) → (p,None,None).
@@ -232,13 +249,16 @@ class MarketPatternTracker:
         key = _cache_key(m.market_id, token_id)
         state = self._cache.get(key)
         now = time.time()
-        if state is None or (now - state.fetched_at) > _CACHE_TTL_SECONDS:
+        ttl_seconds = _state_ttl_seconds(state.pattern) if state is not None else _CACHE_TTL_SECONDS
+        if state is None or (now - state.fetched_at) > ttl_seconds:
+            force_trade_refresh = state is not None and is_transient_pattern(state.pattern)
             state = self._fetch_and_classify(
                 m,
                 now,
                 token_id=token_id,
                 outcome_name=outcome_name,
                 outcome_index=outcome_index,
+                force_trade_refresh=force_trade_refresh,
             )
             self._cache[key] = state
         return state
@@ -251,9 +271,10 @@ class MarketPatternTracker:
         token_id: Optional[str],
         outcome_name: Optional[str],
         outcome_index: Optional[int],
+        force_trade_refresh: bool = False,
     ) -> _PatternState:
         trades_state = self._trades_cache.get(m.market_id)
-        if trades_state is None or (now - trades_state.fetched_at) > _CACHE_TTL_SECONDS:
+        if force_trade_refresh or trades_state is None or (now - trades_state.fetched_at) > _CACHE_TTL_SECONDS:
             trades_state = _TradesState(
                 condition_id=m.condition_id,
                 fetched_at=now,

@@ -106,3 +106,46 @@ def test_tracker_classifies_and_scores_per_token_side(monkeypatch):
     assert tracker.get_pattern_label("m1", "YES") == mpt.FLOOR_ACCUMULATION
     assert tracker.get_pattern_label("m1", "NO") == mpt.NO_FLOOR_YET
     assert calls == ["c1"]  # raw market trades fetched once; token labels cached separately
+
+
+def test_transient_pattern_state_uses_short_ttl_and_refreshes_raw_trades(monkeypatch):
+    first = [
+        {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.50, "timestamp": 1000},
+        {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.60, "timestamp": 1010},
+        {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.70, "timestamp": 1020},
+    ]
+    second = [
+        {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.50, "timestamp": 1000},
+        {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.04, "timestamp": 1100},
+        {"asset": "YES", "outcome": "Yes", "outcomeIndex": 0, "price": 0.04, "timestamp": 1200},
+    ]
+    calls = []
+
+    def fake_fetch(condition_id: str):
+        calls.append(condition_id)
+        return first if len(calls) == 1 else second
+
+    now = [1_000.0]
+    monkeypatch.setattr(mpt.time, "time", lambda: now[0])
+    monkeypatch.setattr(mpt, "_fetch_trades", fake_fetch)
+
+    tracker = mpt.MarketPatternTracker()
+    market = SimpleNamespace(
+        market_id="m-transient",
+        condition_id="c-transient",
+        category="weather",
+        end_date_ts=1300,
+    )
+
+    assert tracker.get_pattern_mult(market, 24.0, token_id="YES", outcome_name="Yes", outcome_index=0) == 0.0
+    assert tracker.get_pattern_label("m-transient", "YES") == mpt.NO_FLOOR_YET
+    assert calls == ["c-transient"]
+
+    now[0] += 30.0
+    assert tracker.get_pattern_mult(market, 24.0, token_id="YES", outcome_name="Yes", outcome_index=0) == 0.0
+    assert calls == ["c-transient"]
+
+    now[0] += mpt._TRANSIENT_CACHE_TTL_SECONDS + 1
+    assert tracker.get_pattern_mult(market, 24.0, token_id="YES", outcome_name="Yes", outcome_index=0) == 1.5
+    assert tracker.get_pattern_label("m-transient", "YES") == mpt.FLOOR_ACCUMULATION
+    assert calls == ["c-transient", "c-transient"]

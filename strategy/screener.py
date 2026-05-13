@@ -25,7 +25,7 @@ from api.clob_client import get_orderbook
 from api.data_api import get_last_trade_ts, get_recent_trades
 from config import BotConfig
 from strategy.market_scorer import MarketScore, MarketScorer
-from strategy.market_pattern_tracker import MarketPatternTracker
+from strategy.market_pattern_tracker import MarketPatternTracker, is_transient_pattern
 from strategy.entry_levels import suggested_entry_levels
 from utils.logger import setup_logger
 from utils.paths import DATA_DIR
@@ -414,8 +414,9 @@ class Screener:
                 pattern_info = self.pattern_tracker.get_pattern_info(m.market_id, token_id)
                 pattern_label = pattern_info.label if pattern_info is not None else "unknown"
                 if pattern_mult == 0.0:
+                    pattern_outcome = "deferred_pattern" if is_transient_pattern(pattern_label) else "rejected_pattern"
                     _log(
-                        "rejected_pattern",
+                        pattern_outcome,
                         token_id=token_id,
                         price=price,
                         ms=token_ms_obj.total if token_ms_obj else None,
@@ -427,7 +428,8 @@ class Screener:
                         pattern_floor_duration_fraction=pattern_info.floor_duration_fraction if pattern_info else None,
                     )
                     logger.debug(
-                        f"Pattern gate skip: {q[:50]!r} token={token_id} outcome={outcome_name} "
+                        f"Pattern gate {'defer' if pattern_outcome == 'deferred_pattern' else 'skip'}: "
+                        f"{q[:50]!r} token={token_id} outcome={outcome_name} "
                         f"pattern={pattern_label} cat={m.category}"
                     )
                     continue

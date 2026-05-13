@@ -231,6 +231,8 @@ async def _cleanup_loop(
 
 
 _WS_UNIVERSE_INTERVAL_SECONDS = 300   # rebuild WS subscription universe every 5 min
+_WS_PATTERN_RETRY_DELAY_SECONDS = 90
+_WS_PATTERN_RETRY_MAX_ATTEMPTS = 3
 
 
 class _WsCandidateCache:
@@ -422,6 +424,8 @@ async def _ws_price_monitor_loop(
                         duration_stake_multipliers=duration_stake_multipliers,
                         candidate_cache=candidate_cache,
                         logger=logger,
+                        price_threshold=price_threshold,
+                        retry_attempt=0,
                     ),
                     name=f"ws_trigger_{token_id[:12]}",
                 )
@@ -443,6 +447,8 @@ async def _ws_trigger_screener(
     duration_stake_multipliers: tuple[tuple[float, float], ...],
     candidate_cache: _WsCandidateCache,
     logger,
+    price_threshold: float,
+    retry_attempt: int = 0,
 ) -> None:
     """Runs single-market screener evaluation after a CLOB price edge trigger."""
     if not market_id:
@@ -479,11 +485,61 @@ async def _ws_trigger_screener(
             screener._flush_screener_log(log_entries)
 
     if not candidates:
+        deferred_pattern = any(
+            len(entry) > 8 and entry[2] == token_id and entry[8] == "deferred_pattern"
+            for entry in log_entries
+        )
+        if deferred_pattern and retry_attempt < _WS_PATTERN_RETRY_MAX_ATTEMPTS:
+            next_attempt = retry_attempt + 1
+            logger.info(
+                "ws_price_trigger_deferred_pattern_retry_scheduled",
+                token_id=token_id,
+                ask=ask,
+                market_id=market_id,
+                retry_attempt=next_attempt,
+                delay_seconds=_WS_PATTERN_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(_WS_PATTERN_RETRY_DELAY_SECONDS)
+            try:
+                from api.clob_client import get_orderbook
+                orderbook = await asyncio.to_thread(get_orderbook, token_id)
+                retry_ask = orderbook.best_ask
+            except Exception:
+                retry_ask = ask
+            if retry_ask is None or retry_ask > price_threshold:
+                logger.info(
+                    "ws_price_trigger_deferred_pattern_retry_cancelled",
+                    token_id=token_id,
+                    ask=retry_ask,
+                    market_id=market_id,
+                    retry_attempt=next_attempt,
+                    reason="price_above_threshold_or_missing",
+                )
+                return
+            await _ws_trigger_screener(
+                token_id=token_id,
+                market_id=market_id,
+                side_index=side_index,
+                ask=float(retry_ask),
+                screener=screener,
+                strategy=strategy,
+                source=source,
+                clock=clock,
+                stake_usdc_per_level=stake_usdc_per_level,
+                duration_stake_multipliers=duration_stake_multipliers,
+                candidate_cache=candidate_cache,
+                logger=logger,
+                price_threshold=price_threshold,
+                retry_attempt=next_attempt,
+            )
+            return
         logger.info(
             "ws_price_trigger_no_candidates",
             token_id=token_id,
             ask=ask,
             market_id=market_id,
+            deferred_pattern=deferred_pattern,
+            retry_attempt=retry_attempt,
         )
         return
 
