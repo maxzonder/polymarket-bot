@@ -24,7 +24,7 @@ class ScreenerTotalDurationGateTests(unittest.TestCase):
             fees_enabled=False,
             end_date_ts=None,
             hours_to_close=1.0,
-            total_duration_hours=1.5,
+            total_duration_hours=0.5,
         )
         log_entries = []
 
@@ -32,6 +32,33 @@ class ScreenerTotalDurationGateTests(unittest.TestCase):
 
         self.assertEqual(candidates, [])
         self.assertEqual(log_entries[-1][8], "rejected_total_duration_min")
+
+    def test_keeps_one_hour_markets(self) -> None:
+        screener = Screener(BotConfig(mode="black_swan_mode"), market_scorer=None, skip_logging=True)
+        market = MarketInfo(
+            market_id="m-hour",
+            condition_id="c-hour",
+            question="Will the price of Ethereum be above $2,600 on May 14?",
+            category="crypto",
+            token_ids=["yes", "no"],
+            outcome_names=["Yes", "No"],
+            best_ask=0.01,
+            best_bid=0.005,
+            last_trade_price=0.01,
+            volume_usdc=100.0,
+            liquidity_usdc=50.0,
+            comment_count=0,
+            fees_enabled=False,
+            end_date_ts=None,
+            hours_to_close=1.0,
+            total_duration_hours=1.0,
+        )
+        log_entries = []
+
+        candidates = screener._evaluate_market(market, log_entries)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("passed_to_order_manager", [entry[8] for entry in log_entries])
 
     def test_parse_market_computes_total_duration_hours(self) -> None:
         from api.gamma_client import _parse_market

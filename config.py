@@ -335,7 +335,9 @@ BLACK_SWAN_MODE = ModeConfig(
     # 1.0h gate.
     min_hours_to_close=0.4,
     max_hours_to_close=168.0,
-    min_total_duration_hours=2.0,
+    # 50 min: include one-hour markets while still excluding true 15m/ultra-short
+    # markets by planned start/end duration when Gamma provides both timestamps.
+    min_total_duration_hours=50.0 / 60.0,
     hours_to_close_null_default=48.0,
     hours_to_close_null_reject=True,   # reject markets with unknown end_date (#184)
     # #196 audit: keep MarketScorer as a real hard gate, not just a ranking log.
