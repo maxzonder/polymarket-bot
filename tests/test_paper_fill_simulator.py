@@ -144,7 +144,7 @@ class PaperFillSimulatorTest(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_post_only_buy_ignores_book_cross_and_fills_as_maker_on_sell_trade(self) -> None:
+    def test_post_only_buy_fills_as_maker_on_book_cross(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "paper_post_only.sqlite3"
             store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_001", strategy_id="paper_test", mode="dry_run"))
@@ -194,10 +194,62 @@ class PaperFillSimulatorTest(unittest.TestCase):
                     execution=execution,
                 )
 
-                self.assertEqual(book_fills, [])
-                self.assertEqual(len(trade_fills), 1)
-                self.assertEqual(trade_fills[0].liquidity_role.value, "maker")
-                self.assertAlmostEqual(trade_fills[0].fill_size, 6.0)
+                self.assertEqual(len(book_fills), 1)
+                self.assertEqual(book_fills[0].liquidity_role.value, "maker")
+                self.assertAlmostEqual(book_fills[0].fill_size, 20.0)
+                self.assertAlmostEqual(book_fills[0].fill_price, 0.05)
+                self.assertEqual(trade_fills, [])
+            finally:
+                store.close()
+
+    def test_post_only_book_cross_consumes_visible_depth_by_best_bid_priority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_post_only_book_queue.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_book_queue_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                for idx, price in enumerate((0.01, 0.03, 0.05)):
+                    store.insert_order(
+                        order_id=f"maker_buy_book_{idx}",
+                        market_id="m1",
+                        token_id="tok_yes",
+                        side="BUY",
+                        price=price,
+                        size=10.0,
+                        state=OrderState.ACCEPTED,
+                        client_order_id=f"maker_buy_book_{idx}",
+                        intent_created_at_ms=225_000 + idx,
+                        last_state_change_at_ms=225_001 + idx,
+                        remaining_size=10.0,
+                        venue_order_status="accepted",
+                        post_only=True,
+                    )
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                simulator = PaperFillSimulator()
+
+                fills = simulator.on_book_update(
+                    BookUpdate(
+                        event_time_ms=226_000,
+                        ingest_time_ms=226_010,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.04,
+                        best_ask=0.01,
+                        ask_levels=(BookLevel(price=0.01, size=15.0),),
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(len(fills), 2)
+                self.assertEqual(fills[0].order_id, "maker_buy_book_2")
+                self.assertEqual(fills[1].order_id, "maker_buy_book_1")
+                self.assertAlmostEqual(fills[0].fill_size, 10.0)
+                self.assertAlmostEqual(fills[1].fill_size, 5.0)
+                self.assertAlmostEqual(fills[0].fill_price, 0.05)
+                self.assertAlmostEqual(fills[1].fill_price, 0.03)
+                self.assertEqual(store.load_order("maker_buy_book_2")["state"], OrderState.FILLED.value)
+                self.assertEqual(store.load_order("maker_buy_book_1")["state"], OrderState.PARTIALLY_FILLED.value)
+                self.assertEqual(store.load_order("maker_buy_book_0")["state"], OrderState.ACCEPTED.value)
             finally:
                 store.close()
 

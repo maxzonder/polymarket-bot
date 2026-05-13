@@ -22,6 +22,7 @@ class PaperFillModelConfig:
 
     model: str = "crossing_taker"
     fill_without_visible_depth: bool = True
+    post_only_book_cross_fills: bool = True
     source_prefix: str = "replay"
 
 
@@ -43,21 +44,21 @@ class PaperFillSimulator:
         if self.config.model == "none":
             return []
         fills = []
-        for order in self._matching_orders(event.market_id, event.token_id, execution=execution):
+        matching_orders = self._matching_orders(event.market_id, event.token_id, execution=execution)
+        if self.config.post_only_book_cross_fills:
+            for request in self._post_only_book_fill_requests(matching_orders, event):
+                fill = self._apply_fill_request(request, execution=execution)
+                if fill is not None:
+                    fills.append(fill)
+        for order in matching_orders:
+            if _is_post_only(order):
+                continue
             request = self._fill_request_from_book(order, event)
             if request is None:
                 continue
-            key = (request.order_id, request.event_time_ms, request.source, request.fill_id or "")
-            if key in self._applied_keys:
-                continue
-            try:
-                fill = execution.apply_fill(request)
-            except ExecutionTransitionError:
-                continue
-            if fill is None:
-                continue
-            self._applied_keys.add(key)
-            fills.append(fill)
+            fill = self._apply_fill_request(request, execution=execution)
+            if fill is not None:
+                fills.append(fill)
         return fills
 
     def on_trade_tick(self, event: TradeTick, *, execution: ExecutionEngine):
@@ -73,19 +74,25 @@ class PaperFillSimulator:
             request = self._fill_request_from_trade(order, event, max_fill_size=remaining_trade_size)
             if request is None:
                 continue
-            key = (request.order_id, request.event_time_ms, request.source, request.fill_id or "")
-            if key in self._applied_keys:
-                continue
-            try:
-                fill = execution.apply_fill(request)
-            except ExecutionTransitionError:
-                continue
+            fill = self._apply_fill_request(request, execution=execution)
             if fill is None:
                 continue
-            self._applied_keys.add(key)
             remaining_trade_size = max(remaining_trade_size - float(fill.fill_size), 0.0)
             fills.append(fill)
         return fills
+
+    def _apply_fill_request(self, request: SyntheticFillRequest, *, execution: ExecutionEngine):
+        key = (request.order_id, request.event_time_ms, request.source, request.fill_id or "")
+        if key in self._applied_keys:
+            return None
+        try:
+            fill = execution.apply_fill(request)
+        except ExecutionTransitionError:
+            return None
+        if fill is None:
+            return None
+        self._applied_keys.add(key)
+        return fill
 
     @staticmethod
     def _matching_orders(market_id: str, token_id: str, *, execution: ExecutionEngine) -> list[dict]:
@@ -105,8 +112,6 @@ class PaperFillSimulator:
         return orders
 
     def _fill_request_from_book(self, order: dict, event: BookUpdate) -> SyntheticFillRequest | None:
-        if _is_post_only(order):
-            return None
         side = str(order.get("side") or "").upper()
         limit_price = float(order.get("price") or 0.0)
         remaining_size = float(order.get("remaining_size") or order.get("size") or 0.0)
@@ -143,6 +148,58 @@ class PaperFillSimulator:
             liquidity_role="taker",
             fill_id=_book_fill_id(order=order, event=event, fill_size=fill_size, fill_price=fill_price, source=self.config.source_prefix),
         )
+
+    def _post_only_book_fill_requests(self, orders: list[dict], event: BookUpdate) -> list[SyntheticFillRequest]:
+        """Model shadow maker fills from crossed book snapshots.
+
+        Real post-only orders rest on the bid/ask.  In dry-run they are absent
+        from the venue book, so waiting only for trade prints at the exact limit
+        price undercounts fills: the public book can later show contra liquidity
+        crossing our shadow limit.  For those snapshots, consume visible contra
+        depth once, price fills at the resting limit, and allocate priority by
+        best price then order creation time.
+        """
+        post_only_orders = [order for order in orders if _is_post_only(order)]
+        if not post_only_orders:
+            return []
+
+        requests: list[SyntheticFillRequest] = []
+        buy_levels = [[float(level.price), max(float(level.size), 0.0)] for level in event.ask_levels]
+        sell_levels = [[float(level.price), max(float(level.size), 0.0)] for level in event.bid_levels]
+
+        buy_orders = [order for order in post_only_orders if str(order.get("side") or "").upper() == "BUY"]
+        buy_orders.sort(key=lambda row: (-float(row.get("price") or 0.0), _order_created_sort_key(row)))
+        for order in buy_orders:
+            limit_price = float(order.get("price") or 0.0)
+            if event.best_ask is None or float(event.best_ask) > limit_price + 1e-12:
+                continue
+            fill_size = _consume_visible_cross_depth(
+                levels=buy_levels,
+                limit_price=limit_price,
+                remaining_size=float(order.get("remaining_size") or order.get("size") or 0.0),
+                side="BUY",
+            )
+            if fill_size <= 1e-12:
+                continue
+            requests.append(_book_synthetic_request(order=order, event=event, fill_size=fill_size, fill_price=limit_price, source=self.config.source_prefix))
+
+        sell_orders = [order for order in post_only_orders if str(order.get("side") or "").upper() == "SELL"]
+        sell_orders.sort(key=lambda row: (float(row.get("price") or 0.0), _order_created_sort_key(row)))
+        for order in sell_orders:
+            limit_price = float(order.get("price") or 0.0)
+            if event.best_bid is None or float(event.best_bid) < limit_price - 1e-12:
+                continue
+            fill_size = _consume_visible_cross_depth(
+                levels=sell_levels,
+                limit_price=limit_price,
+                remaining_size=float(order.get("remaining_size") or order.get("size") or 0.0),
+                side="SELL",
+            )
+            if fill_size <= 1e-12:
+                continue
+            requests.append(_book_synthetic_request(order=order, event=event, fill_size=fill_size, fill_price=limit_price, source=self.config.source_prefix))
+
+        return requests
 
     def _fill_request_from_trade(self, order: dict, event: TradeTick, *, max_fill_size: float | None = None) -> SyntheticFillRequest | None:
         side = str(order.get("side") or "").upper()
@@ -226,6 +283,55 @@ def _is_post_only(order: dict) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}
     return bool(value)
+
+
+def _order_created_sort_key(order: dict) -> str:
+    return str(order.get("intent_created_at") or order.get("created_at") or order.get("order_id") or "")
+
+
+def _consume_visible_cross_depth(
+    *,
+    levels: list[list[float]],
+    limit_price: float,
+    remaining_size: float,
+    side: str,
+) -> float:
+    if remaining_size <= 1e-12:
+        return 0.0
+    if side == "BUY":
+        levels.sort(key=lambda level: level[0])
+        eligible = lambda price: price <= limit_price + 1e-12
+    elif side == "SELL":
+        levels.sort(key=lambda level: level[0], reverse=True)
+        eligible = lambda price: price >= limit_price - 1e-12
+    else:
+        return 0.0
+
+    fill_size = 0.0
+    for level in levels:
+        price, available = level
+        if not eligible(float(price)):
+            continue
+        take = min(remaining_size - fill_size, max(float(available), 0.0))
+        if take <= 0:
+            continue
+        level[1] = max(float(available) - take, 0.0)
+        fill_size += take
+        if fill_size >= remaining_size - 1e-12:
+            break
+    return fill_size
+
+
+def _book_synthetic_request(*, order: dict, event: BookUpdate, fill_size: float, fill_price: float, source: str) -> SyntheticFillRequest:
+    return SyntheticFillRequest(
+        order_id=str(order["order_id"]),
+        event_time_ms=int(event.event_time_ms),
+        fill_size=fill_size,
+        fill_price=fill_price,
+        source=source,
+        liquidity_role="maker",
+        fill_id=_book_fill_id(order=order, event=event, fill_size=fill_size, fill_price=fill_price, source=source),
+    )
 
 
 def _trade_fill_id(*, order: dict, event: TradeTick, fill_size: float, source: str) -> str:
