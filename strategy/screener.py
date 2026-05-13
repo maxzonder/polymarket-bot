@@ -33,12 +33,30 @@ from utils.telegram import send_message as tg_alert
 
 logger = setup_logger("screener")
 
+_SCREENER_LOG_PATTERN_COLUMNS = {
+    "pattern_label": "TEXT",
+    "pattern_mult": "REAL",
+    "pattern_trade_count": "INTEGER",
+    "pattern_observed_lifecycle_fraction": "REAL",
+    "pattern_first_floor_fraction": "REAL",
+    "pattern_floor_duration_fraction": "REAL",
+}
+
 _SCREENER_LOG_INSERT = """
     INSERT INTO screener_log
         (scanned_at, market_id, token_id, question, category,
-         current_price, hours_to_close, volume_usdc, outcome, candidate_id, market_score)
-    VALUES (?,?,?,?,?, ?,?,?,?,?, ?)
+         current_price, hours_to_close, volume_usdc, outcome, candidate_id, market_score,
+         pattern_label, pattern_mult, pattern_trade_count, pattern_observed_lifecycle_fraction,
+         pattern_first_floor_fraction, pattern_floor_duration_fraction)
+    VALUES (?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?, ?)
 """
+
+
+def _ensure_screener_log_pattern_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(screener_log)").fetchall()}
+    for name, col_type in _SCREENER_LOG_PATTERN_COLUMNS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE screener_log ADD COLUMN {name} {col_type}")
 
 
 @dataclass
@@ -184,9 +202,16 @@ class Screener:
                     volume_usdc REAL,
                     outcome     TEXT,
                     candidate_id TEXT,
-                    market_score REAL
+                    market_score REAL,
+                    pattern_label TEXT,
+                    pattern_mult REAL,
+                    pattern_trade_count INTEGER,
+                    pattern_observed_lifecycle_fraction REAL,
+                    pattern_first_floor_fraction REAL,
+                    pattern_floor_duration_fraction REAL
                 )
             """)
+            _ensure_screener_log_pattern_columns(conn)
             conn.executemany(_SCREENER_LOG_INSERT, entries)
             conn.commit()
             conn.close()
@@ -210,7 +235,19 @@ class Screener:
         mc = self.config.mode_config
         hours: float = m.hours_to_close if m.hours_to_close is not None else mc.hours_to_close_null_default
 
-        def _log(outcome: str, token_id=None, price=None, candidate_id=None, ms=None) -> None:
+        def _log(
+            outcome: str,
+            token_id=None,
+            price=None,
+            candidate_id=None,
+            ms=None,
+            pattern_label=None,
+            pattern_mult=None,
+            pattern_trade_count=None,
+            pattern_observed_lifecycle_fraction=None,
+            pattern_first_floor_fraction=None,
+            pattern_floor_duration_fraction=None,
+        ) -> None:
             log_entries.append((
                 now,
                 m.market_id,
@@ -223,6 +260,12 @@ class Screener:
                 outcome,
                 candidate_id,
                 ms,
+                pattern_label,
+                pattern_mult,
+                pattern_trade_count,
+                pattern_observed_lifecycle_fraction,
+                pattern_first_floor_fraction,
+                pattern_floor_duration_fraction,
             ))
 
         if m.hours_to_close is None:
@@ -359,6 +402,7 @@ class Screener:
             # category combo), but do not reject the opposite side by accident.
             pattern_mult = 1.0
             pattern_label = "unknown"
+            pattern_info = None
             if self.pattern_tracker is not None:
                 pattern_mult = self.pattern_tracker.get_pattern_mult(
                     m,
@@ -367,9 +411,21 @@ class Screener:
                     outcome_name=outcome_name,
                     outcome_index=i,
                 )
-                pattern_label = self.pattern_tracker.get_pattern_label(m.market_id, token_id) or "unknown"
+                pattern_info = self.pattern_tracker.get_pattern_info(m.market_id, token_id)
+                pattern_label = pattern_info.label if pattern_info is not None else "unknown"
                 if pattern_mult == 0.0:
-                    _log("rejected_pattern", token_id=token_id, price=price, ms=token_ms_obj.total if token_ms_obj else None)
+                    _log(
+                        "rejected_pattern",
+                        token_id=token_id,
+                        price=price,
+                        ms=token_ms_obj.total if token_ms_obj else None,
+                        pattern_label=pattern_label,
+                        pattern_mult=pattern_mult,
+                        pattern_trade_count=pattern_info.trade_count if pattern_info else None,
+                        pattern_observed_lifecycle_fraction=pattern_info.observed_lifecycle_fraction if pattern_info else None,
+                        pattern_first_floor_fraction=pattern_info.first_floor_fraction if pattern_info else None,
+                        pattern_floor_duration_fraction=pattern_info.floor_duration_fraction if pattern_info else None,
+                    )
                     logger.debug(
                         f"Pattern gate skip: {q[:50]!r} token={token_id} outcome={outcome_name} "
                         f"pattern={pattern_label} cat={m.category}"
@@ -392,8 +448,19 @@ class Screener:
 
             ms_score = token_ms_obj.total if token_ms_obj else None
             candidate_id = str(uuid.uuid4())
-            _log("passed_to_order_manager", token_id=token_id, price=price,
-                 candidate_id=candidate_id, ms=ms_score)
+            _log(
+                "passed_to_order_manager",
+                token_id=token_id,
+                price=price,
+                candidate_id=candidate_id,
+                ms=ms_score,
+                pattern_label=pattern_label if self.pattern_tracker is not None else None,
+                pattern_mult=pattern_mult if self.pattern_tracker is not None else None,
+                pattern_trade_count=pattern_info.trade_count if pattern_info else None,
+                pattern_observed_lifecycle_fraction=pattern_info.observed_lifecycle_fraction if pattern_info else None,
+                pattern_first_floor_fraction=pattern_info.first_floor_fraction if pattern_info else None,
+                pattern_floor_duration_fraction=pattern_info.floor_duration_fraction if pattern_info else None,
+            )
 
             boost_info = f" boost={group_boost:.2f}" if group_boost != 1.0 else ""
             neg_risk_info = f" [neg-risk grp={m.neg_risk_group_id[:12]}]" if m.neg_risk_group_id else ""

@@ -116,6 +116,10 @@ class _PatternState:
     pattern: str      # label only; mult is recomputed live (hours change each scan)
     fetched_at: float
     trade_count: int
+    observed_lifecycle_fraction: Optional[float]
+    first_floor_fraction: Optional[float]
+    floor_duration_fraction: Optional[float]
+    last_price: Optional[float]
 
 
 @dataclass
@@ -123,6 +127,16 @@ class _TradesState:
     condition_id: str
     fetched_at: float
     trades: list[dict]
+
+
+@dataclass(frozen=True)
+class PatternInfo:
+    label: str
+    trade_count: int
+    observed_lifecycle_fraction: Optional[float]
+    first_floor_fraction: Optional[float]
+    floor_duration_fraction: Optional[float]
+    last_price: Optional[float]
 
 
 class MarketPatternTracker:
@@ -169,6 +183,19 @@ class MarketPatternTracker:
         state = self._cache.get(_cache_key(market_id, token_id))
         return state.pattern if state else None
 
+    def get_pattern_info(self, market_id: str, token_id: Optional[str] = None) -> Optional[PatternInfo]:
+        state = self._cache.get(_cache_key(market_id, token_id))
+        if state is None:
+            return None
+        return PatternInfo(
+            label=state.pattern,
+            trade_count=state.trade_count,
+            observed_lifecycle_fraction=state.observed_lifecycle_fraction,
+            first_floor_fraction=state.first_floor_fraction,
+            floor_duration_fraction=state.floor_duration_fraction,
+            last_price=state.last_price,
+        )
+
     def _get_state(
         self,
         m,
@@ -214,15 +241,19 @@ class MarketPatternTracker:
             outcome_name=outcome_name,
             outcome_index=outcome_index,
         )
-        pattern = _classify(token_trades, m.end_date_ts)
+        details = _classify_details(token_trades, m.end_date_ts)
         return _PatternState(
             condition_id=m.condition_id,
             token_id=str(token_id) if token_id is not None else None,
             outcome_name=outcome_name,
             outcome_index=outcome_index,
-            pattern=pattern,
+            pattern=details.label,
             fetched_at=now,
-            trade_count=len(token_trades),
+            trade_count=details.trade_count,
+            observed_lifecycle_fraction=details.observed_lifecycle_fraction,
+            first_floor_fraction=details.first_floor_fraction,
+            floor_duration_fraction=details.floor_duration_fraction,
+            last_price=details.last_price,
         )
 
 
@@ -313,8 +344,12 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
     Classify price-action pattern from chronological trade history.
     Returns one of the 8 pattern label constants.
     """
+    return _classify_details(trades, end_date_ts).label
+
+
+def _classify_details(trades: list[dict], end_date_ts: Optional[int]) -> PatternInfo:
     if len(trades) < 3:
-        return NO_PRE_HISTORY
+        return PatternInfo(NO_PRE_HISTORY, len(trades), None, None, None, None)
 
     prices: list[float] = []
     timestamps: list[float] = []
@@ -326,7 +361,7 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
             continue
 
     if len(prices) < 3:
-        return NO_PRE_HISTORY
+        return PatternInfo(NO_PRE_HISTORY, len(prices), None, None, None, prices[-1] if prices else None)
 
     start_ts = timestamps[0]
     if end_date_ts is not None and float(end_date_ts) > start_ts:
@@ -339,28 +374,40 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
     def lf(ts: float) -> float:
         return max(0.0, min(1.0, (ts - start_ts) / span))
 
+    observed_lifecycle_fraction = lf(timestamps[-1])
+    last_price = prices[-1]
+
+    def info(label: str, first_floor_fraction=None, floor_duration_fraction=None) -> PatternInfo:
+        return PatternInfo(
+            label=label,
+            trade_count=len(prices),
+            observed_lifecycle_fraction=observed_lifecycle_fraction,
+            first_floor_fraction=first_floor_fraction,
+            floor_duration_fraction=floor_duration_fraction,
+            last_price=last_price,
+        )
+
     # ── 1. Penny touch: any price ≤ 0.02 ─────────────────────────────────────
     if any(p <= 0.02 for p in prices):
-        return PENNY_FLOOR_TOUCH
+        return info(PENNY_FLOOR_TOUCH)
 
     # ── 2. No floor yet: price never reached ≤ 0.05 ──────────────────────────
     floor_indices = [i for i, p in enumerate(prices) if p <= 0.05]
     if not floor_indices:
-        return NO_FLOOR_YET
+        return info(NO_FLOOR_YET)
 
     first_floor_idx = floor_indices[0]
     first_floor_frac = lf(timestamps[first_floor_idx])
     last_floor_frac = lf(timestamps[floor_indices[-1]])
     floor_duration_frac = last_floor_frac - first_floor_frac
-    last_price = prices[-1]
 
     # ── 3. Wick floor touch: brief dip that recovered ────────────────────────
     if floor_duration_frac < 0.10 and last_price > 0.08:
-        return WICK_FLOOR_TOUCH
+        return info(WICK_FLOOR_TOUCH, first_floor_frac, floor_duration_frac)
 
     # ── 4. Sudden collapse: floor first reached in last 20% of lifecycle ──────
     if first_floor_frac >= 0.80:
-        return SUDDEN_COLLAPSE
+        return info(SUDDEN_COLLAPSE, first_floor_frac, floor_duration_frac)
 
     # ── 5. Grind down: monotone bleed across >60% of market life ─────────────
     pre_floor_prices = prices[: first_floor_idx + 1]
@@ -372,7 +419,7 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
             if non_zero:
                 down_frac = sum(1 for mv in non_zero if mv < 0) / len(non_zero)
                 if down_frac >= 0.65:
-                    return GRIND_DOWN_TO_FLOOR
+                    return info(GRIND_DOWN_TO_FLOOR, first_floor_frac, floor_duration_frac)
 
     # ── 6. Chop then floor: high pre-floor variance followed by floor ─────────
     if len(pre_floor_prices) >= 4 and floor_duration_frac > 0.15:
@@ -380,10 +427,10 @@ def _classify(trades: list[dict], end_date_ts: Optional[int]) -> str:
         variance = sum((p - mean_p) ** 2 for p in pre_floor_prices) / len(pre_floor_prices)
         std_p = variance ** 0.5
         if std_p > 0.10:
-            return CHOP_THEN_FLOOR
+            return info(CHOP_THEN_FLOOR, first_floor_frac, floor_duration_frac)
 
     # ── 7. Floor accumulation: default for sustained floor residence ──────────
-    return FLOOR_ACCUMULATION
+    return info(FLOOR_ACCUMULATION, first_floor_frac, floor_duration_frac)
 
 
 # ── Policy lookup ─────────────────────────────────────────────────────────────
