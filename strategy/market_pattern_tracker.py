@@ -110,49 +110,119 @@ _POLICY: dict[tuple[str, Optional[str], Optional[str]], float] = {
 @dataclass
 class _PatternState:
     condition_id: str
+    token_id: Optional[str]
+    outcome_name: Optional[str]
+    outcome_index: Optional[int]
     pattern: str      # label only; mult is recomputed live (hours change each scan)
     fetched_at: float
     trade_count: int
 
 
+@dataclass
+class _TradesState:
+    condition_id: str
+    fetched_at: float
+    trades: list[dict]
+
+
 class MarketPatternTracker:
     """
     Stateful component that fetches trade history once per market and classifies
-    its price-action pattern.  The pattern label is cached; the multiplier is
-    recomputed on each call using the current hours_to_close so that the
-    duration bucket reflects the actual remaining time.
+    token-side price-action patterns.  The pattern label is cached per
+    (market_id, token_id); the multiplier is recomputed on each call using the
+    current hours_to_close so that the duration bucket reflects the actual
+    remaining time.
     """
 
     def __init__(self) -> None:
-        self._cache: dict[str, _PatternState] = {}
+        self._cache: dict[tuple[str, str], _PatternState] = {}
+        self._trades_cache: dict[str, _TradesState] = {}
 
-    def get_pattern_mult(self, m, hours: float) -> float:
+    def get_pattern_mult(
+        self,
+        m,
+        hours: float,
+        *,
+        token_id: Optional[str] = None,
+        outcome_name: Optional[str] = None,
+        outcome_index: Optional[int] = None,
+    ) -> float:
         """
-        Return the pattern multiplier (0.0 = skip, <1.0 = reduce, >1.0 = boost).
-        Pattern label is fetched/cached for 30 min; mult is looked up fresh each
-        call using current hours so the duration bucket stays accurate.
+        Return the token-side pattern multiplier (0.0 = skip, <1.0 = reduce,
+        >1.0 = boost). Pattern labels are fetched/cached for 30 min per
+        (market_id, token_id); mult is looked up fresh each call using current
+        hours so the duration bucket stays accurate.
+
         m must have .market_id, .condition_id, .category, .end_date_ts.
+        token_id/outcome_* should identify the candidate side being evaluated.
         """
-        state = self._cache.get(m.market_id)
-        now = time.time()
-        if state is None or (now - state.fetched_at) > _CACHE_TTL_SECONDS:
-            state = self._fetch_and_classify(m, now)
-            self._cache[m.market_id] = state
+        state = self._get_state(
+            m,
+            token_id=token_id,
+            outcome_name=outcome_name,
+            outcome_index=outcome_index,
+        )
         bucket = _duration_bucket(hours)
         return _policy_mult(state.pattern, m.category, bucket)
 
-    def get_pattern_label(self, market_id: str) -> Optional[str]:
-        state = self._cache.get(market_id)
+    def get_pattern_label(self, market_id: str, token_id: Optional[str] = None) -> Optional[str]:
+        state = self._cache.get(_cache_key(market_id, token_id))
         return state.pattern if state else None
 
-    def _fetch_and_classify(self, m, now: float) -> _PatternState:
-        trades = _fetch_trades(m.condition_id)
-        pattern = _classify(trades, m.end_date_ts)
+    def _get_state(
+        self,
+        m,
+        *,
+        token_id: Optional[str],
+        outcome_name: Optional[str],
+        outcome_index: Optional[int],
+    ) -> _PatternState:
+        key = _cache_key(m.market_id, token_id)
+        state = self._cache.get(key)
+        now = time.time()
+        if state is None or (now - state.fetched_at) > _CACHE_TTL_SECONDS:
+            state = self._fetch_and_classify(
+                m,
+                now,
+                token_id=token_id,
+                outcome_name=outcome_name,
+                outcome_index=outcome_index,
+            )
+            self._cache[key] = state
+        return state
+
+    def _fetch_and_classify(
+        self,
+        m,
+        now: float,
+        *,
+        token_id: Optional[str],
+        outcome_name: Optional[str],
+        outcome_index: Optional[int],
+    ) -> _PatternState:
+        trades_state = self._trades_cache.get(m.market_id)
+        if trades_state is None or (now - trades_state.fetched_at) > _CACHE_TTL_SECONDS:
+            trades_state = _TradesState(
+                condition_id=m.condition_id,
+                fetched_at=now,
+                trades=_fetch_trades(m.condition_id),
+            )
+            self._trades_cache[m.market_id] = trades_state
+        token_trades = _filter_token_trades(
+            trades_state.trades,
+            token_id=token_id,
+            outcome_name=outcome_name,
+            outcome_index=outcome_index,
+        )
+        pattern = _classify(token_trades, m.end_date_ts)
         return _PatternState(
             condition_id=m.condition_id,
+            token_id=str(token_id) if token_id is not None else None,
+            outcome_name=outcome_name,
+            outcome_index=outcome_index,
             pattern=pattern,
             fetched_at=now,
-            trade_count=len(trades),
+            trade_count=len(token_trades),
         )
 
 
@@ -190,6 +260,50 @@ def _fetch_trades(condition_id: str) -> list[dict]:
         return data
     except Exception:
         return []
+
+
+def _cache_key(market_id: str, token_id: Optional[str]) -> tuple[str, str]:
+    return (str(market_id), str(token_id) if token_id is not None else "__market__")
+
+
+def _filter_token_trades(
+    trades: list[dict],
+    *,
+    token_id: Optional[str],
+    outcome_name: Optional[str],
+    outcome_index: Optional[int],
+) -> list[dict]:
+    """Filter Data API trade rows to the candidate token/outcome side.
+
+    Polymarket Data API rows normally carry `asset` (CLOB token id),
+    `outcomeIndex`, and `outcome`.  Prefer the exact token id, but keep the
+    outcome fallbacks so fixtures/older payloads still classify the intended
+    side instead of mixing YES/NO prices into one market-level pattern.
+    """
+    if token_id is None and outcome_name is None and outcome_index is None:
+        return list(trades)
+
+    token_str = str(token_id) if token_id is not None else None
+    outcome_norm = outcome_name.strip().lower() if isinstance(outcome_name, str) else None
+    out: list[dict] = []
+    for trade in trades:
+        asset = trade.get("asset") or trade.get("token_id") or trade.get("tokenId")
+        if token_str is not None and asset is not None and str(asset) == token_str:
+            out.append(trade)
+            continue
+        if outcome_index is not None:
+            try:
+                if int(trade.get("outcomeIndex")) == int(outcome_index):
+                    out.append(trade)
+                    continue
+            except (TypeError, ValueError):
+                pass
+        if outcome_norm is not None:
+            raw_outcome = trade.get("outcome")
+            if isinstance(raw_outcome, str) and raw_outcome.strip().lower() == outcome_norm:
+                out.append(trade)
+                continue
+    return out
 
 
 # ── Pattern classification ────────────────────────────────────────────────────

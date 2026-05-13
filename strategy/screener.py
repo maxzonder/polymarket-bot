@@ -304,19 +304,6 @@ class Screener:
                 _log("rejected_dead_market", ms=ms_obj.total if ms_obj else None)
                 return []
 
-        # Pattern gate (Phase E): fetch trade history, classify price-action pattern.
-        # mult == 0.0 means skip entirely (grind_down, no_floor_yet, bad category combo).
-        pattern_mult = 1.0
-        if self.pattern_tracker is not None:
-            pattern_mult = self.pattern_tracker.get_pattern_mult(m, hours)
-            pattern_label = self.pattern_tracker.get_pattern_label(m.market_id) or "unknown"
-            if pattern_mult == 0.0:
-                _log("rejected_pattern", ms=ms_obj.total if ms_obj else None)
-                logger.debug(
-                    f"Pattern gate skip: {q[:50]!r} pattern={pattern_label} cat={m.category}"
-                )
-                return []
-
         candidates: list[EntryCandidate] = []
 
         # Each token (YES, NO) is evaluated separately
@@ -367,6 +354,28 @@ class Screener:
                 _log("rejected_market_score", token_id=token_id, ms=token_ms_obj.total)
                 continue
 
+            # Pattern gate (Phase E): classify only this candidate token side.
+            # mult == 0.0 means skip this token (grind_down, no_floor_yet, bad
+            # category combo), but do not reject the opposite side by accident.
+            pattern_mult = 1.0
+            pattern_label = "unknown"
+            if self.pattern_tracker is not None:
+                pattern_mult = self.pattern_tracker.get_pattern_mult(
+                    m,
+                    hours,
+                    token_id=token_id,
+                    outcome_name=outcome_name,
+                    outcome_index=i,
+                )
+                pattern_label = self.pattern_tracker.get_pattern_label(m.market_id, token_id) or "unknown"
+                if pattern_mult == 0.0:
+                    _log("rejected_pattern", token_id=token_id, price=price, ms=token_ms_obj.total if token_ms_obj else None)
+                    logger.debug(
+                        f"Pattern gate skip: {q[:50]!r} token={token_id} outcome={outcome_name} "
+                        f"pattern={pattern_label} cat={m.category}"
+                    )
+                    continue
+
             total_score = self._compute_total_score(m, token_ms_obj, hours=hours) * group_boost * pattern_mult
 
             # Entry tiers are MAX acceptable prices, not strictly-below-current bids.
@@ -391,8 +400,7 @@ class Screener:
             ms_str = f"{ms_score:.3f}" if ms_score is not None else "N/A"
             pat_info = ""
             if self.pattern_tracker is not None:
-                _pl = self.pattern_tracker.get_pattern_label(m.market_id) or "unknown"
-                pat_info = f" pat={_pl}({pattern_mult:.2f})"
+                pat_info = f" pat={pattern_label}({pattern_mult:.2f})"
             logger.info(
                 f"Candidate: {(m.question or '')[:60]!r} | "
                 f"{outcome_name} @ ${price:.4f} | "
