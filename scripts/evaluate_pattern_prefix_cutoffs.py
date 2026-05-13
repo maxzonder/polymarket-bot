@@ -198,29 +198,20 @@ def build_prefix_rows(
     rows: list[PrefixRow] = []
     skipped_no_tape = 0
     try:
-        conn.execute("CREATE TEMP TABLE wanted_tokens(token_id TEXT PRIMARY KEY) WITHOUT ROWID")
-        conn.executemany("INSERT INTO wanted_tokens(token_id) VALUES (?)", [(token_id,) for token_id in metas])
-        current_token_id: str | None = None
-        token_trades: list[TradePoint] = []
-        for row in conn.execute(
-            """
-            SELECT t.timestamp, t.token_id, t.price, t.size
-            FROM wanted_tokens w
-            JOIN tape t INDEXED BY idx_tape_token_ts ON t.token_id = w.token_id
-            ORDER BY t.token_id, t.timestamp, t.source_file_id, t.seq
-            """
-        ):
-            token_id = str(row["token_id"])
-            if token_id not in metas:
-                continue
-            if current_token_id is None:
-                current_token_id = token_id
-            elif token_id != current_token_id:
-                skipped_no_tape += flush_token(current_token_id, token_trades, metas, fractions, entry_price_max, rows)
-                token_trades = []
-                current_token_id = token_id
-            token_trades.append(TradePoint(timestamp=int(row["timestamp"]), price=float(row["price"]), size=float(row["size"] or 0.0)))
-        skipped_no_tape += flush_token(current_token_id, token_trades, metas, fractions, entry_price_max, rows)
+        for token_id in metas:
+            token_trades = [
+                TradePoint(timestamp=int(row["timestamp"]), price=float(row["price"]), size=float(row["size"] or 0.0))
+                for row in conn.execute(
+                    """
+                    SELECT timestamp, price, size
+                    FROM tape INDEXED BY idx_tape_token_ts
+                    WHERE token_id=?
+                    ORDER BY timestamp, source_file_id, seq
+                    """,
+                    (token_id,),
+                )
+            ]
+            skipped_no_tape += flush_token(token_id, token_trades, metas, fractions, entry_price_max, rows)
     finally:
         conn.close()
     return rows, skipped_no_tape
