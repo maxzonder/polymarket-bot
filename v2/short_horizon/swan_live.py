@@ -905,7 +905,7 @@ async def run_swan_live(
     run_id = run_id or f"{strategy_id}_{uuid.uuid4().hex[:12]}"
 
     configure_logging()
-    logger = get_logger("swan_live", run_id=run_id, strategy=strategy_name)
+    logger = get_logger("short_horizon.swan_live", run_id=run_id, strategy=strategy_name)
     logger.info("swan_live_starting", execution_mode=resolved_mode.value, db_path=str(db_path), strategy=strategy_name)
 
     clock = SystemClock()
