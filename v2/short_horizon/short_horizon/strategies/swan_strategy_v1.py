@@ -113,6 +113,13 @@ class SwanStrategyV1:
         self._pending_place: dict[str, _RestingBid] = {}          # intent_id → bid (pre-accept)
         self._market_meta: dict[str, MarketStateUpdate] = {}
         self._positions: dict[str, float] = {}                    # token_id → filled qty
+        # Cash/risk accounting for resting-bid ladders.  A natural live trader
+        # reserves cash for open bids and consumes cash when a bid fills; a
+        # filled entry level should not be re-opened on every screener refresh
+        # just because the token is still cheap.  Without these guards paper can
+        # churn one-dollar bids into tens of thousands of synthetic fills.
+        self._filled_buy_notional_usdc: float = 0.0
+        self._completed_entry_levels: set[tuple[str, str, float]] = set()
 
     # ─── External API (called from screener thread) ──────────────────────────
 
@@ -142,18 +149,39 @@ class SwanStrategyV1:
         self._bids_by_market.clear()
         self._pending_place.clear()
         self._active_candidates.clear()
+        self._filled_buy_notional_usdc = 0.0
+        self._completed_entry_levels.clear()
 
         for row in rows:
-            if str(row.get("state") or "") not in active_states:
-                continue
             market_id = str(row.get("market_id") or "")
             token_id = str(row.get("token_id") or "")
             order_id = str(row.get("order_id") or row.get("venue_order_id") or row.get("client_order_id") or "")
-            if not market_id or not token_id or not order_id:
+            if not market_id or not token_id:
                 continue
             level = float(row.get("price") or 0.0)
             size = float(row.get("size") or 0.0)
             notional = level * size if level > 0 and size > 0 else 0.0
+            cumulative_filled_size = float(row.get("cumulative_filled_size") or 0.0)
+            side = str(row.get("side") or "BUY").upper()
+            if cumulative_filled_size > 0 and level > 0:
+                if side == "BUY":
+                    self._filled_buy_notional_usdc += level * cumulative_filled_size
+                    if str(row.get("state") or "") == OrderState.FILLED.value:
+                        self._completed_entry_levels.add(
+                            self._entry_level_key(market_id, token_id, level)
+                        )
+                elif side == "SELL":
+                    self._filled_buy_notional_usdc = max(
+                        self._filled_buy_notional_usdc - level * cumulative_filled_size,
+                        0.0,
+                    )
+            if str(row.get("state") or "") not in active_states:
+                continue
+            if not order_id:
+                continue
+            remaining_size = float(row.get("remaining_size") or 0.0)
+            if remaining_size > 0 and level > 0:
+                notional = level * remaining_size
             bid = _RestingBid(
                 market_id=market_id,
                 token_id=token_id,
@@ -256,6 +284,10 @@ class SwanStrategyV1:
         market_bids = self._bids_by_market.get(candidate.market_id, set())
 
         for level in candidate.entry_levels:
+            level_key = self._entry_level_key(candidate.market_id, candidate.token_id, level)
+            if level_key in self._completed_entry_levels:
+                continue
+
             # Skip if we already have a resting bid at this exact level.
             already_bid = any(
                 self._resting_bids[oid].level == level
@@ -273,6 +305,8 @@ class SwanStrategyV1:
                 break
 
             intent = self._build_order_intent(candidate, level)
+            if self._would_exceed_total_stake_cap(intent.notional_usdc):
+                break
             intents.append(PlaceOrder(intent=intent))
             self._pending_place[intent.intent_id] = _RestingBid(
                 market_id=candidate.market_id,
@@ -356,11 +390,25 @@ class SwanStrategyV1:
             bid = self._resting_bids.pop(event.order_id, None)
             if bid:
                 self._bids_by_market.get(bid.market_id, set()).discard(event.order_id)
+        else:
+            bid = self._resting_bids.get(event.order_id)
+            if bid:
+                bid.notional_usdc = max(float(event.remaining_size), 0.0) * float(bid.level)
         if event.side is OrderSide.SELL:
             self._positions[event.token_id] = max(self._positions.get(event.token_id, 0.0) - event.fill_size, 0.0)
+            self._filled_buy_notional_usdc = max(
+                self._filled_buy_notional_usdc - float(event.fill_price) * float(event.fill_size),
+                0.0,
+            )
             return intents
 
         self._positions[event.token_id] = self._positions.get(event.token_id, 0.0) + event.fill_size
+        self._filled_buy_notional_usdc += float(event.fill_price) * float(event.fill_size)
+        if event.remaining_size <= 0:
+            filled_level = bid.level if bid else float(event.fill_price)
+            self._completed_entry_levels.add(
+                self._entry_level_key(event.market_id, event.token_id, filled_level)
+            )
         if self.config.sell_exit_enabled and event.fill_size > 0:
             exit_price = float(self.config.sell_exit_price)
             intents.append(PlaceOrder(intent=OrderIntent(
@@ -392,3 +440,16 @@ class SwanStrategyV1:
         bid = self._resting_bids.pop(key, None)
         if bid:
             self._bids_by_market.get(bid.market_id, set()).discard(key)
+
+    def _would_exceed_total_stake_cap(self, next_notional_usdc: float) -> bool:
+        cap = float(getattr(self.config, "max_total_stake_usdc", 0.0) or 0.0)
+        if cap <= 0:
+            return False
+        committed = self._filled_buy_notional_usdc
+        committed += sum(bid.notional_usdc for bid in self._resting_bids.values())
+        committed += sum(bid.notional_usdc for bid in self._pending_place.values())
+        return committed + float(next_notional_usdc) > cap + 1e-9
+
+    @staticmethod
+    def _entry_level_key(market_id: str, token_id: str, level: float) -> tuple[str, str, float]:
+        return (str(market_id), str(token_id), round(float(level), 8))
