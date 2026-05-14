@@ -420,10 +420,14 @@ async def _ws_price_monitor_loop(
             continue
 
         if forward_market_events:
-            for event in [*updates, *trade_updates]:
+            for idx, event in enumerate([*updates, *trade_updates], start=1):
                 source.inject(event)
+                if idx % 500 == 0:
+                    await asyncio.sleep(0)
 
-        for update in updates:
+        for idx, update in enumerate(updates, start=1):
+            if idx % 500 == 0:
+                await asyncio.sleep(0)
             ask = update.best_ask
             if ask is None:
                 continue
