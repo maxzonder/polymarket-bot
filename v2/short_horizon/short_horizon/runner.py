@@ -133,6 +133,11 @@ async def drive_runtime_event_stream(
             after_event_callback(event)
         if max_events is not None and event_count >= max_events:
             break
+        # Live queues can arrive in large bursts. Yield periodically so
+        # background tasks (held-book REST refresh, cleanup, WS monitors) are
+        # not starved while the runtime drains an already-populated queue.
+        if event_count % 500 == 0:
+            await asyncio.sleep(0)
 
     logger.info(
         completed_event_name,
