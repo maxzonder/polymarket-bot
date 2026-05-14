@@ -352,12 +352,15 @@ async def _ws_universe_builder_loop(
                 duration_window=duration_window,
                 max_rows=5_000,
             )
+            legacy_tokens, legacy_token_to_market_id, legacy_token_to_side_index = _legacy_token_subscription_maps(markets)
             selector_plan = None
             if selector_observation_config is not None:
                 selector_plan = build_subscription_plan(markets, config=selector_observation_config)
                 logger.info(
                     "ws_universe_selector_observation",
                     observe_only=not apply_selector_plan,
+                    legacy_tokens=len(legacy_tokens),
+                    token_reduction=max(0, len(legacy_tokens) - selector_plan.selected_tokens_count),
                     **asdict(selector_plan.summary(top_n=10)),
                 )
 
@@ -374,15 +377,9 @@ async def _ws_universe_builder_loop(
                 next_token_to_market_id.update(selector_plan.token_to_market_id)
                 next_token_to_side_index.update(selector_plan.token_to_side_index)
             else:
-                for m in markets:
-                    if m.token_yes_id:
-                        tokens.add(m.token_yes_id)
-                        next_token_to_market_id[m.token_yes_id] = m.market_id
-                        next_token_to_side_index[m.token_yes_id] = 0
-                    if m.token_no_id:
-                        tokens.add(m.token_no_id)
-                        next_token_to_market_id[m.token_no_id] = m.market_id
-                        next_token_to_side_index[m.token_no_id] = 1
+                tokens = set(legacy_tokens)
+                next_token_to_market_id.update(legacy_token_to_market_id)
+                next_token_to_side_index.update(legacy_token_to_side_index)
             for market_id, token_id in protected_pairs:
                 tokens.add(token_id)
                 next_token_to_market_id[token_id] = market_id
@@ -433,6 +430,22 @@ async def _ws_universe_builder_loop(
             await asyncio.wait_for(shutdown.wait(), timeout=_WS_UNIVERSE_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
+
+
+def _legacy_token_subscription_maps(markets) -> tuple[set[str], dict[str, str], dict[str, int]]:
+    tokens: set[str] = set()
+    token_to_market_id: dict[str, str] = {}
+    token_to_side_index: dict[str, int] = {}
+    for market in markets:
+        if market.token_yes_id:
+            tokens.add(market.token_yes_id)
+            token_to_market_id[market.token_yes_id] = market.market_id
+            token_to_side_index[market.token_yes_id] = 0
+        if market.token_no_id:
+            tokens.add(market.token_no_id)
+            token_to_market_id[market.token_no_id] = market.market_id
+            token_to_side_index[market.token_no_id] = 1
+    return tokens, token_to_market_id, token_to_side_index
 
 
 def _load_protected_market_tokens(
@@ -835,6 +848,28 @@ async def _ws_trigger_screener(
     )
 
 
+def _build_black_swan_universe_selector_config(
+    *,
+    max_markets: int | None = None,
+    max_tokens: int | None = None,
+    max_markets_per_category: int | None = None,
+    min_volume_usdc: float | None = None,
+    reject_random_walk: bool = False,
+) -> UniverseSelectorConfig:
+    overrides = {}
+    if max_markets is not None:
+        overrides["max_markets"] = max(0, int(max_markets))
+    if max_tokens is not None:
+        overrides["max_tokens"] = max(0, int(max_tokens))
+    if max_markets_per_category is not None:
+        overrides["max_markets_per_category"] = max(0, int(max_markets_per_category))
+    if min_volume_usdc is not None:
+        overrides["min_volume_usdc"] = max(0.0, float(min_volume_usdc))
+    if reject_random_walk:
+        overrides["reject_random_walk"] = True
+    return black_swan_universe_config(**overrides)
+
+
 async def run_swan_live(
     *,
     db_path: Path | str | None = None,
@@ -849,6 +884,11 @@ async def run_swan_live(
     min_total_duration_hours: float | None = None,
     strategy_name: str = "swan",
     apply_universe_selector: bool = False,
+    universe_selector_max_markets: int | None = None,
+    universe_selector_max_tokens: int | None = None,
+    universe_selector_max_markets_per_category: int | None = None,
+    universe_selector_min_volume_usdc: float | None = None,
+    universe_selector_reject_random_walk: bool = False,
 ) -> RunnerSummary:
     reg = _STRATEGY_REGISTRY.get(strategy_name)
     if reg is None:
@@ -1046,10 +1086,23 @@ async def run_swan_live(
     token_to_side_index: dict[str, int] = {}
     ws_candidate_cache = _WsCandidateCache()
     selector_observation_config = (
-        black_swan_universe_config()
+        _build_black_swan_universe_selector_config(
+            max_markets=universe_selector_max_markets,
+            max_tokens=universe_selector_max_tokens,
+            max_markets_per_category=universe_selector_max_markets_per_category,
+            min_volume_usdc=universe_selector_min_volume_usdc,
+            reject_random_walk=universe_selector_reject_random_walk,
+        )
         if strategy_name == "black_swan" and (resolved_mode is ExecutionMode.DRY_RUN or apply_universe_selector)
         else None
     )
+    if selector_observation_config is not None:
+        logger.info(
+            "ws_universe_selector_configured",
+            apply_selector=apply_universe_selector and strategy_name == "black_swan",
+            observe_only=not (apply_universe_selector and strategy_name == "black_swan"),
+            **asdict(selector_observation_config),
+        )
 
     # Issue #190: black_swan price discovery comes from CLOB WS edge triggers.
     # Keep the old full-Gamma screener only for the legacy broad swan strategy.
@@ -1180,6 +1233,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Override min total market lifespan (hours) from mode config")
     p.add_argument("--apply-universe-selector", action="store_true",
                    help="Use the black_swan universe selector to narrow CLOB WS subscriptions (default: observe/log only in dry-run)")
+    p.add_argument("--universe-selector-max-markets", type=int, default=None,
+                   help="Override black_swan selector max markets before WS subscription (0 = unlimited)")
+    p.add_argument("--universe-selector-max-tokens", type=int, default=None,
+                   help="Override black_swan selector max tokens before WS subscription (0 = unlimited)")
+    p.add_argument("--universe-selector-max-markets-per-category", type=int, default=None,
+                   help="Override black_swan selector per-category market cap (0 = unlimited)")
+    p.add_argument("--universe-selector-min-volume-usdc", type=float, default=None,
+                   help="Override black_swan selector minimum Gamma volume in USDC")
+    p.add_argument("--universe-selector-reject-random-walk", action="store_true",
+                   help="Hard reject cheap random-walk price markets in the black_swan selector")
     return p
 
 
@@ -1199,5 +1262,10 @@ if __name__ == "__main__":
             min_hours_to_close=args.min_hours_to_close,
             min_total_duration_hours=args.min_total_duration_hours,
             apply_universe_selector=args.apply_universe_selector,
+            universe_selector_max_markets=args.universe_selector_max_markets,
+            universe_selector_max_tokens=args.universe_selector_max_tokens,
+            universe_selector_max_markets_per_category=args.universe_selector_max_markets_per_category,
+            universe_selector_min_volume_usdc=args.universe_selector_min_volume_usdc,
+            universe_selector_reject_random_walk=args.universe_selector_reject_random_walk,
         )
     )

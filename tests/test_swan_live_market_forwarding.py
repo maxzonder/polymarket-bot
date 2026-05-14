@@ -19,6 +19,8 @@ from short_horizon.venue_polymarket import MarketMetadata, black_swan_universe_c
 import v2.short_horizon.swan_live as swan_live_module
 from v2.short_horizon.swan_live import (
     _WsCandidateCache,
+    _build_arg_parser,
+    _build_black_swan_universe_selector_config,
     _held_or_open_market_tokens,
     _ws_price_monitor_loop,
     _ws_universe_builder_loop,
@@ -220,6 +222,32 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
             [("m1", "tok_yes"), ("m2", "tok_no")],
         )
 
+    def test_universe_selector_cli_overrides_build_policy_config(self) -> None:
+        args = _build_arg_parser().parse_args([
+            "--strategy", "black_swan",
+            "--apply-universe-selector",
+            "--universe-selector-max-markets", "25",
+            "--universe-selector-max-tokens", "40",
+            "--universe-selector-max-markets-per-category", "5",
+            "--universe-selector-min-volume-usdc", "2500",
+            "--universe-selector-reject-random-walk",
+        ])
+        cfg = _build_black_swan_universe_selector_config(
+            max_markets=args.universe_selector_max_markets,
+            max_tokens=args.universe_selector_max_tokens,
+            max_markets_per_category=args.universe_selector_max_markets_per_category,
+            min_volume_usdc=args.universe_selector_min_volume_usdc,
+            reject_random_walk=args.universe_selector_reject_random_walk,
+        )
+
+        self.assertTrue(args.apply_universe_selector)
+        self.assertEqual(cfg.max_markets, 25)
+        self.assertEqual(cfg.max_tokens, 40)
+        self.assertEqual(cfg.max_markets_per_category, 5)
+        self.assertEqual(cfg.min_volume_usdc, 2500.0)
+        self.assertTrue(cfg.reject_random_walk)
+        self.assertIn("weather", cfg.category_multipliers)
+
     def test_universe_builder_logs_selector_observation_without_changing_subscription(self) -> None:
         async def run():
             shutdown = asyncio.Event()
@@ -259,6 +287,9 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertTrue(payload["observe_only"])
         self.assertEqual(payload["discovered_markets"], 2)
         self.assertEqual(payload["selected_markets"], 1)
+        self.assertEqual(payload["legacy_tokens"], 4)
+        self.assertEqual(payload["selected_tokens"], 2)
+        self.assertEqual(payload["token_reduction"], 2)
         self.assertEqual(payload["rejection_counts"], {"cap_markets": 1})
         self.assertEqual(payload["top_selected_market_ids"], ("weather",))
 
