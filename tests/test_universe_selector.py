@@ -213,6 +213,54 @@ class UniverseSelectorTests(unittest.TestCase):
         self.assertEqual(random_walk.catalyst_kind, "random_walk")
         self.assertLess(random_walk.subscription_score, 1.0)
 
+    def test_ranks_before_applying_global_caps(self) -> None:
+        plan = build_subscription_plan(
+            [
+                _market(
+                    "low",
+                    category="crypto",
+                    question="Will the price of Bitcoin close above $100,000 today?",
+                ),
+                _market(
+                    "high",
+                    category="weather",
+                    question="Will a hurricane make landfall in Florida by Friday?",
+                ),
+                _market(
+                    "medium",
+                    category="politics",
+                    question="Will the election be won by Party A?",
+                ),
+            ],
+            config=black_swan_universe_config(max_markets=2),
+        )
+
+        self.assertEqual(plan.selected_market_ids, ("high", "medium"))
+        self.assertEqual(plan.rejection_counts["cap_markets"], 1)
+        self.assertEqual(plan.decisions[0].reject_reason, "cap_markets")
+        self.assertGreater(plan.decisions[1].subscription_score, plan.decisions[2].subscription_score)
+        self.assertGreater(plan.decisions[2].subscription_score, plan.decisions[0].subscription_score)
+
+    def test_supports_category_caps_and_retained_market_hysteresis_hooks(self) -> None:
+        plan = build_subscription_plan(
+            [
+                _market("weather-a", category="weather", question="Will a hurricane hit Florida?"),
+                _market("weather-b", category="weather", question="Will a tornado hit Texas?"),
+                _market("legal", category="legal", question="Will the court issue a verdict tomorrow?"),
+            ],
+            config=black_swan_universe_config(
+                max_markets_per_category=1,
+                retained_market_ids=("weather-b",),
+                retained_score_bonus=0.01,
+            ),
+        )
+
+        self.assertEqual(plan.selected_market_ids, ("weather-b", "legal"))
+        self.assertEqual(plan.rejection_counts["cap_category"], 1)
+        self.assertEqual(plan.decisions[0].reject_reason, "cap_category")
+        self.assertTrue(plan.decisions[1].retained_market)
+        self.assertGreater(plan.decisions[1].subscription_score, plan.decisions[0].subscription_score)
+
 
 if __name__ == "__main__":
     unittest.main()

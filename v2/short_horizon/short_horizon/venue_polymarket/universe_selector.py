@@ -24,6 +24,7 @@ UniverseRejectReason = Literal[
     "category_not_allowed",
     "random_walk_rejected",
     "cap_markets",
+    "cap_category",
     "cap_tokens",
 ]
 
@@ -51,6 +52,17 @@ class CatalystClassification:
 
 
 @dataclass(frozen=True)
+class _Candidate:
+    index: int
+    market: MarketMetadata
+    token_ids: tuple[str, ...]
+    subscription_score: float
+    catalyst: CatalystClassification
+    retained_market: bool
+    reject_reason: UniverseRejectReason | None = None
+
+
+@dataclass(frozen=True)
 class UniverseSelectorConfig:
     """Pre-subscription selector controls for black-swan WS universe narrowing.
 
@@ -75,7 +87,11 @@ class UniverseSelectorConfig:
     allowed_categories: tuple[str, ...] = ()
     blocked_categories: tuple[str, ...] = ()
     category_multipliers: dict[str, float] = field(default_factory=dict)
+    max_markets_per_category: int = 0
     reject_random_walk: bool = False
+    retained_market_ids: tuple[str, ...] = ()
+    retained_score_bonus: float = 0.0
+    prefer_retained_on_score_tie: bool = True
     base_subscription_score: float = 1.0
     catalyst_multiplier: float = 1.25
     random_walk_multiplier: float = 0.40
@@ -101,6 +117,7 @@ class UniverseDecision:
     neg_risk_group_id: str | None = None
     catalyst_kind: CatalystKind = "none"
     catalyst_reason: str = ""
+    retained_market: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,40 +179,97 @@ def build_subscription_plan(
     """
 
     cfg = config or UniverseSelectorConfig()
-    decisions: list[UniverseDecision] = []
     selected_market_ids: list[str] = []
     selected_token_ids: list[str] = []
     token_to_market_id: dict[str, str] = {}
     token_to_side_index: dict[str, int] = {}
+    retained_market_ids = {str(market_id) for market_id in cfg.retained_market_ids}
+    evaluated: list[_Candidate] = []
+    selected_indices: set[int] = set()
+    final_reject_reasons: dict[int, UniverseRejectReason] = {}
     rejection_counts: Counter[str] = Counter()
 
-    for market in markets:
+    for index, market in enumerate(markets):
         catalyst = classify_catalyst(market)
-        score = _subscription_score(market, cfg, catalyst)
+        retained_market = str(market.market_id or "") in retained_market_ids
+        score = _subscription_score(market, cfg, catalyst, retained_market=retained_market)
         reason = _technical_reject_reason(market, cfg)
         if reason is None:
             reason = _policy_reject_reason(market, cfg, catalyst)
         token_ids = _selected_market_tokens(market, cfg) if reason is None else ()
+        evaluated.append(_Candidate(
+            index=index,
+            market=market,
+            token_ids=token_ids,
+            subscription_score=score,
+            catalyst=catalyst,
+            retained_market=retained_market,
+            reject_reason=reason,
+        ))
+
+    category_counts: Counter[str] = Counter()
+    ranked_candidates = sorted(
+        (candidate for candidate in evaluated if candidate.reject_reason is None),
+        key=lambda candidate: _candidate_sort_key(candidate, cfg),
+    )
+
+    for candidate in ranked_candidates:
+        reason: UniverseRejectReason | None = None
+        market = candidate.market
+        token_ids = candidate.token_ids
+        category = _norm(getattr(market, "category", None))
 
         if reason is None and cfg.max_markets > 0 and len(selected_market_ids) >= cfg.max_markets:
             reason = "cap_markets"
         if reason is None and cfg.max_tokens > 0 and len(selected_token_ids) + len(token_ids) > cfg.max_tokens:
             reason = "cap_tokens"
+        if (
+            reason is None
+            and cfg.max_markets_per_category > 0
+            and category
+            and category_counts[category] >= cfg.max_markets_per_category
+        ):
+            reason = "cap_category"
 
         if reason is not None:
-            rejection_counts[reason] += 1
-            decisions.append(_decision(market, stage="rejected", reject_reason=reason, subscription_score=score, catalyst=catalyst))
+            final_reject_reasons[candidate.index] = reason
             continue
 
+        selected_indices.add(candidate.index)
         selected_market_ids.append(str(market.market_id))
         selected_token_ids.extend(token_ids)
+        if category:
+            category_counts[category] += 1
         if market.token_yes_id and cfg.include_yes_token:
             token_to_market_id[str(market.token_yes_id)] = str(market.market_id)
             token_to_side_index[str(market.token_yes_id)] = 0
         if market.token_no_id and cfg.include_no_token:
             token_to_market_id[str(market.token_no_id)] = str(market.market_id)
             token_to_side_index[str(market.token_no_id)] = 1
-        decisions.append(_decision(market, stage="selected", selected_token_ids=token_ids, subscription_score=score, catalyst=catalyst))
+
+    decisions: list[UniverseDecision] = []
+    for candidate in evaluated:
+        reason = candidate.reject_reason or final_reject_reasons.get(candidate.index)
+        if reason is not None:
+            rejection_counts[reason] += 1
+            decisions.append(_decision(
+                candidate.market,
+                stage="rejected",
+                reject_reason=reason,
+                subscription_score=candidate.subscription_score,
+                catalyst=candidate.catalyst,
+                retained_market=candidate.retained_market,
+            ))
+            continue
+
+        decisions.append(_decision(
+            candidate.market,
+            stage="selected",
+            selected_token_ids=candidate.token_ids if candidate.index in selected_indices else (),
+            subscription_score=candidate.subscription_score,
+            catalyst=candidate.catalyst,
+            retained_market=candidate.retained_market,
+        ))
 
     return SubscriptionPlan(
         decisions=tuple(decisions),
@@ -288,6 +362,8 @@ def _subscription_score(
     market: MarketMetadata,
     cfg: UniverseSelectorConfig,
     catalyst: CatalystClassification,
+    *,
+    retained_market: bool = False,
 ) -> float:
     score = float(cfg.base_subscription_score)
     category = _norm(getattr(market, "category", None))
@@ -299,7 +375,16 @@ def _subscription_score(
         score *= float(cfg.random_walk_multiplier)
     elif catalyst.kind == "ambiguous":
         score *= float(cfg.ambiguous_multiplier)
+    if retained_market and cfg.retained_score_bonus > 0:
+        score += float(cfg.retained_score_bonus)
     return round(score, 6)
+
+
+def _candidate_sort_key(candidate: _Candidate, cfg: UniverseSelectorConfig) -> tuple[float, int, int, str, int]:
+    retained_rank = 0 if cfg.prefer_retained_on_score_tie and candidate.retained_market else 1
+    end_time_rank = candidate.market.end_time_ms if candidate.market.end_time_ms is not None else 2**63 - 1
+    market_id = str(candidate.market.market_id or "")
+    return (-candidate.subscription_score, retained_rank, int(end_time_rank), market_id, candidate.index)
 
 
 def _selected_market_tokens(market: MarketMetadata, cfg: UniverseSelectorConfig) -> tuple[str, ...]:
@@ -319,6 +404,7 @@ def _decision(
     reject_reason: UniverseRejectReason | None = None,
     subscription_score: float = 0.0,
     catalyst: CatalystClassification | None = None,
+    retained_market: bool = False,
 ) -> UniverseDecision:
     catalyst = catalyst or CatalystClassification("none", "")
     return UniverseDecision(
@@ -339,6 +425,7 @@ def _decision(
         neg_risk_group_id=getattr(market, "neg_risk_group_id", None),
         catalyst_kind=catalyst.kind,
         catalyst_reason=catalyst.reason,
+        retained_market=retained_market,
     )
 
 
