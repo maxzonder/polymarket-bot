@@ -882,6 +882,9 @@ def normalize_event_payload(event: NormalizedEvent) -> dict[str, Any]:
             "best_ask": event.best_ask,
             "spread": spread,
             "mid_price": mid_price,
+            "is_snapshot": bool(event.is_snapshot),
+            "bid_depth_levels": len(event.bid_levels),
+            "ask_depth_levels": len(event.ask_levels),
         }
 
     if isinstance(event, TradeTick):

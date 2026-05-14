@@ -35,6 +35,7 @@ class PolymarketWebsocket:
         self._connected_event = asyncio.Event()
         self._ws: Any = None
         self._subscription_send_failure_count = 0
+        self._disconnect_count = 0
 
     async def connect(self) -> None:
         if self._task is not None and not self._task.done():
@@ -126,7 +127,15 @@ class PolymarketWebsocket:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self.logger.warning("ws_disconnected", endpoint=self.endpoint, error=str(exc), retry_in_seconds=backoff)
+                self._disconnect_count += 1
+                self.logger.warning(
+                    "ws_disconnected",
+                    endpoint=self.endpoint,
+                    error=str(exc),
+                    retry_in_seconds=backoff,
+                    reconnect_count=self._disconnect_count,
+                    token_count=len(self._subscribed_tokens),
+                )
                 self._connected_event.clear()
                 self._ws = None
                 await asyncio.sleep(backoff)

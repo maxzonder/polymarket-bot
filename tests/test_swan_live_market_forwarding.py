@@ -14,7 +14,7 @@ for p in (_REPO, _V2):
 from short_horizon.core.clock import SystemClock
 from short_horizon.core.events import BookUpdate, MarketStateUpdate, TradeTick
 from short_horizon.market_data import LiveEventSource
-from v2.short_horizon.swan_live import _WsCandidateCache, _ws_price_monitor_loop
+from v2.short_horizon.swan_live import _WsCandidateCache, _held_or_open_market_tokens, _ws_price_monitor_loop
 
 
 class _FakeWs:
@@ -106,3 +106,31 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0].market_id, "m1")
         self.assertEqual(trades[0].token_id, "tok_yes")
+
+    def test_held_or_open_market_tokens_includes_open_orders_and_net_inventory(self) -> None:
+        class Store:
+            def load_non_terminal_orders(self):
+                return [
+                    {"order_id": "open-1", "market_id": "m1", "token_id": "tok_yes", "side": "BUY"},
+                ]
+
+            def load_all_orders(self):
+                return [
+                    {"order_id": "buy-1", "market_id": "m2", "token_id": "tok_no", "side": "BUY"},
+                    {"order_id": "sell-1", "market_id": "m2", "token_id": "tok_no", "side": "SELL"},
+                    {"order_id": "flat-buy", "market_id": "m3", "token_id": "tok_flat", "side": "BUY"},
+                    {"order_id": "flat-sell", "market_id": "m3", "token_id": "tok_flat", "side": "SELL"},
+                ]
+
+            def load_fills(self):
+                return [
+                    {"order_id": "buy-1", "market_id": "m2", "token_id": "tok_no", "size": 10.0},
+                    {"order_id": "sell-1", "market_id": "m2", "token_id": "tok_no", "size": 4.0},
+                    {"order_id": "flat-buy", "market_id": "m3", "token_id": "tok_flat", "size": 5.0},
+                    {"order_id": "flat-sell", "market_id": "m3", "token_id": "tok_flat", "size": 5.0},
+                ]
+
+        self.assertEqual(
+            _held_or_open_market_tokens(Store()),
+            [("m1", "tok_yes"), ("m2", "tok_no")],
+        )

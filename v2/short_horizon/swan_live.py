@@ -39,7 +39,7 @@ for _p in (_REPO_ROOT, _V2_SH_DIR):
         sys.path.insert(0, str(_p))
 
 from short_horizon.core.clock import SystemClock
-from short_horizon.core.events import TimerEvent
+from short_horizon.core.events import BookLevel, BookUpdate, TimerEvent
 from short_horizon.core.runtime import StrategyRuntime
 from short_horizon.execution import ExecutionEngine, ExecutionMode
 from short_horizon.live_runner import (
@@ -84,6 +84,9 @@ _DB_DIR = Path(os.environ.get("POLYBOT_DATA_DIR", Path.home() / ".polybot" / "sw
 
 _SCREENER_INTERVAL_SECONDS = 300   # 5 min
 _CLEANUP_INTERVAL_SECONDS = 1800   # 30 min
+_HELD_BOOK_REFRESH_INTERVAL_SECONDS = 60
+_HELD_BOOK_STALE_AFTER_MS = 2 * 60 * 1000
+_HELD_BOOK_REFRESH_MAX_TOKENS_PER_PASS = 150
 _DEFAULT_STAKE_PER_LEVEL = 1.0     # target ~1 USDC notional per entry level (~5 USDC/market ladder)
 
 _STRATEGY_REGISTRY = {
@@ -461,6 +464,151 @@ async def _ws_price_monitor_loop(
                 )
             elif not is_below and was_below:
                 below_threshold.discard(token_id)
+
+
+async def _held_book_snapshot_refresh_loop(
+    *,
+    runtime: StrategyRuntime,
+    source: LiveEventSource,
+    clock: SystemClock,
+    interval_seconds: float,
+    stale_after_ms: int,
+    max_tokens_per_pass: int,
+    logger,
+    shutdown: asyncio.Event,
+) -> None:
+    """Refresh stale/missing books for tokens where the run has exposure.
+
+    Public CLOB WS subscriptions are broad and can reconnect or go quiet for an
+    individual token.  This loop keeps marks for open/held tokens point-in-time
+    fresh by injecting REST book snapshots into the same runtime event path used
+    by WS BookUpdates.
+    """
+    while not shutdown.is_set():
+        try:
+            now_ms = int(clock.now_ms())
+            held_tokens = _held_or_open_market_tokens(runtime.store)
+            missing = 0
+            stale = 0
+            fresh = 0
+            refresh_targets: list[tuple[str, str]] = []
+            for market_id, token_id in held_tokens:
+                age_ms = runtime.book_age_ms(market_id, token_id, now_ms=now_ms)
+                if age_ms is None:
+                    missing += 1
+                    refresh_targets.append((market_id, token_id))
+                elif age_ms > stale_after_ms:
+                    stale += 1
+                    refresh_targets.append((market_id, token_id))
+                else:
+                    fresh += 1
+
+            attempted = 0
+            refreshed = 0
+            failed = 0
+            for market_id, token_id in refresh_targets[:max_tokens_per_pass]:
+                attempted += 1
+                try:
+                    event = await _fetch_book_snapshot_event(
+                        market_id=market_id,
+                        token_id=token_id,
+                        clock=clock,
+                    )
+                except Exception as exc:
+                    failed += 1
+                    logger.warning(
+                        "held_book_snapshot_refresh_failed",
+                        market_id=market_id,
+                        token_id=token_id,
+                        error=str(exc),
+                    )
+                    continue
+                source.inject(event)
+                refreshed += 1
+
+            if held_tokens or attempted:
+                logger.info(
+                    "held_book_freshness_check",
+                    held_tokens=len(held_tokens),
+                    fresh=fresh,
+                    stale=stale,
+                    missing=missing,
+                    refresh_targets=len(refresh_targets),
+                    attempted=attempted,
+                    refreshed=refreshed,
+                    failed=failed,
+                    max_tokens_per_pass=max_tokens_per_pass,
+                    stale_after_ms=stale_after_ms,
+                )
+        except Exception:
+            logger.exception("held_book_snapshot_refresh_loop_error")
+
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _fetch_book_snapshot_event(*, market_id: str, token_id: str, clock: SystemClock) -> BookUpdate:
+    from api.clob_client import get_orderbook
+
+    orderbook = await asyncio.to_thread(get_orderbook, token_id)
+    now_ms = int(clock.now_ms())
+    bid_levels = tuple(BookLevel(price=float(level.price), size=float(level.size)) for level in orderbook.bids[:10])
+    ask_levels = tuple(BookLevel(price=float(level.price), size=float(level.size)) for level in orderbook.asks[:10])
+    best_bid = float(orderbook.best_bid) if orderbook.best_bid is not None else None
+    best_ask = float(orderbook.best_ask) if orderbook.best_ask is not None else None
+    spread = (best_ask - best_bid) if best_bid is not None and best_ask is not None else None
+    mid_price = ((best_ask + best_bid) / 2.0) if best_bid is not None and best_ask is not None else None
+    return BookUpdate(
+        event_time_ms=now_ms,
+        ingest_time_ms=now_ms,
+        market_id=str(market_id),
+        token_id=str(token_id),
+        best_bid=best_bid,
+        best_ask=best_ask,
+        spread=spread,
+        mid_price=mid_price,
+        bid_levels=bid_levels,
+        ask_levels=ask_levels,
+        is_snapshot=True,
+        source="polymarket_clob_rest_snapshot",
+    )
+
+
+def _held_or_open_market_tokens(store) -> list[tuple[str, str]]:
+    tokens: set[tuple[str, str]] = set()
+    load_non_terminal_orders = getattr(store, "load_non_terminal_orders", None)
+    if callable(load_non_terminal_orders):
+        for row in load_non_terminal_orders():
+            market_id = row.get("market_id")
+            token_id = row.get("token_id")
+            if market_id and token_id:
+                tokens.add((str(market_id), str(token_id)))
+
+    load_all_orders = getattr(store, "load_all_orders", None)
+    load_fills = getattr(store, "load_fills", None)
+    if callable(load_all_orders) and callable(load_fills):
+        order_by_id = {str(row.get("order_id")): row for row in load_all_orders() if row.get("order_id") is not None}
+        net_size_by_token: dict[tuple[str, str], float] = {}
+        for fill in load_fills():
+            order = order_by_id.get(str(fill.get("order_id") or ""), {})
+            side = str(order.get("side") or "").upper()
+            market_id = fill.get("market_id")
+            token_id = fill.get("token_id")
+            if not market_id or not token_id:
+                continue
+            key = (str(market_id), str(token_id))
+            size = float(fill.get("size") or 0.0)
+            if side == "BUY":
+                net_size_by_token[key] = net_size_by_token.get(key, 0.0) + size
+            elif side == "SELL":
+                net_size_by_token[key] = net_size_by_token.get(key, 0.0) - size
+        for key, net_size in net_size_by_token.items():
+            if net_size > 1e-12:
+                tokens.add(key)
+
+    return sorted(tokens)
 
 
 async def _ws_trigger_screener(
@@ -866,11 +1014,24 @@ async def run_swan_live(
         ),
         name="swan_ws_monitor_loop",
     )
+    held_book_refresh_task = asyncio.create_task(
+        _held_book_snapshot_refresh_loop(
+            runtime=runtime,
+            source=source,
+            clock=clock,
+            interval_seconds=_HELD_BOOK_REFRESH_INTERVAL_SECONDS,
+            stale_after_ms=_HELD_BOOK_STALE_AFTER_MS,
+            max_tokens_per_pass=_HELD_BOOK_REFRESH_MAX_TOKENS_PER_PASS,
+            logger=logger,
+            shutdown=shutdown,
+        ),
+        name="swan_held_book_snapshot_refresh_loop",
+    )
 
     try:
         summary = await _run_event_stream()
     finally:
-        tasks = [cleanup_task, ws_universe_task, ws_monitor_task]
+        tasks = [cleanup_task, ws_universe_task, ws_monitor_task, held_book_refresh_task]
         if screener_task is not None:
             tasks.append(screener_task)
         for t in tasks:

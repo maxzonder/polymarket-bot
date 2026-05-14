@@ -14,6 +14,7 @@ from ..telemetry import event_log_fields, get_logger
 DEFAULT_VENUE_MIN_NOTIONAL_USDC = 1.0
 DEFAULT_VENUE_TICK_SIZE = 0.01
 DEFAULT_VENUE_MIN_ORDER_SHARES_FALLBACK = 0.0
+DEFAULT_BOOK_FRESHNESS_MAX_AGE_MS = 5 * 60 * 1000
 
 
 class StrategyRuntime:
@@ -33,6 +34,7 @@ class StrategyRuntime:
         venue_min_notional_usdc: float = DEFAULT_VENUE_MIN_NOTIONAL_USDC,
         venue_default_tick_size: float = DEFAULT_VENUE_TICK_SIZE,
         venue_min_order_shares_fallback: float = DEFAULT_VENUE_MIN_ORDER_SHARES_FALLBACK,
+        book_freshness_max_age_ms: int = DEFAULT_BOOK_FRESHNESS_MAX_AGE_MS,
         clock: Clock | None = None,
     ):
         self.strategy = strategy
@@ -44,7 +46,10 @@ class StrategyRuntime:
         self.venue_min_notional_usdc = float(venue_min_notional_usdc)
         self.venue_default_tick_size = float(venue_default_tick_size)
         self.venue_min_order_shares_fallback = float(venue_min_order_shares_fallback)
+        self.book_freshness_max_age_ms = int(book_freshness_max_age_ms)
         self.latest_best_bid_by_market_token: dict[tuple[str, str], float] = {}
+        self.latest_book_event_ms_by_market_token: dict[tuple[str, str], int] = {}
+        self.latest_book_ingest_ms_by_market_token: dict[tuple[str, str], int] = {}
         self.latest_spot_by_asset: dict[str, SpotPriceUpdate] = {}
         self.resolved_inventory_marks_by_market_token: dict[tuple[str, str], MarketResolvedWithInventory] = {}
         self._reported_resolved_inventory: set[tuple[str, str]] = set()
@@ -68,14 +73,19 @@ class StrategyRuntime:
     def on_book_update(self, event: BookUpdate) -> list[OrderIntent | SkipDecision]:
         log = self.logger.bind(**event_log_fields(event))
         self.store.append_event(event)
+        key = (event.market_id, event.token_id)
+        self.latest_book_event_ms_by_market_token[key] = int(event.event_time_ms)
+        self.latest_book_ingest_ms_by_market_token[key] = int(event.ingest_time_ms)
         if event.best_bid is not None:
-            self.latest_best_bid_by_market_token[(event.market_id, event.token_id)] = float(event.best_bid)
+            self.latest_best_bid_by_market_token[key] = float(event.best_bid)
         log.debug(
             "book_update_ingested",
             best_bid=event.best_bid,
             best_ask=event.best_ask,
             spread=event.spread,
             mid_price=event.mid_price,
+            book_age_ms=max(0, int(self.clock.now_ms()) - int(event.ingest_time_ms)),
+            is_snapshot=event.is_snapshot,
         )
         outputs: list[OrderIntent | SkipDecision] = []
         for touch in self.strategy.detect_touches(event):
@@ -276,6 +286,8 @@ class StrategyRuntime:
                 fills=all_fills,
                 event_time_ms=decision.event_time_ms,
                 latest_best_bid_by_market_token=self.latest_best_bid_by_market_token,
+                latest_book_ingest_ms_by_market_token=self.latest_book_ingest_ms_by_market_token,
+                book_freshness_max_age_ms=self.book_freshness_max_age_ms,
                 resolved_inventory_marks_by_market_token=self.resolved_inventory_marks_by_market_token,
             )
             realized_daily_loss_usdc = max(0.0, -daily_pnl_usdc)
@@ -441,6 +453,17 @@ class StrategyRuntime:
             venue_constraints=constraints,
         )
 
+    def book_age_ms(self, market_id: str, token_id: str, *, now_ms: int | None = None) -> int | None:
+        last_ingest_ms = self.latest_book_ingest_ms_by_market_token.get((str(market_id), str(token_id)))
+        if last_ingest_ms is None:
+            return None
+        effective_now_ms = int(self.clock.now_ms() if now_ms is None else now_ms)
+        return max(0, effective_now_ms - int(last_ingest_ms))
+
+    def is_book_fresh(self, market_id: str, token_id: str, *, now_ms: int | None = None) -> bool:
+        age_ms = self.book_age_ms(market_id, token_id, now_ms=now_ms)
+        return age_ms is not None and age_ms <= self.book_freshness_max_age_ms
+
 
 _NON_TERMINAL_ORDER_STATES = {
     OrderState.INTENT.value,
@@ -593,6 +616,8 @@ def _compute_daily_pnl_usdc(
     event_time_ms: int,
     latest_best_bid_by_market_token: dict[tuple[str, str], float],
     resolved_inventory_marks_by_market_token: dict[tuple[str, str], MarketResolvedWithInventory],
+    latest_book_ingest_ms_by_market_token: dict[tuple[str, str], int] | None = None,
+    book_freshness_max_age_ms: int = DEFAULT_BOOK_FRESHNESS_MAX_AGE_MS,
 ) -> float:
     inventory_lots = _build_intraday_inventory_lots(orders=orders, fills=fills, event_time_ms=event_time_ms)
     realized_pnl_usdc = _compute_intraday_realized_sell_pnl_usdc(orders=orders, fills=fills, event_time_ms=event_time_ms)
@@ -610,6 +635,12 @@ def _compute_daily_pnl_usdc(
             mark_price = latest_best_bid_by_market_token.get((str(market_token[0]), str(token_id)))
             if mark_price is None:
                 continue
+            if latest_book_ingest_ms_by_market_token is not None and book_freshness_max_age_ms > 0:
+                book_ingest_ms = latest_book_ingest_ms_by_market_token.get((str(market_token[0]), str(token_id)))
+                if book_ingest_ms is None:
+                    continue
+                if int(event_time_ms) - int(book_ingest_ms) > int(book_freshness_max_age_ms):
+                    continue
         mark_to_market_pnl_usdc += sum(float(size) * (float(mark_price) - float(unit_cost)) for size, unit_cost in lots)
     return realized_pnl_usdc + mark_to_market_pnl_usdc
 
