@@ -30,6 +30,7 @@ import sys
 import uuid
 from dataclasses import asdict, replace as dataclass_replace
 from pathlib import Path
+from typing import Callable, Iterable
 
 # Ensure repo root and v2/short_horizon/ are on path so all imports resolve.
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -288,6 +289,16 @@ class _WsCandidateCache:
             strategy.update_candidates(list(self._by_market.values()))
             return len(self._by_market)
 
+    async def prune_market_ids(self, *, strategy: SwanStrategyV1, market_ids: Iterable[str]) -> int:
+        async with self._lock:
+            removed = 0
+            for market_id in market_ids:
+                if self._by_market.pop(str(market_id), None) is not None:
+                    removed += 1
+            if removed:
+                strategy.update_candidates(list(self._by_market.values()))
+            return removed
+
 
 def _market_with_trigger_price(
     market: MarketInfo, *, token_id: str, side_index: int | None, ask: float
@@ -323,6 +334,9 @@ async def _ws_universe_builder_loop(
     shutdown: asyncio.Event,
     selector_observation_config: UniverseSelectorConfig | None = None,
     apply_selector_plan: bool = False,
+    protected_market_tokens_fn: Callable[[], Iterable[tuple[str, str]]] | None = None,
+    candidate_cache: _WsCandidateCache | None = None,
+    strategy_for_cache_prune: SwanStrategyV1 | None = None,
 ) -> None:
     """Periodically syncs CLOB WS subscription to the already-discovered market universe.
 
@@ -350,6 +364,11 @@ async def _ws_universe_builder_loop(
             tokens: set[str] = set()
             next_token_to_market_id: dict[str, str] = {}
             next_token_to_side_index: dict[str, int] = {}
+            old_token_to_market_id = dict(token_to_market_id)
+            old_token_to_side_index = dict(token_to_side_index)
+            market_by_id = {str(m.market_id): m for m in markets if m.market_id}
+            protected_pairs = _load_protected_market_tokens(protected_market_tokens_fn)
+            protected_token_ids = {token_id for _, token_id in protected_pairs}
             if apply_selector_plan and selector_plan is not None:
                 tokens = set(selector_plan.selected_token_ids)
                 next_token_to_market_id.update(selector_plan.token_to_market_id)
@@ -364,18 +383,38 @@ async def _ws_universe_builder_loop(
                         tokens.add(m.token_no_id)
                         next_token_to_market_id[m.token_no_id] = m.market_id
                         next_token_to_side_index[m.token_no_id] = 1
+            for market_id, token_id in protected_pairs:
+                tokens.add(token_id)
+                next_token_to_market_id[token_id] = market_id
+                next_token_to_side_index[token_id] = _resolve_side_index(
+                    token_id=token_id,
+                    market=market_by_id.get(market_id),
+                    existing_side_index=old_token_to_side_index.get(token_id),
+                )
+
+            to_add = tokens - subscribed
+            to_remove = subscribed - tokens
+            prunable_market_ids = {
+                old_token_to_market_id[token_id]
+                for token_id in to_remove
+                if token_id in old_token_to_market_id and token_id not in protected_token_ids
+            } - set(next_token_to_market_id.values())
 
             token_to_market_id.clear()
             token_to_market_id.update(next_token_to_market_id)
             token_to_side_index.clear()
             token_to_side_index.update(next_token_to_side_index)
 
-            to_add = tokens - subscribed
-            to_remove = subscribed - tokens
             if to_add:
                 await ws.subscribe(list(to_add))
             if to_remove:
                 await ws.unsubscribe(list(to_remove))
+            pruned_candidates = 0
+            if prunable_market_ids and candidate_cache is not None and strategy_for_cache_prune is not None:
+                pruned_candidates = await candidate_cache.prune_market_ids(
+                    strategy=strategy_for_cache_prune,
+                    market_ids=prunable_market_ids,
+                )
             subscribed = tokens
             logger.info(
                 "ws_universe_updated",
@@ -384,6 +423,8 @@ async def _ws_universe_builder_loop(
                 added=len(to_add),
                 removed=len(to_remove),
                 selector_applied=apply_selector_plan and selector_plan is not None,
+                protected_tokens=len(protected_token_ids),
+                pruned_candidates=pruned_candidates,
             )
         except Exception:
             logger.exception("ws_universe_builder_error")
@@ -392,6 +433,34 @@ async def _ws_universe_builder_loop(
             await asyncio.wait_for(shutdown.wait(), timeout=_WS_UNIVERSE_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
+
+
+def _load_protected_market_tokens(
+    protected_market_tokens_fn: Callable[[], Iterable[tuple[str, str]]] | None,
+) -> set[tuple[str, str]]:
+    if protected_market_tokens_fn is None:
+        return set()
+    return {
+        (str(market_id), str(token_id))
+        for market_id, token_id in protected_market_tokens_fn()
+        if market_id and token_id
+    }
+
+
+def _resolve_side_index(
+    *,
+    token_id: str,
+    market,
+    existing_side_index: int | None,
+) -> int:
+    if existing_side_index is not None:
+        return int(existing_side_index)
+    if market is not None:
+        if token_id == getattr(market, "token_no_id", None):
+            return 1
+        if token_id == getattr(market, "token_yes_id", None):
+            return 0
+    return 0
 
 
 async def _ws_price_monitor_loop(
@@ -1021,6 +1090,9 @@ async def run_swan_live(
             shutdown=shutdown,
             selector_observation_config=selector_observation_config,
             apply_selector_plan=apply_universe_selector and strategy_name == "black_swan",
+            protected_market_tokens_fn=lambda: _held_or_open_market_tokens(store),
+            candidate_cache=ws_candidate_cache,
+            strategy_for_cache_prune=strategy,
         ),
         name="swan_ws_universe_loop",
     )

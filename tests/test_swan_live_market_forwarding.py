@@ -14,6 +14,7 @@ for p in (_REPO, _V2):
 from short_horizon.core.clock import SystemClock
 from short_horizon.core.events import BookUpdate, MarketStateUpdate, TradeTick
 from short_horizon.market_data import LiveEventSource
+from short_horizon.strategies.swan_strategy_v1 import SwanCandidate
 from short_horizon.venue_polymarket import MarketMetadata, black_swan_universe_config
 import v2.short_horizon.swan_live as swan_live_module
 from v2.short_horizon.swan_live import (
@@ -89,6 +90,14 @@ class _SequencedSharedDiscovery:
         return batch
 
 
+class _FakeStrategy:
+    def __init__(self):
+        self.candidate_updates: list[list[SwanCandidate]] = []
+
+    def update_candidates(self, candidates):
+        self.candidate_updates.append(list(candidates))
+
+
 class _NoopLogger:
     def __init__(self):
         self.infos: list[tuple[tuple, dict]] = []
@@ -101,6 +110,19 @@ class _NoopLogger:
 
     def info(self, *args, **kwargs):
         self.infos.append((args, kwargs))
+
+
+def _candidate(market_id: str, token_id: str) -> SwanCandidate:
+    return SwanCandidate(
+        market_id=market_id,
+        condition_id=f"cond-{market_id}",
+        token_id=token_id,
+        question=f"Question {market_id}?",
+        asset_slug="bitcoin",
+        entry_levels=(0.01,),
+        notional_usdc_per_level=1.0,
+        candidate_id=f"candidate-{market_id}",
+    )
 
 
 def _market(market_id: str, *, question: str, category: str = "crypto") -> MarketMetadata:
@@ -247,6 +269,9 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
             logger = _NoopLogger()
             token_to_market_id: dict[str, str] = {}
             token_to_side_index: dict[str, int] = {}
+            candidate_cache = _WsCandidateCache()
+            strategy = _FakeStrategy()
+            await candidate_cache.upsert(strategy=strategy, candidates=[_candidate("weather", "yes-weather")])
             old_interval = swan_live_module._WS_UNIVERSE_INTERVAL_SECONDS
             swan_live_module._WS_UNIVERSE_INTERVAL_SECONDS = 0.001
             try:
@@ -270,12 +295,14 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
                     shutdown=shutdown,
                     selector_observation_config=black_swan_universe_config(max_markets=1),
                     apply_selector_plan=True,
+                    candidate_cache=candidate_cache,
+                    strategy_for_cache_prune=strategy,
                 )
             finally:
                 swan_live_module._WS_UNIVERSE_INTERVAL_SECONDS = old_interval
-            return ws, logger, token_to_market_id, token_to_side_index
+            return ws, logger, token_to_market_id, token_to_side_index, strategy
 
-        ws, logger, token_to_market_id, token_to_side_index = asyncio.run(run())
+        ws, logger, token_to_market_id, token_to_side_index, strategy = asyncio.run(run())
 
         self.assertEqual(set(ws.subscribed[0]), {"yes-weather", "no-weather"})
         self.assertEqual(set(ws.subscribed[1]), {"yes-random", "no-random"})
@@ -288,3 +315,43 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertFalse(selector_logs[0][1]["observe_only"])
         universe_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_updated",)]
         self.assertTrue(all(entry[1]["selector_applied"] for entry in universe_logs))
+        self.assertEqual(universe_logs[-1][1]["pruned_candidates"], 1)
+        self.assertEqual(strategy.candidate_updates[-1], [])
+
+    def test_universe_builder_retains_protected_held_tokens_when_selector_applies(self) -> None:
+        async def run():
+            shutdown = asyncio.Event()
+            ws = _FakeWs(shutdown)
+            logger = _NoopLogger()
+            token_to_market_id: dict[str, str] = {}
+            token_to_side_index: dict[str, int] = {}
+
+            await _ws_universe_builder_loop(
+                ws=ws,
+                shared_discovery=_FakeSharedDiscovery(
+                    shutdown,
+                    [
+                        _market("random", question="Will the price of Bitcoin close above $100,000 today?"),
+                        _market("weather", category="weather", question="Will a hurricane hit Florida?"),
+                    ],
+                ),
+                token_to_market_id=token_to_market_id,
+                token_to_side_index=token_to_side_index,
+                duration_window=object(),
+                universe_filter=object(),
+                logger=logger,
+                shutdown=shutdown,
+                selector_observation_config=black_swan_universe_config(max_markets=1),
+                apply_selector_plan=True,
+                protected_market_tokens_fn=lambda: [("random", "yes-random")],
+            )
+            return ws, logger, token_to_market_id, token_to_side_index
+
+        ws, logger, token_to_market_id, token_to_side_index = asyncio.run(run())
+
+        self.assertEqual(set(ws.subscribed[0]), {"yes-weather", "no-weather", "yes-random"})
+        self.assertEqual(token_to_market_id["yes-random"], "random")
+        self.assertEqual(token_to_side_index["yes-random"], 0)
+        self.assertNotIn("no-random", token_to_market_id)
+        universe_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_updated",)]
+        self.assertEqual(universe_logs[-1][1]["protected_tokens"], 1)
