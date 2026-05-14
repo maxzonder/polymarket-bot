@@ -28,7 +28,7 @@ import asyncio
 import os
 import sys
 import uuid
-from dataclasses import replace as dataclass_replace
+from dataclasses import asdict, replace as dataclass_replace
 from pathlib import Path
 
 # Ensure repo root and v2/short_horizon/ are on path so all imports resolve.
@@ -64,7 +64,7 @@ from short_horizon.strategies.black_swan_strategy_v1 import (
     BlackSwanStrategyV1,
 )
 from short_horizon.telemetry import configure_logging, get_logger
-from short_horizon.venue_polymarket import PolymarketUserStream
+from short_horizon.venue_polymarket import PolymarketUserStream, UniverseSelectorConfig, black_swan_universe_config, build_subscription_plan
 from short_horizon.venue_polymarket.execution_client import (
     PRIVATE_KEY_ENV_VAR,
     PolymarketExecutionClient,
@@ -321,6 +321,7 @@ async def _ws_universe_builder_loop(
     universe_filter: UniverseFilter,
     logger,
     shutdown: asyncio.Event,
+    selector_observation_config: UniverseSelectorConfig | None = None,
 ) -> None:
     """Periodically syncs CLOB WS subscription to the already-discovered market universe.
 
@@ -336,6 +337,14 @@ async def _ws_universe_builder_loop(
                 duration_window=duration_window,
                 max_rows=5_000,
             )
+            if selector_observation_config is not None:
+                selector_plan = build_subscription_plan(markets, config=selector_observation_config)
+                logger.info(
+                    "ws_universe_selector_observation",
+                    observe_only=True,
+                    **asdict(selector_plan.summary(top_n=10)),
+                )
+
             tokens: set[str] = set()
             next_token_to_market_id: dict[str, str] = {}
             next_token_to_side_index: dict[str, int] = {}
@@ -958,6 +967,11 @@ async def run_swan_live(
     token_to_market_id: dict[str, str] = {}
     token_to_side_index: dict[str, int] = {}
     ws_candidate_cache = _WsCandidateCache()
+    selector_observation_config = (
+        black_swan_universe_config()
+        if strategy_name == "black_swan" and resolved_mode is ExecutionMode.DRY_RUN
+        else None
+    )
 
     # Issue #190: black_swan price discovery comes from CLOB WS edge triggers.
     # Keep the old full-Gamma screener only for the legacy broad swan strategy.
@@ -996,6 +1010,7 @@ async def run_swan_live(
             universe_filter=universe_filter,
             logger=logger,
             shutdown=shutdown,
+            selector_observation_config=selector_observation_config,
         ),
         name="swan_ws_universe_loop",
     )
