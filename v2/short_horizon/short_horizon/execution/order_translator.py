@@ -173,7 +173,7 @@ def estimate_effective_buy_notional(
     except ValueError:
         return float(notional_usdc)
     if rounded_price <= 0:
-        return float(notional_usdc)
+        rounded_price = float(venue_constraints.tick_size)
     target_notional = _target_buy_notional_from_values(
         notional_usdc=notional_usdc,
         venue_constraints=venue_constraints,

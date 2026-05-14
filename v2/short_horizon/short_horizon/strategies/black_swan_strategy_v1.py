@@ -43,6 +43,14 @@ class BlackSwanConfig(SwanConfig):
     # ones. The 1h SwanConfig default would conflict for 45-60m markets
     # that are now in scope.
     cancel_when_remaining_seconds_lt: float = 1440.0
+    # Venue-minimum guardrail: BLACK_SWAN_MODE is budgeted at about $1 per
+    # market.  Without effective-notional caps, --stake-per-level=1.0 submits
+    # roughly one venue-minimum order at every ladder level (~$5/market).
+    use_effective_notional_for_caps: bool = True
+    max_effective_notional_per_market_usdc: float = 1.05
+    skip_below_venue_min_effective_notional: bool = True
+    venue_min_order_notional_usdc: float = 1.0
+    venue_min_order_shares_fallback: float = 5.0
 
 
 class BlackSwanStrategyV1(SwanStrategyV1):

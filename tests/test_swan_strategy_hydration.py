@@ -9,7 +9,8 @@ SHORT_HORIZON_ROOT = REPO_ROOT / "v2" / "short_horizon"
 if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
-from short_horizon.core.events import OrderAccepted, OrderFilled, OrderSide, TimerEvent
+from short_horizon.core.events import MarketStateUpdate, OrderAccepted, OrderFilled, OrderSide, TimerEvent
+from short_horizon.strategies.black_swan_strategy_v1 import BlackSwanStrategyV1
 from short_horizon.strategies.swan_strategy_v1 import (
     TIMER_SCREENER_REFRESH,
     SwanCandidate,
@@ -186,6 +187,62 @@ class SwanStrategyHydrationTests(unittest.TestCase):
                 asset_slug="crypto",
                 entry_levels=(0.01,),
                 notional_usdc_per_level=1.0,
+            )
+        ])
+
+        intents = strategy.on_timer(self._timer())
+
+        self.assertEqual(intents, [])
+
+    def test_black_swan_ladder_caps_effective_venue_minimum_to_one_order_per_market(self) -> None:
+        strategy = BlackSwanStrategyV1()
+        strategy.on_market_state(MarketStateUpdate(
+            event_time_ms=900,
+            ingest_time_ms=900,
+            market_id="m-6",
+            token_id="tok-6",
+            tick_size=0.001,
+            min_order_size=5.0,
+            is_active=True,
+        ))
+        strategy.update_candidates([
+            SwanCandidate(
+                market_id="m-6",
+                condition_id="c-6",
+                token_id="tok-6",
+                question="Venue min ladder?",
+                asset_slug="crypto",
+                entry_levels=(0.005, 0.01, 0.02, 0.03, 0.05),
+                notional_usdc_per_level=1.0,
+            )
+        ])
+
+        intents = strategy.on_timer(self._timer())
+
+        self.assertEqual(len(intents), 1)
+        self.assertIsInstance(intents[0], PlaceOrder)
+        self.assertAlmostEqual(intents[0].intent.entry_price, 0.005)
+
+    def test_black_swan_skips_tiny_tier_that_would_translate_below_venue_minimum(self) -> None:
+        strategy = BlackSwanStrategyV1()
+        strategy.on_market_state(MarketStateUpdate(
+            event_time_ms=900,
+            ingest_time_ms=900,
+            market_id="m-7",
+            token_id="tok-7",
+            tick_size=0.001,
+            min_order_size=5.0,
+            is_active=True,
+        ))
+        strategy.update_candidates([
+            SwanCandidate(
+                market_id="m-7",
+                condition_id="c-7",
+                token_id="tok-7",
+                question="Tiny ladder?",
+                asset_slug="crypto",
+                entry_levels=(0.05,),
+                notional_usdc_per_level=0.08,
             )
         ])
 

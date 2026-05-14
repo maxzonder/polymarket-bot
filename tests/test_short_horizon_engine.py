@@ -4025,6 +4025,14 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                         best_bid=0.54,
                         best_ask=0.55,
                     ),
+                    BookUpdate(
+                        event_time_ms=225_010,
+                        ingest_time_ms=225_030,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
                 ]
             )
 
@@ -4100,6 +4108,14 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                         best_bid=0.54,
                         best_ask=0.55,
                     ),
+                    BookUpdate(
+                        event_time_ms=225_010,
+                        ingest_time_ms=225_030,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                    ),
                 ]
             )
 
@@ -4108,12 +4124,12 @@ class LiveRunnerAsyncTest(unittest.IsolatedAsyncioTestCase):
                 run_id="live_dry_run_test_001",
                 config_hash="test-config",
                 source=source,
-                max_events=3,
+                max_events=4,
                 execution_mode=ExecutionMode.DRY_RUN,
             )
 
             self.assertEqual(summary.run_id, "live_dry_run_test_001")
-            self.assertEqual(summary.event_count, 3)
+            self.assertEqual(summary.event_count, 4)
             self.assertEqual(summary.order_intents, 1)
             self.assertEqual(summary.synthetic_order_events, 2)
 

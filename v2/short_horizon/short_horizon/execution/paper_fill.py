@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import re
 
 from ..core.events import BookLevel, BookUpdate, TradeTick
@@ -23,6 +24,8 @@ class PaperFillModelConfig:
     model: str = "crossing_taker"
     fill_without_visible_depth: bool = True
     post_only_book_cross_fills: bool = True
+    min_rest_age_ms: int = 1
+    require_post_only_resting_book: bool = True
     source_prefix: str = "replay"
 
 
@@ -39,6 +42,9 @@ class PaperFillSimulator:
     def __init__(self, config: PaperFillModelConfig | None = None):
         self.config = config or PaperFillModelConfig()
         self._applied_keys: set[tuple[str, int, str, str]] = set()
+        self._rested_post_only_orders: set[str] = set()
+        self._invalid_post_only_orders: set[str] = set()
+        self._last_post_only_crossed: dict[str, bool] = {}
 
     def on_book_update(self, event: BookUpdate, *, execution: ExecutionEngine):
         if self.config.model == "none":
@@ -59,6 +65,7 @@ class PaperFillSimulator:
             fill = self._apply_fill_request(request, execution=execution)
             if fill is not None:
                 fills.append(fill)
+        self._observe_post_only_restability(matching_orders, event)
         return fills
 
     def on_trade_tick(self, event: TradeTick, *, execution: ExecutionEngine):
@@ -68,7 +75,9 @@ class PaperFillSimulator:
         remaining_trade_size = max(float(event.size), 0.0)
         if remaining_trade_size <= 1e-12:
             return []
-        for order in self._matching_orders(event.market_id, event.token_id, execution=execution):
+        matching_orders = self._matching_orders(event.market_id, event.token_id, execution=execution)
+        matching_orders.sort(key=_trade_priority_sort_key)
+        for order in matching_orders:
             if remaining_trade_size <= 1e-12:
                 break
             request = self._fill_request_from_trade(order, event, max_fill_size=remaining_trade_size)
@@ -112,6 +121,8 @@ class PaperFillSimulator:
         return orders
 
     def _fill_request_from_book(self, order: dict, event: BookUpdate) -> SyntheticFillRequest | None:
+        if not _is_causal_after_rest(order, int(event.event_time_ms), min_rest_age_ms=self.config.min_rest_age_ms):
+            return None
         side = str(order.get("side") or "").upper()
         limit_price = float(order.get("price") or 0.0)
         remaining_size = float(order.get("remaining_size") or order.get("size") or 0.0)
@@ -170,8 +181,13 @@ class PaperFillSimulator:
         buy_orders = [order for order in post_only_orders if str(order.get("side") or "").upper() == "BUY"]
         buy_orders.sort(key=lambda row: (-float(row.get("price") or 0.0), _order_created_sort_key(row)))
         for order in buy_orders:
+            order_id = str(order.get("order_id") or "")
+            if not self._post_only_can_make_from_book(order, event):
+                continue
             limit_price = float(order.get("price") or 0.0)
             if event.best_ask is None or float(event.best_ask) > limit_price + 1e-12:
+                continue
+            if self._last_post_only_crossed.get(order_id) is not False:
                 continue
             fill_size = _consume_visible_cross_depth(
                 levels=buy_levels,
@@ -186,8 +202,13 @@ class PaperFillSimulator:
         sell_orders = [order for order in post_only_orders if str(order.get("side") or "").upper() == "SELL"]
         sell_orders.sort(key=lambda row: (float(row.get("price") or 0.0), _order_created_sort_key(row)))
         for order in sell_orders:
+            order_id = str(order.get("order_id") or "")
+            if not self._post_only_can_make_from_book(order, event):
+                continue
             limit_price = float(order.get("price") or 0.0)
             if event.best_bid is None or float(event.best_bid) < limit_price - 1e-12:
+                continue
+            if self._last_post_only_crossed.get(order_id) is not False:
                 continue
             fill_size = _consume_visible_cross_depth(
                 levels=sell_levels,
@@ -202,6 +223,8 @@ class PaperFillSimulator:
         return requests
 
     def _fill_request_from_trade(self, order: dict, event: TradeTick, *, max_fill_size: float | None = None) -> SyntheticFillRequest | None:
+        if not _is_causal_after_rest(order, int(event.event_time_ms), min_rest_age_ms=self.config.min_rest_age_ms):
+            return None
         side = str(order.get("side") or "").upper()
         limit_price = float(order.get("price") or 0.0)
         remaining_size = float(order.get("remaining_size") or order.get("size") or 0.0)
@@ -211,16 +234,23 @@ class PaperFillSimulator:
         if side not in {"BUY", "SELL"}:
             return None
         if post_only:
-            # Maker/post-only fills require explicit contra-side taker flow and
-            # the trade print must be at our resting price.  A lower SELL print
-            # should not fill higher BUY bids: on a price-time priority book
-            # those higher bids would have printed at their own prices first.
+            # Maker/post-only fills require explicit contra-side taker flow after
+            # the order has actually rested.  For a resting BUY at limit L, a
+            # later sell-aggressor print at price <= L is eligible; exact-price
+            # matching undercounts makers when the trade executes through our
+            # shadow level.
             normalized_aggressor = str(aggressor_side or "").lower()
             if side == "BUY" and normalized_aggressor != "sell":
                 return None
             if side == "SELL" and normalized_aggressor != "buy":
                 return None
-            if abs(trade_price - limit_price) > 1e-12:
+            if self.config.require_post_only_resting_book and str(order.get("order_id") or "") not in self._rested_post_only_orders:
+                return None
+            if str(order.get("order_id") or "") in self._invalid_post_only_orders:
+                return None
+            if side == "BUY" and trade_price > limit_price + 1e-12:
+                return None
+            if side == "SELL" and trade_price < limit_price - 1e-12:
                 return None
         else:
             if side == "BUY" and trade_price > limit_price + 1e-12:
@@ -241,6 +271,41 @@ class PaperFillSimulator:
             liquidity_role="maker" if post_only else "taker",
             fill_id=_trade_fill_id(order=order, event=event, fill_size=fill_size, source=self.config.source_prefix),
         )
+
+    def _observe_post_only_restability(self, orders: list[dict], event: BookUpdate) -> None:
+        for order in orders:
+            if not _is_post_only(order):
+                continue
+            order_id = str(order.get("order_id") or "")
+            if not order_id:
+                continue
+            if order_id in self._invalid_post_only_orders:
+                continue
+            if not _is_causal_after_rest(order, int(event.event_time_ms), min_rest_age_ms=self.config.min_rest_age_ms):
+                continue
+            crossed = _post_only_crossed(order, event)
+            if crossed is None:
+                continue
+            if order_id not in self._last_post_only_crossed and crossed:
+                # If the first fresh book we can observe after acceptance is
+                # already marketable, a real post-only order would not have
+                # rested.  Keep it out of later shadow maker fills even if a
+                # later book becomes non-crossing.
+                self._invalid_post_only_orders.add(order_id)
+                self._last_post_only_crossed[order_id] = crossed
+                continue
+            if not crossed:
+                self._rested_post_only_orders.add(order_id)
+            self._last_post_only_crossed[order_id] = crossed
+
+    def _post_only_can_make_from_book(self, order: dict, event: BookUpdate) -> bool:
+        if not _is_causal_after_rest(order, int(event.event_time_ms), min_rest_age_ms=self.config.min_rest_age_ms):
+            return False
+        if str(order.get("order_id") or "") in self._invalid_post_only_orders:
+            return False
+        if not self.config.require_post_only_resting_book:
+            return True
+        return str(order.get("order_id") or "") in self._rested_post_only_orders
 
     def _consume_book_levels(
         self,
@@ -287,6 +352,56 @@ def _is_post_only(order: dict) -> bool:
 
 def _order_created_sort_key(order: dict) -> str:
     return str(order.get("intent_created_at") or order.get("created_at") or order.get("order_id") or "")
+
+
+def _trade_priority_sort_key(order: dict) -> tuple[int, float, str]:
+    side = str(order.get("side") or "").upper()
+    price = float(order.get("price") or 0.0)
+    if _is_post_only(order) and side == "BUY":
+        return (0, -price, _order_created_sort_key(order))
+    if _is_post_only(order) and side == "SELL":
+        return (0, price, _order_created_sort_key(order))
+    return (1, 0.0, _order_created_sort_key(order))
+
+
+def _order_resting_from_ms(order: dict) -> int:
+    # Accepted/partially-filled rows have last_state_change_at set to the
+    # accepted/resting timestamp until a fill changes it.  Fall back to intent
+    # creation for hand-built test rows and legacy stores.
+    state = str(order.get("state") or "")
+    last_state_change = order.get("last_state_change_at")
+    if state == OrderState.ACCEPTED.value and last_state_change:
+        return _iso_to_ms(str(last_state_change))
+    values: list[int] = []
+    for key in ("last_state_change_at", "intent_created_at"):
+        value = order.get(key)
+        if value:
+            values.append(_iso_to_ms(str(value)))
+    return min(values) if values else 0
+
+
+def _iso_to_ms(text: str) -> int:
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    return int(round(datetime.fromisoformat(text).timestamp() * 1000))
+
+
+def _is_causal_after_rest(order: dict, event_time_ms: int, *, min_rest_age_ms: int) -> bool:
+    return int(event_time_ms) >= _order_resting_from_ms(order) + max(int(min_rest_age_ms), 0)
+
+
+def _post_only_crossed(order: dict, event: BookUpdate) -> bool | None:
+    side = str(order.get("side") or "").upper()
+    limit_price = float(order.get("price") or 0.0)
+    if side == "BUY":
+        if event.best_ask is None:
+            return None
+        return float(event.best_ask) <= limit_price + 1e-12
+    if side == "SELL":
+        if event.best_bid is None:
+            return None
+        return float(event.best_bid) >= limit_price - 1e-12
+    return None
 
 
 def _consume_visible_cross_depth(

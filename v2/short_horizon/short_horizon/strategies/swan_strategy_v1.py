@@ -19,6 +19,7 @@ from ..core.events import (
 )
 from ..core.models import OrderIntent, SkipDecision, TouchSignal
 from ..core.order_state import OrderState
+from ..execution.order_translator import VenueConstraints, estimate_effective_buy_notional
 from ..strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 
 TIMER_SCREENER_REFRESH = "swan_screener_refresh"
@@ -79,6 +80,16 @@ class SwanConfig:
     sell_exit_price: float = 0.99
     sell_exit_post_only: bool = True
 
+    # Venue-minimum awareness for cheap resting ladders.  Disabled by default
+    # for legacy swan behaviour; black_swan enables this so a nominal
+    # $1/market budget cannot silently become five venue-minimum orders.
+    use_effective_notional_for_caps: bool = False
+    max_effective_notional_per_market_usdc: float = 0.0
+    skip_below_venue_min_effective_notional: bool = False
+    venue_tick_size_fallback: float = 0.01
+    venue_min_order_notional_usdc: float = 1.0
+    venue_min_order_shares_fallback: float = 0.0
+
 
 @dataclass
 class _RestingBid:
@@ -119,6 +130,7 @@ class SwanStrategyV1:
         # just because the token is still cheap.  Without these guards paper can
         # churn one-dollar bids into tens of thousands of synthetic fills.
         self._filled_buy_notional_usdc: float = 0.0
+        self._filled_buy_notional_by_market: dict[str, float] = {}
         self._completed_entry_levels: set[tuple[str, str, float]] = set()
 
     # ─── External API (called from screener thread) ──────────────────────────
@@ -150,6 +162,7 @@ class SwanStrategyV1:
         self._pending_place.clear()
         self._active_candidates.clear()
         self._filled_buy_notional_usdc = 0.0
+        self._filled_buy_notional_by_market.clear()
         self._completed_entry_levels.clear()
 
         for row in rows:
@@ -165,7 +178,9 @@ class SwanStrategyV1:
             side = str(row.get("side") or "BUY").upper()
             if cumulative_filled_size > 0 and level > 0:
                 if side == "BUY":
-                    self._filled_buy_notional_usdc += level * cumulative_filled_size
+                    filled_notional = level * cumulative_filled_size
+                    self._filled_buy_notional_usdc += filled_notional
+                    self._filled_buy_notional_by_market[market_id] = self._filled_buy_notional_by_market.get(market_id, 0.0) + filled_notional
                     if str(row.get("state") or "") == OrderState.FILLED.value:
                         self._completed_entry_levels.add(
                             self._entry_level_key(market_id, token_id, level)
@@ -305,7 +320,13 @@ class SwanStrategyV1:
                 break
 
             intent = self._build_order_intent(candidate, level)
-            if self._would_exceed_total_stake_cap(intent.notional_usdc):
+            effective_notional = self._effective_notional_usdc(intent)
+            if self._should_skip_below_venue_min(effective_notional):
+                continue
+            committed_notional = effective_notional if self.config.use_effective_notional_for_caps else intent.notional_usdc
+            if self._would_exceed_market_effective_cap(candidate.market_id, effective_notional):
+                continue
+            if self._would_exceed_total_stake_cap(committed_notional):
                 break
             intents.append(PlaceOrder(intent=intent))
             self._pending_place[intent.intent_id] = _RestingBid(
@@ -313,7 +334,7 @@ class SwanStrategyV1:
                 token_id=candidate.token_id,
                 level=level,
                 order_id=intent.intent_id,
-                notional_usdc=candidate.notional_usdc_per_level,
+                notional_usdc=committed_notional,
                 placed_at_ms=self.clock.now_ms(),
             )
 
@@ -396,14 +417,21 @@ class SwanStrategyV1:
                 bid.notional_usdc = max(float(event.remaining_size), 0.0) * float(bid.level)
         if event.side is OrderSide.SELL:
             self._positions[event.token_id] = max(self._positions.get(event.token_id, 0.0) - event.fill_size, 0.0)
+            sold_notional = float(event.fill_price) * float(event.fill_size)
             self._filled_buy_notional_usdc = max(
-                self._filled_buy_notional_usdc - float(event.fill_price) * float(event.fill_size),
+                self._filled_buy_notional_usdc - sold_notional,
+                0.0,
+            )
+            self._filled_buy_notional_by_market[event.market_id] = max(
+                self._filled_buy_notional_by_market.get(event.market_id, 0.0) - sold_notional,
                 0.0,
             )
             return intents
 
         self._positions[event.token_id] = self._positions.get(event.token_id, 0.0) + event.fill_size
-        self._filled_buy_notional_usdc += float(event.fill_price) * float(event.fill_size)
+        filled_notional = float(event.fill_price) * float(event.fill_size)
+        self._filled_buy_notional_usdc += filled_notional
+        self._filled_buy_notional_by_market[event.market_id] = self._filled_buy_notional_by_market.get(event.market_id, 0.0) + filled_notional
         if event.remaining_size <= 0:
             filled_level = bid.level if bid else float(event.fill_price)
             self._completed_entry_levels.add(
@@ -449,6 +477,53 @@ class SwanStrategyV1:
         committed += sum(bid.notional_usdc for bid in self._resting_bids.values())
         committed += sum(bid.notional_usdc for bid in self._pending_place.values())
         return committed + float(next_notional_usdc) > cap + 1e-9
+
+    def _would_exceed_market_effective_cap(self, market_id: str, next_effective_notional_usdc: float) -> bool:
+        cap = float(getattr(self.config, "max_effective_notional_per_market_usdc", 0.0) or 0.0)
+        if cap <= 0:
+            return False
+        committed = self._filled_buy_notional_by_market.get(market_id, 0.0)
+        committed += sum(
+            bid.notional_usdc for bid in self._resting_bids.values()
+            if bid.market_id == market_id
+        )
+        committed += sum(
+            bid.notional_usdc for bid in self._pending_place.values()
+            if bid.market_id == market_id
+        )
+        return committed + float(next_effective_notional_usdc) > cap + 1e-9
+
+    def _should_skip_below_venue_min(self, effective_notional_usdc: float) -> bool:
+        if not self.config.skip_below_venue_min_effective_notional:
+            return False
+        minimum = float(self.config.venue_min_order_notional_usdc or 0.0)
+        return minimum > 0 and float(effective_notional_usdc) + 1e-12 < minimum
+
+    def _effective_notional_usdc(self, intent: OrderIntent) -> float:
+        if not self.config.use_effective_notional_for_caps and not self.config.skip_below_venue_min_effective_notional:
+            return float(intent.notional_usdc)
+        if OrderSide(str(intent.side)) is not OrderSide.BUY:
+            return float(intent.notional_usdc)
+        meta = self._market_meta.get(intent.market_id)
+        min_order_shares = None
+        tick_size = float(self.config.venue_tick_size_fallback or 0.01)
+        if meta is not None:
+            if meta.tick_size is not None:
+                tick_size = float(meta.tick_size)
+            if meta.min_order_size is not None:
+                min_order_shares = float(meta.min_order_size)
+        if min_order_shares is None:
+            fallback = float(self.config.venue_min_order_shares_fallback or 0.0)
+            min_order_shares = fallback if fallback > 0 else None
+        return estimate_effective_buy_notional(
+            notional_usdc=float(intent.notional_usdc),
+            entry_price=float(intent.entry_price),
+            venue_constraints=VenueConstraints(
+                tick_size=tick_size,
+                min_order_size=float(self.config.venue_min_order_notional_usdc or 0.0),
+                min_order_shares=min_order_shares,
+            ),
+        )
 
     @staticmethod
     def _entry_level_key(market_id: str, token_id: str, level: float) -> tuple[str, str, float]:

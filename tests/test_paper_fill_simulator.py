@@ -58,6 +58,20 @@ class PaperFillSimulatorTest(unittest.TestCase):
             reason="test_resting_bid",
         )
 
+    def _observe_resting_book(self, simulator: PaperFillSimulator, execution: ExecutionEngine, *, event_time_ms: int = 226_000) -> None:
+        simulator.on_book_update(
+            BookUpdate(
+                event_time_ms=event_time_ms,
+                ingest_time_ms=event_time_ms + 10,
+                market_id="m1",
+                token_id="tok_yes",
+                best_bid=0.04,
+                best_ask=0.06,
+                ask_levels=(BookLevel(price=0.06, size=50.0),),
+            ),
+            execution=execution,
+        )
+
     def test_book_cross_partially_fills_buy_order_and_does_not_duplicate_same_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "paper.sqlite3"
@@ -67,7 +81,7 @@ class PaperFillSimulatorTest(unittest.TestCase):
                 intent = self._intent(price=0.05, notional=2.5)  # 50 shares
                 store.persist_intent(intent)
                 execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
-                execution.submit(intent)
+                execution.submit(intent, event_time_ms=225_000)
 
                 simulator = PaperFillSimulator()
                 book = BookUpdate(
@@ -167,11 +181,12 @@ class PaperFillSimulatorTest(unittest.TestCase):
                 )
                 execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
                 simulator = PaperFillSimulator()
+                self._observe_resting_book(simulator, execution, event_time_ms=226_000)
 
                 book_fills = simulator.on_book_update(
                     BookUpdate(
-                        event_time_ms=226_000,
-                        ingest_time_ms=226_010,
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
                         market_id="m1",
                         token_id="tok_yes",
                         best_bid=0.04,
@@ -182,8 +197,8 @@ class PaperFillSimulatorTest(unittest.TestCase):
                 )
                 trade_fills = simulator.on_trade_tick(
                     TradeTick(
-                        event_time_ms=226_100,
-                        ingest_time_ms=226_110,
+                        event_time_ms=226_200,
+                        ingest_time_ms=226_210,
                         market_id="m1",
                         token_id="tok_yes",
                         price=0.05,
@@ -199,6 +214,146 @@ class PaperFillSimulatorTest(unittest.TestCase):
                 self.assertAlmostEqual(book_fills[0].fill_size, 20.0)
                 self.assertAlmostEqual(book_fills[0].fill_price, 0.05)
                 self.assertEqual(trade_fills, [])
+            finally:
+                store.close()
+
+    def test_post_only_book_cross_requires_prior_resting_non_cross(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_post_only_rest_gate.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_rest_gate_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="maker_buy_rest_gate_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.05,
+                    size=20.0,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="maker_buy_rest_gate_001",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_001,
+                    remaining_size=20.0,
+                    venue_order_status="accepted",
+                    post_only=True,
+                )
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                simulator = PaperFillSimulator()
+
+                fills = simulator.on_book_update(
+                    BookUpdate(
+                        event_time_ms=226_000,
+                        ingest_time_ms=226_010,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.04,
+                        best_ask=0.04,
+                        ask_levels=(BookLevel(price=0.04, size=20.0),),
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(fills, [])
+                self.assertEqual(store.load_order("maker_buy_rest_gate_001")["state"], OrderState.ACCEPTED.value)
+            finally:
+                store.close()
+
+    def test_post_only_marketable_on_first_fresh_book_never_becomes_maker_fill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_post_only_marketable_first.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_marketable_first_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                store.insert_order(
+                    order_id="maker_buy_marketable_first_001",
+                    market_id="m1",
+                    token_id="tok_yes",
+                    side="BUY",
+                    price=0.05,
+                    size=20.0,
+                    state=OrderState.ACCEPTED,
+                    client_order_id="maker_buy_marketable_first_001",
+                    intent_created_at_ms=225_000,
+                    last_state_change_at_ms=225_001,
+                    remaining_size=20.0,
+                    venue_order_status="accepted",
+                    post_only=True,
+                )
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                simulator = PaperFillSimulator()
+
+                first_crossed_fills = simulator.on_book_update(
+                    BookUpdate(
+                        event_time_ms=226_000,
+                        ingest_time_ms=226_010,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.04,
+                        best_ask=0.04,
+                        ask_levels=(BookLevel(price=0.04, size=20.0),),
+                    ),
+                    execution=execution,
+                )
+                later_resting_fills = simulator.on_book_update(
+                    BookUpdate(
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.04,
+                        best_ask=0.06,
+                        ask_levels=(BookLevel(price=0.06, size=20.0),),
+                    ),
+                    execution=execution,
+                )
+                later_trade_fills = simulator.on_trade_tick(
+                    TradeTick(
+                        event_time_ms=226_200,
+                        ingest_time_ms=226_210,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        price=0.04,
+                        size=20.0,
+                        source="test.trade",
+                        aggressor_side=AggressorSide.SELL,
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(first_crossed_fills, [])
+                self.assertEqual(later_resting_fills, [])
+                self.assertEqual(later_trade_fills, [])
+            finally:
+                store.close()
+
+    def test_book_fill_cannot_use_market_data_before_order_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "paper_causal.sqlite3"
+            store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_causal_001", strategy_id="paper_test", mode="dry_run"))
+            try:
+                store.upsert_market_state(self._market_state())
+                intent = self._intent(price=0.05, notional=2.5)
+                store.persist_intent(intent)
+                execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
+                execution.submit(intent, event_time_ms=225_000)
+                simulator = PaperFillSimulator()
+
+                fills = simulator.on_book_update(
+                    BookUpdate(
+                        event_time_ms=224_999,
+                        ingest_time_ms=226_010,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.03,
+                        best_ask=0.04,
+                        ask_levels=(BookLevel(price=0.04, size=10.0),),
+                    ),
+                    execution=execution,
+                )
+
+                self.assertEqual(fills, [])
+                self.assertEqual(store.load_order("paper_ord_001")["state"], OrderState.ACCEPTED.value)
             finally:
                 store.close()
 
@@ -226,11 +381,12 @@ class PaperFillSimulatorTest(unittest.TestCase):
                     )
                 execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
                 simulator = PaperFillSimulator()
+                self._observe_resting_book(simulator, execution, event_time_ms=226_000)
 
                 fills = simulator.on_book_update(
                     BookUpdate(
-                        event_time_ms=226_000,
-                        ingest_time_ms=226_010,
+                        event_time_ms=226_100,
+                        ingest_time_ms=226_110,
                         market_id="m1",
                         token_id="tok_yes",
                         best_bid=0.04,
@@ -276,6 +432,7 @@ class PaperFillSimulatorTest(unittest.TestCase):
                 )
                 execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
                 simulator = PaperFillSimulator()
+                self._observe_resting_book(simulator, execution, event_time_ms=226_000)
 
                 fills = simulator.on_trade_tick(
                     TradeTick(
@@ -323,6 +480,7 @@ class PaperFillSimulatorTest(unittest.TestCase):
                     )
                 execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
                 simulator = PaperFillSimulator()
+                self._observe_resting_book(simulator, execution, event_time_ms=226_000)
 
                 fills = simulator.on_trade_tick(
                     TradeTick(
@@ -371,6 +529,7 @@ class PaperFillSimulatorTest(unittest.TestCase):
                 )
                 execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
                 simulator = PaperFillSimulator()
+                self._observe_resting_book(simulator, execution, event_time_ms=226_000)
 
                 first_fills = simulator.on_trade_tick(
                     TradeTick(
@@ -431,7 +590,7 @@ class PaperFillSimulatorTest(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_post_only_buy_matches_trade_price_not_all_higher_bid_levels(self) -> None:
+    def test_post_only_buy_trade_fills_eligible_higher_bid_levels_by_priority(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "paper_post_only_levels.sqlite3"
             store = SQLiteRuntimeStore(db_path, run=RunContext(run_id="paper_post_only_levels_001", strategy_id="paper_test", mode="dry_run"))
@@ -455,6 +614,7 @@ class PaperFillSimulatorTest(unittest.TestCase):
                     )
                 execution = ExecutionEngine(store=store, mode=ExecutionMode.DRY_RUN)
                 simulator = PaperFillSimulator()
+                self._observe_resting_book(simulator, execution, event_time_ms=226_000)
 
                 fills = simulator.on_trade_tick(
                     TradeTick(
@@ -470,11 +630,15 @@ class PaperFillSimulatorTest(unittest.TestCase):
                     execution=execution,
                 )
 
-                self.assertEqual(len(fills), 1)
+                self.assertEqual(len(fills), 3)
+                self.assertEqual([fill.order_id for fill in fills], ["maker_buy_level_3", "maker_buy_level_2", "maker_buy_level_1"])
                 self.assertAlmostEqual(fills[0].fill_size, 10.0)
-                self.assertEqual(fills[0].order_id, "maker_buy_level_0")
-                self.assertEqual(store.load_order("maker_buy_level_0")["state"], OrderState.FILLED.value)
-                for idx in (1, 2, 3):
+                self.assertAlmostEqual(fills[1].fill_size, 10.0)
+                self.assertAlmostEqual(fills[2].fill_size, 5.0)
+                self.assertEqual(store.load_order("maker_buy_level_3")["state"], OrderState.FILLED.value)
+                self.assertEqual(store.load_order("maker_buy_level_2")["state"], OrderState.FILLED.value)
+                self.assertEqual(store.load_order("maker_buy_level_1")["state"], OrderState.PARTIALLY_FILLED.value)
+                for idx in (0,):
                     order = store.load_order(f"maker_buy_level_{idx}")
                     assert order is not None
                     self.assertEqual(order["state"], OrderState.ACCEPTED.value)
@@ -498,6 +662,15 @@ class PaperFillSimulatorTest(unittest.TestCase):
                     BookUpdate(
                         event_time_ms=225_000,
                         ingest_time_ms=225_010,
+                        market_id="m1",
+                        token_id="tok_yes",
+                        best_bid=0.54,
+                        best_ask=0.55,
+                        ask_levels=(BookLevel(price=0.55, size=20.0),),
+                    ),
+                    BookUpdate(
+                        event_time_ms=225_010,
+                        ingest_time_ms=225_020,
                         market_id="m1",
                         token_id="tok_yes",
                         best_bid=0.54,
