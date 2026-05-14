@@ -44,6 +44,7 @@ from .markets import (
 from .market_refresh import MarketRefreshLoop
 from .shared_discovery import SharedMarketDiscovery
 from .trade_channel import TradeNormalizer
+from .universe_selector import SubscriptionPlan, UniverseDecision, UniverseSelectorConfig, build_subscription_plan
 from .user_stream import PolymarketUserStream, UserStreamNormalizer
 from .websocket import PolymarketWebsocket
 
@@ -87,7 +88,10 @@ __all__ = [
     "PolymarketVenueAdapter",
     "PolymarketWebsocket",
     "SharedMarketDiscovery",
+    "SubscriptionPlan",
     "TradeNormalizer",
+    "UniverseDecision",
+    "UniverseSelectorConfig",
     "UserStreamNormalizer",
     "UniverseFilter",
     "ResolvedPosition",
@@ -97,6 +101,7 @@ __all__ = [
     "VenueOrderState",
     "VenuePlaceResult",
     "ZERO_BYTES32",
+    "build_subscription_plan",
     "discover_short_horizon_markets",
     "discover_short_horizon_markets_sync",
     "parse_market_discovery_rows",
