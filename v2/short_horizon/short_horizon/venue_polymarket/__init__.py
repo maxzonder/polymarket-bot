@@ -44,7 +44,15 @@ from .markets import (
 from .market_refresh import MarketRefreshLoop
 from .shared_discovery import SharedMarketDiscovery
 from .trade_channel import TradeNormalizer
-from .universe_selector import SubscriptionPlan, UniverseDecision, UniverseSelectorConfig, build_subscription_plan
+from .universe_selector import (
+    CatalystClassification,
+    SubscriptionPlan,
+    UniverseDecision,
+    UniverseSelectorConfig,
+    black_swan_universe_config,
+    build_subscription_plan,
+    classify_catalyst,
+)
 from .user_stream import PolymarketUserStream, UserStreamNormalizer
 from .websocket import PolymarketWebsocket
 
@@ -59,6 +67,7 @@ class PolymarketVenueAdapter:
 __all__ = [
     "AllowanceApprovalResult",
     "BookNormalizer",
+    "CatalystClassification",
     "COLLATERAL_OFFRAMP_ADDRESS",
     "COLLATERAL_ONRAMP_ADDRESS",
     "DEFAULT_BRIDGE_HOST",
@@ -101,7 +110,9 @@ __all__ = [
     "VenueOrderState",
     "VenuePlaceResult",
     "ZERO_BYTES32",
+    "black_swan_universe_config",
     "build_subscription_plan",
+    "classify_catalyst",
     "discover_short_horizon_markets",
     "discover_short_horizon_markets_sync",
     "parse_market_discovery_rows",

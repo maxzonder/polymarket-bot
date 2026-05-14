@@ -10,7 +10,12 @@ if str(SHORT_HORIZON_ROOT) not in sys.path:
     sys.path.insert(0, str(SHORT_HORIZON_ROOT))
 
 from short_horizon.venue_polymarket.markets import MarketMetadata
-from short_horizon.venue_polymarket.universe_selector import UniverseSelectorConfig, build_subscription_plan
+from short_horizon.venue_polymarket.universe_selector import (
+    UniverseSelectorConfig,
+    black_swan_universe_config,
+    build_subscription_plan,
+    classify_catalyst,
+)
 
 
 def _market(
@@ -27,11 +32,12 @@ def _market(
     fee_rate_bps: float | None = None,
     category: str | None = "crypto",
     slug: str | None = None,
+    question: str | None = None,
 ) -> MarketMetadata:
     return MarketMetadata(
         market_id=market_id,
         condition_id=f"cond-{market_id}",
-        question=f"Question {market_id}?",
+        question=question or f"Question {market_id}?",
         token_yes_id=yes if yes is not None else f"yes-{market_id}",
         token_no_id=no if no is not None else f"no-{market_id}",
         start_time_ms=0,
@@ -137,6 +143,75 @@ class UniverseSelectorTests(unittest.TestCase):
         self.assertEqual(ok_decision.slug, "slug-ok")
         self.assertEqual(ok_decision.duration_bucket, "1h")
         self.assertEqual(ok_decision.volume_usdc, 1_000.0)
+
+    def test_classifies_cheap_catalyst_and_random_walk_markets(self) -> None:
+        catalyst = classify_catalyst(_market(
+            "election",
+            category="politics",
+            question="Will the opposition win the election this weekend?",
+        ))
+        random_walk = classify_catalyst(_market(
+            "btc",
+            category="crypto",
+            question="Will the price of Bitcoin close above $100,000 today?",
+        ))
+        ambiguous = classify_catalyst(_market(
+            "mention",
+            category="entertainment",
+            question="Will Bob be mentioned in a tweet this week?",
+        ))
+
+        self.assertEqual(catalyst.kind, "catalyst")
+        self.assertEqual(catalyst.reason, "election")
+        self.assertEqual(random_walk.kind, "random_walk")
+        self.assertEqual(random_walk.reason, "price of")
+        self.assertEqual(ambiguous.kind, "ambiguous")
+        self.assertEqual(ambiguous.reason, "mentioned")
+
+    def test_applies_black_swan_policy_without_live_wiring(self) -> None:
+        plan = build_subscription_plan(
+            [
+                _market(
+                    "hurricane",
+                    category="weather",
+                    question="Will a hurricane make landfall in Florida by Friday?",
+                ),
+                _market(
+                    "btc-random",
+                    category="crypto",
+                    question="Will the price of Bitcoin close above $100,000 today?",
+                ),
+                _market(
+                    "sports",
+                    category="sports",
+                    question="Will Team A win the match tonight?",
+                ),
+                _market(
+                    "tech",
+                    category="tech",
+                    question="Will a new phone launch this week?",
+                ),
+            ],
+            config=black_swan_universe_config(
+                allowed_categories=("weather", "crypto", "sports"),
+                blocked_categories=("sports",),
+                reject_random_walk=True,
+            ),
+        )
+
+        self.assertEqual(plan.selected_market_ids, ("hurricane",))
+        self.assertEqual(plan.rejection_counts["random_walk_rejected"], 1)
+        self.assertEqual(plan.rejection_counts["category_blocked"], 1)
+        self.assertEqual(plan.rejection_counts["category_not_allowed"], 1)
+
+        selected = plan.decisions[0]
+        self.assertEqual(selected.catalyst_kind, "catalyst")
+        self.assertEqual(selected.catalyst_reason, "hurricane")
+        self.assertGreater(selected.subscription_score, 1.0)
+
+        random_walk = plan.decisions[1]
+        self.assertEqual(random_walk.catalyst_kind, "random_walk")
+        self.assertLess(random_walk.subscription_score, 1.0)
 
 
 if __name__ == "__main__":

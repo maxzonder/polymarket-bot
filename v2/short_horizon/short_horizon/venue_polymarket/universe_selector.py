@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Literal
 
 from .markets import MarketMetadata
 
 UniverseStage = Literal["selected", "rejected"]
+CatalystKind = Literal["catalyst", "random_walk", "ambiguous", "none"]
 UniverseRejectReason = Literal[
     "inactive",
     "missing_market_id",
@@ -19,9 +20,34 @@ UniverseRejectReason = Literal[
     "total_duration_above_max",
     "fees_enabled",
     "fee_rate_above_max",
+    "category_blocked",
+    "category_not_allowed",
+    "random_walk_rejected",
     "cap_markets",
     "cap_tokens",
 ]
+
+_CATALYST_KEYWORDS = (
+    "election", "vote", "voter", "poll", "approval rating", "primary", "referendum",
+    "court", "lawsuit", "trial", "indict", "verdict", "supreme court",
+    "regulation", "regulator", "sec", "cftc", "bill", "executive order", "ban", "tariff",
+    "war", "ceasefire", "attack", "sanction", "missile", "invasion", "hostage",
+    "hurricane", "tornado", "earthquake", "wildfire", "temperature", "snow", "rainfall", "flood",
+    "approval", "approved", "merger", "bankruptcy", "resign", "launch", "earnings",
+)
+_RANDOM_WALK_KEYWORDS = (
+    "up or down", "higher or lower", "above or below", "hit $", "hit ", "reach $",
+    "price of", "close above", "close below", "ath", "all-time high",
+)
+_AMBIGUOUS_RESOLUTION_KEYWORDS = (
+    "mentioned", "say ", "tweet", "post on", "according to", "recognized by",
+)
+
+
+@dataclass(frozen=True)
+class CatalystClassification:
+    kind: CatalystKind
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,6 +72,14 @@ class UniverseSelectorConfig:
     require_total_duration: bool = False
     reject_fees_enabled: bool = False
     max_fee_rate_bps: float = 0.0
+    allowed_categories: tuple[str, ...] = ()
+    blocked_categories: tuple[str, ...] = ()
+    category_multipliers: dict[str, float] = field(default_factory=dict)
+    reject_random_walk: bool = False
+    base_subscription_score: float = 1.0
+    catalyst_multiplier: float = 1.25
+    random_walk_multiplier: float = 0.40
+    ambiguous_multiplier: float = 0.70
 
 
 @dataclass(frozen=True)
@@ -65,6 +99,8 @@ class UniverseDecision:
     liquidity_usdc: float = 0.0
     neg_risk: bool = False
     neg_risk_group_id: str | None = None
+    catalyst_kind: CatalystKind = "none"
+    catalyst_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +121,34 @@ class SubscriptionPlan:
         return len(self.selected_token_ids)
 
 
+def black_swan_universe_config(**overrides) -> UniverseSelectorConfig:
+    """Conservative starting policy for black_swan pre-subscription selection.
+
+    The defaults are soft: high-priority categories get boosts, known noisy
+    categories get penalties, and random-walk markets are penalized but not
+    rejected unless the caller enables `reject_random_walk`.
+    """
+
+    values = dict(
+        category_multipliers={
+            "weather": 1.35,
+            "geopolitics": 1.30,
+            "politics": 1.25,
+            "legal": 1.20,
+            "regulation": 1.20,
+            "crypto": 0.85,
+            "sports": 0.75,
+            "tech": 0.70,
+            "entertainment": 0.65,
+        },
+        random_walk_multiplier=0.35,
+        ambiguous_multiplier=0.65,
+        catalyst_multiplier=1.25,
+    )
+    values.update(overrides)
+    return UniverseSelectorConfig(**values)
+
+
 def build_subscription_plan(
     markets: Iterable[MarketMetadata],
     *,
@@ -92,10 +156,9 @@ def build_subscription_plan(
 ) -> SubscriptionPlan:
     """Build a deterministic token subscription plan from market metadata.
 
-    This slice is still policy-neutral: technical validity plus cheap metadata
-    gates and global caps. Strategic category/catalyst scoring, hysteresis, and
-    pattern priors will layer on top of the same decision model in later UN
-    steps.
+    Strategic policy and catalyst classification are still pre-subscription only:
+    they affect selection/score, but they do not replace the later WS trigger →
+    screener → MarketPatternTracker → order-intent path.
     """
 
     cfg = config or UniverseSelectorConfig()
@@ -107,7 +170,11 @@ def build_subscription_plan(
     rejection_counts: Counter[str] = Counter()
 
     for market in markets:
+        catalyst = classify_catalyst(market)
+        score = _subscription_score(market, cfg, catalyst)
         reason = _technical_reject_reason(market, cfg)
+        if reason is None:
+            reason = _policy_reject_reason(market, cfg, catalyst)
         token_ids = _selected_market_tokens(market, cfg) if reason is None else ()
 
         if reason is None and cfg.max_markets > 0 and len(selected_market_ids) >= cfg.max_markets:
@@ -117,7 +184,7 @@ def build_subscription_plan(
 
         if reason is not None:
             rejection_counts[reason] += 1
-            decisions.append(_decision(market, stage="rejected", reject_reason=reason))
+            decisions.append(_decision(market, stage="rejected", reject_reason=reason, subscription_score=score, catalyst=catalyst))
             continue
 
         selected_market_ids.append(str(market.market_id))
@@ -128,7 +195,7 @@ def build_subscription_plan(
         if market.token_no_id and cfg.include_no_token:
             token_to_market_id[str(market.token_no_id)] = str(market.market_id)
             token_to_side_index[str(market.token_no_id)] = 1
-        decisions.append(_decision(market, stage="selected", selected_token_ids=token_ids))
+        decisions.append(_decision(market, stage="selected", selected_token_ids=token_ids, subscription_score=score, catalyst=catalyst))
 
     return SubscriptionPlan(
         decisions=tuple(decisions),
@@ -138,6 +205,29 @@ def build_subscription_plan(
         token_to_side_index=token_to_side_index,
         rejection_counts=dict(rejection_counts),
     )
+
+
+def classify_catalyst(market: MarketMetadata) -> CatalystClassification:
+    """Cheap rule-based catalyst/random-walk classifier for subscription policy.
+
+    This deliberately avoids LLM/API calls and does not inspect CLOB/orderbook
+    state.  Live pattern acceptance remains a later token-side gate.
+    """
+
+    text = " ".join(
+        str(part or "").lower()
+        for part in (market.question, getattr(market, "slug", None), getattr(market, "series_slug", None))
+    )
+    catalyst = _first_match(text, _CATALYST_KEYWORDS)
+    random_walk = _first_match(text, _RANDOM_WALK_KEYWORDS)
+    ambiguous = _first_match(text, _AMBIGUOUS_RESOLUTION_KEYWORDS)
+    if catalyst:
+        return CatalystClassification("catalyst", catalyst)
+    if random_walk:
+        return CatalystClassification("random_walk", random_walk)
+    if ambiguous:
+        return CatalystClassification("ambiguous", ambiguous)
+    return CatalystClassification("none", "")
 
 
 def _technical_reject_reason(
@@ -177,6 +267,41 @@ def _technical_reject_reason(
     return None
 
 
+def _policy_reject_reason(
+    market: MarketMetadata,
+    cfg: UniverseSelectorConfig,
+    catalyst: CatalystClassification,
+) -> UniverseRejectReason | None:
+    category = _norm(getattr(market, "category", None))
+    allowed = {_norm(c) for c in cfg.allowed_categories if _norm(c)}
+    blocked = {_norm(c) for c in cfg.blocked_categories if _norm(c)}
+    if category and category in blocked:
+        return "category_blocked"
+    if allowed and category not in allowed:
+        return "category_not_allowed"
+    if cfg.reject_random_walk and catalyst.kind == "random_walk":
+        return "random_walk_rejected"
+    return None
+
+
+def _subscription_score(
+    market: MarketMetadata,
+    cfg: UniverseSelectorConfig,
+    catalyst: CatalystClassification,
+) -> float:
+    score = float(cfg.base_subscription_score)
+    category = _norm(getattr(market, "category", None))
+    if category:
+        score *= float(cfg.category_multipliers.get(category, 1.0))
+    if catalyst.kind == "catalyst":
+        score *= float(cfg.catalyst_multiplier)
+    elif catalyst.kind == "random_walk":
+        score *= float(cfg.random_walk_multiplier)
+    elif catalyst.kind == "ambiguous":
+        score *= float(cfg.ambiguous_multiplier)
+    return round(score, 6)
+
+
 def _selected_market_tokens(market: MarketMetadata, cfg: UniverseSelectorConfig) -> tuple[str, ...]:
     tokens: list[str] = []
     if cfg.include_yes_token and str(market.token_yes_id or "").strip():
@@ -192,13 +317,17 @@ def _decision(
     stage: UniverseStage,
     selected_token_ids: tuple[str, ...] = (),
     reject_reason: UniverseRejectReason | None = None,
+    subscription_score: float = 0.0,
+    catalyst: CatalystClassification | None = None,
 ) -> UniverseDecision:
+    catalyst = catalyst or CatalystClassification("none", "")
     return UniverseDecision(
         market_id=str(market.market_id or ""),
         condition_id=str(market.condition_id) if market.condition_id is not None else None,
         question=str(market.question or ""),
         stage=stage,
         selected_token_ids=selected_token_ids,
+        subscription_score=subscription_score,
         reject_reason=reject_reason,
         asset_slug=market.asset_slug,
         category=getattr(market, "category", None),
@@ -208,6 +337,8 @@ def _decision(
         liquidity_usdc=float(getattr(market, "liquidity_usdc", 0.0) or 0.0),
         neg_risk=bool(getattr(market, "neg_risk", False)),
         neg_risk_group_id=getattr(market, "neg_risk_group_id", None),
+        catalyst_kind=catalyst.kind,
+        catalyst_reason=catalyst.reason,
     )
 
 
@@ -225,9 +356,20 @@ def _duration_bucket(duration_seconds: int | None) -> str | None:
     return "long"
 
 
+def _first_match(text: str, needles: tuple[str, ...]) -> str:
+    return next((needle for needle in needles if needle in text), "")
+
+
+def _norm(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
 __all__ = [
+    "CatalystClassification",
     "SubscriptionPlan",
     "UniverseDecision",
     "UniverseSelectorConfig",
+    "black_swan_universe_config",
     "build_subscription_plan",
+    "classify_catalyst",
 ]
