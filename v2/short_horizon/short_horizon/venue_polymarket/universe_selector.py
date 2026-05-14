@@ -121,6 +121,23 @@ class UniverseDecision:
 
 
 @dataclass(frozen=True)
+class UniversePlanSummary:
+    discovered_markets: int
+    selected_markets: int
+    selected_tokens: int
+    rejected_markets: int
+    rejection_counts: dict[str, int]
+    selected_by_category: dict[str, int]
+    selected_by_catalyst: dict[str, int]
+    rejected_by_catalyst: dict[str, int]
+    selected_by_duration_bucket: dict[str, int]
+    retained_selected_markets: int
+    top_selected_market_ids: tuple[str, ...]
+    max_selected_score: float = 0.0
+    min_selected_score: float = 0.0
+
+
+@dataclass(frozen=True)
 class SubscriptionPlan:
     decisions: tuple[UniverseDecision, ...]
     selected_market_ids: tuple[str, ...]
@@ -136,6 +153,9 @@ class SubscriptionPlan:
     @property
     def selected_tokens_count(self) -> int:
         return len(self.selected_token_ids)
+
+    def summary(self, *, top_n: int = 10) -> UniversePlanSummary:
+        return summarize_subscription_plan(self, top_n=top_n)
 
 
 def black_swan_universe_config(**overrides) -> UniverseSelectorConfig:
@@ -278,6 +298,29 @@ def build_subscription_plan(
         token_to_market_id=token_to_market_id,
         token_to_side_index=token_to_side_index,
         rejection_counts=dict(rejection_counts),
+    )
+
+
+def summarize_subscription_plan(plan: SubscriptionPlan, *, top_n: int = 10) -> UniversePlanSummary:
+    """Aggregate selector decisions for logs/metrics without changing behavior."""
+
+    selected = [decision for decision in plan.decisions if decision.stage == "selected"]
+    rejected = [decision for decision in plan.decisions if decision.stage == "rejected"]
+    scores = [decision.subscription_score for decision in selected]
+    return UniversePlanSummary(
+        discovered_markets=len(plan.decisions),
+        selected_markets=len(selected),
+        selected_tokens=len(plan.selected_token_ids),
+        rejected_markets=len(rejected),
+        rejection_counts=dict(sorted(plan.rejection_counts.items())),
+        selected_by_category=_decision_counter(selected, "category"),
+        selected_by_catalyst=_decision_counter(selected, "catalyst_kind"),
+        rejected_by_catalyst=_decision_counter(rejected, "catalyst_kind"),
+        selected_by_duration_bucket=_decision_counter(selected, "duration_bucket"),
+        retained_selected_markets=sum(1 for decision in selected if decision.retained_market),
+        top_selected_market_ids=tuple(plan.selected_market_ids[:max(0, top_n)]),
+        max_selected_score=max(scores) if scores else 0.0,
+        min_selected_score=min(scores) if scores else 0.0,
     )
 
 
@@ -443,6 +486,14 @@ def _duration_bucket(duration_seconds: int | None) -> str | None:
     return "long"
 
 
+def _decision_counter(decisions: Iterable[UniverseDecision], attr: str) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for decision in decisions:
+        key = _norm(getattr(decision, attr, None)) or "unknown"
+        counts[key] += 1
+    return dict(sorted(counts.items()))
+
+
 def _first_match(text: str, needles: tuple[str, ...]) -> str:
     return next((needle for needle in needles if needle in text), "")
 
@@ -455,8 +506,10 @@ __all__ = [
     "CatalystClassification",
     "SubscriptionPlan",
     "UniverseDecision",
+    "UniversePlanSummary",
     "UniverseSelectorConfig",
     "black_swan_universe_config",
     "build_subscription_plan",
     "classify_catalyst",
+    "summarize_subscription_plan",
 ]

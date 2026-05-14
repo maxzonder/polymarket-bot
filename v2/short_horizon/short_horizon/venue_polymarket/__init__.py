@@ -48,10 +48,12 @@ from .universe_selector import (
     CatalystClassification,
     SubscriptionPlan,
     UniverseDecision,
+    UniversePlanSummary,
     UniverseSelectorConfig,
     black_swan_universe_config,
     build_subscription_plan,
     classify_catalyst,
+    summarize_subscription_plan,
 )
 from .user_stream import PolymarketUserStream, UserStreamNormalizer
 from .websocket import PolymarketWebsocket
@@ -100,6 +102,7 @@ __all__ = [
     "SubscriptionPlan",
     "TradeNormalizer",
     "UniverseDecision",
+    "UniversePlanSummary",
     "UniverseSelectorConfig",
     "UserStreamNormalizer",
     "UniverseFilter",
@@ -116,4 +119,5 @@ __all__ = [
     "discover_short_horizon_markets",
     "discover_short_horizon_markets_sync",
     "parse_market_discovery_rows",
+    "summarize_subscription_plan",
 ]

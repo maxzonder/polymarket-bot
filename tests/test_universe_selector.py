@@ -261,6 +261,37 @@ class UniverseSelectorTests(unittest.TestCase):
         self.assertTrue(plan.decisions[1].retained_market)
         self.assertGreater(plan.decisions[1].subscription_score, plan.decisions[0].subscription_score)
 
+    def test_builds_observability_summary_from_decisions(self) -> None:
+        plan = build_subscription_plan(
+            [
+                _market("thin", category="crypto", volume_usdc=5.0),
+                _market("weather", category="weather", question="Will a hurricane hit Florida?"),
+                _market("legal", category="legal", question="Will the court issue a verdict tomorrow?"),
+                _market("random", category="crypto", question="Will the price of Bitcoin close above $100,000 today?"),
+            ],
+            config=black_swan_universe_config(
+                max_markets=2,
+                min_volume_usdc=10.0,
+                retained_market_ids=("legal",),
+                retained_score_bonus=0.01,
+            ),
+        )
+
+        summary = plan.summary(top_n=1)
+
+        self.assertEqual(summary.discovered_markets, 4)
+        self.assertEqual(summary.selected_markets, 2)
+        self.assertEqual(summary.selected_tokens, 4)
+        self.assertEqual(summary.rejected_markets, 2)
+        self.assertEqual(summary.rejection_counts, {"cap_markets": 1, "volume_below_min": 1})
+        self.assertEqual(summary.selected_by_category, {"legal": 1, "weather": 1})
+        self.assertEqual(summary.selected_by_catalyst, {"catalyst": 2})
+        self.assertEqual(summary.rejected_by_catalyst, {"none": 1, "random_walk": 1})
+        self.assertEqual(summary.selected_by_duration_bucket, {"1h": 2})
+        self.assertEqual(summary.retained_selected_markets, 1)
+        self.assertEqual(summary.top_selected_market_ids, ("weather",))
+        self.assertGreaterEqual(summary.max_selected_score, summary.min_selected_score)
+
 
 if __name__ == "__main__":
     unittest.main()
