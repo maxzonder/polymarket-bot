@@ -15,6 +15,7 @@ from short_horizon.core.clock import SystemClock
 from short_horizon.core.events import BookUpdate, MarketStateUpdate, TradeTick
 from short_horizon.market_data import LiveEventSource
 from short_horizon.venue_polymarket import MarketMetadata, black_swan_universe_config
+import v2.short_horizon.swan_live as swan_live_module
 from v2.short_horizon.swan_live import (
     _WsCandidateCache,
     _held_or_open_market_tokens,
@@ -72,6 +73,20 @@ class _FakeSharedDiscovery:
     async def get_markets(self, **kwargs):
         self.shutdown.set()
         return self.markets
+
+
+class _SequencedSharedDiscovery:
+    def __init__(self, shutdown: asyncio.Event, batches: list[list[MarketMetadata]]):
+        self.shutdown = shutdown
+        self.batches = batches
+        self.calls = 0
+
+    async def get_markets(self, **kwargs):
+        batch = self.batches[min(self.calls, len(self.batches) - 1)]
+        self.calls += 1
+        if self.calls >= len(self.batches):
+            self.shutdown.set()
+        return batch
 
 
 class _NoopLogger:
@@ -224,3 +239,52 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(payload["selected_markets"], 1)
         self.assertEqual(payload["rejection_counts"], {"cap_markets": 1})
         self.assertEqual(payload["top_selected_market_ids"], ("weather",))
+
+    def test_universe_builder_can_apply_selector_with_safe_unsubscribe(self) -> None:
+        async def run():
+            shutdown = asyncio.Event()
+            ws = _FakeWs(shutdown)
+            logger = _NoopLogger()
+            token_to_market_id: dict[str, str] = {}
+            token_to_side_index: dict[str, int] = {}
+            old_interval = swan_live_module._WS_UNIVERSE_INTERVAL_SECONDS
+            swan_live_module._WS_UNIVERSE_INTERVAL_SECONDS = 0.001
+            try:
+                await _ws_universe_builder_loop(
+                    ws=ws,
+                    shared_discovery=_SequencedSharedDiscovery(
+                        shutdown,
+                        [
+                            [
+                                _market("random", question="Will the price of Bitcoin close above $100,000 today?"),
+                                _market("weather", category="weather", question="Will a hurricane hit Florida?"),
+                            ],
+                            [_market("random", question="Will the price of Bitcoin close above $100,000 today?")],
+                        ],
+                    ),
+                    token_to_market_id=token_to_market_id,
+                    token_to_side_index=token_to_side_index,
+                    duration_window=object(),
+                    universe_filter=object(),
+                    logger=logger,
+                    shutdown=shutdown,
+                    selector_observation_config=black_swan_universe_config(max_markets=1),
+                    apply_selector_plan=True,
+                )
+            finally:
+                swan_live_module._WS_UNIVERSE_INTERVAL_SECONDS = old_interval
+            return ws, logger, token_to_market_id, token_to_side_index
+
+        ws, logger, token_to_market_id, token_to_side_index = asyncio.run(run())
+
+        self.assertEqual(set(ws.subscribed[0]), {"yes-weather", "no-weather"})
+        self.assertEqual(set(ws.subscribed[1]), {"yes-random", "no-random"})
+        self.assertEqual(set(ws.unsubscribed[0]), {"yes-weather", "no-weather"})
+        self.assertEqual(token_to_market_id, {"yes-random": "random", "no-random": "random"})
+        self.assertEqual(token_to_side_index, {"yes-random": 0, "no-random": 1})
+
+        selector_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_selector_observation",)]
+        self.assertEqual(len(selector_logs), 2)
+        self.assertFalse(selector_logs[0][1]["observe_only"])
+        universe_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_updated",)]
+        self.assertTrue(all(entry[1]["selector_applied"] for entry in universe_logs))

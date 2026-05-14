@@ -322,6 +322,7 @@ async def _ws_universe_builder_loop(
     logger,
     shutdown: asyncio.Event,
     selector_observation_config: UniverseSelectorConfig | None = None,
+    apply_selector_plan: bool = False,
 ) -> None:
     """Periodically syncs CLOB WS subscription to the already-discovered market universe.
 
@@ -337,26 +338,32 @@ async def _ws_universe_builder_loop(
                 duration_window=duration_window,
                 max_rows=5_000,
             )
+            selector_plan = None
             if selector_observation_config is not None:
                 selector_plan = build_subscription_plan(markets, config=selector_observation_config)
                 logger.info(
                     "ws_universe_selector_observation",
-                    observe_only=True,
+                    observe_only=not apply_selector_plan,
                     **asdict(selector_plan.summary(top_n=10)),
                 )
 
             tokens: set[str] = set()
             next_token_to_market_id: dict[str, str] = {}
             next_token_to_side_index: dict[str, int] = {}
-            for m in markets:
-                if m.token_yes_id:
-                    tokens.add(m.token_yes_id)
-                    next_token_to_market_id[m.token_yes_id] = m.market_id
-                    next_token_to_side_index[m.token_yes_id] = 0
-                if m.token_no_id:
-                    tokens.add(m.token_no_id)
-                    next_token_to_market_id[m.token_no_id] = m.market_id
-                    next_token_to_side_index[m.token_no_id] = 1
+            if apply_selector_plan and selector_plan is not None:
+                tokens = set(selector_plan.selected_token_ids)
+                next_token_to_market_id.update(selector_plan.token_to_market_id)
+                next_token_to_side_index.update(selector_plan.token_to_side_index)
+            else:
+                for m in markets:
+                    if m.token_yes_id:
+                        tokens.add(m.token_yes_id)
+                        next_token_to_market_id[m.token_yes_id] = m.market_id
+                        next_token_to_side_index[m.token_yes_id] = 0
+                    if m.token_no_id:
+                        tokens.add(m.token_no_id)
+                        next_token_to_market_id[m.token_no_id] = m.market_id
+                        next_token_to_side_index[m.token_no_id] = 1
 
             token_to_market_id.clear()
             token_to_market_id.update(next_token_to_market_id)
@@ -376,6 +383,7 @@ async def _ws_universe_builder_loop(
                 tokens=len(tokens),
                 added=len(to_add),
                 removed=len(to_remove),
+                selector_applied=apply_selector_plan and selector_plan is not None,
             )
         except Exception:
             logger.exception("ws_universe_builder_error")
@@ -771,6 +779,7 @@ async def run_swan_live(
     min_hours_to_close: float | None = None,
     min_total_duration_hours: float | None = None,
     strategy_name: str = "swan",
+    apply_universe_selector: bool = False,
 ) -> RunnerSummary:
     reg = _STRATEGY_REGISTRY.get(strategy_name)
     if reg is None:
@@ -969,7 +978,7 @@ async def run_swan_live(
     ws_candidate_cache = _WsCandidateCache()
     selector_observation_config = (
         black_swan_universe_config()
-        if strategy_name == "black_swan" and resolved_mode is ExecutionMode.DRY_RUN
+        if strategy_name == "black_swan" and (resolved_mode is ExecutionMode.DRY_RUN or apply_universe_selector)
         else None
     )
 
@@ -1011,6 +1020,7 @@ async def run_swan_live(
             logger=logger,
             shutdown=shutdown,
             selector_observation_config=selector_observation_config,
+            apply_selector_plan=apply_universe_selector and strategy_name == "black_swan",
         ),
         name="swan_ws_universe_loop",
     )
@@ -1096,6 +1106,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-total-duration-hours", type=float, default=None,
                    dest="min_total_duration_hours",
                    help="Override min total market lifespan (hours) from mode config")
+    p.add_argument("--apply-universe-selector", action="store_true",
+                   help="Use the black_swan universe selector to narrow CLOB WS subscriptions (default: observe/log only in dry-run)")
     return p
 
 
@@ -1114,5 +1126,6 @@ if __name__ == "__main__":
             max_hours_to_close=args.max_hours_to_close,
             min_hours_to_close=args.min_hours_to_close,
             min_total_duration_hours=args.min_total_duration_hours,
+            apply_universe_selector=args.apply_universe_selector,
         )
     )
