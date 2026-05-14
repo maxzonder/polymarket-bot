@@ -11,6 +11,13 @@ import requests
 
 from ..core.events import FeeInfo
 
+try:
+    from market_classifier import infer_market_category
+except Exception:  # pragma: no cover - fallback for isolated package imports
+    def infer_market_category(raw: dict[str, Any], event: dict[str, Any] | None = None) -> str | None:
+        category = raw.get("category") or (event or {}).get("category")
+        return str(category).lower() if category else None
+
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
 
@@ -50,6 +57,17 @@ class MarketMetadata:
     yes_outcome_name: str | None = None
     no_outcome_name: str | None = None
     fee_info: FeeInfo | None = None
+    category: str | None = None
+    slug: str | None = None
+    volume_usdc: float = 0.0
+    liquidity_usdc: float = 0.0
+    best_ask: float | None = None
+    best_bid: float | None = None
+    last_trade_price: float | None = None
+    comment_count: int = 0
+    neg_risk: bool = False
+    neg_risk_group_id: str | None = None
+    total_duration_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -200,6 +218,13 @@ def parse_market_discovery_rows(
         fee_rate_bps = _extract_fee_rate_bps(raw)
         fee_info = _extract_fee_info(raw, fee_rate_bps=fee_rate_bps)
         token_yes_id, token_no_id, yes_outcome_name, no_outcome_name = _select_yes_no_tokens(token_ids, outcomes)
+        volume = _parse_float(raw.get("volumeNum")) or _parse_float(raw.get("volume")) or 0.0
+        liquidity = _parse_float(raw.get("liquidity") or raw.get("liquidityNum")) or 0.0
+        comment_count = 0
+        if event0:
+            parsed_comment_count = _parse_int(event0.get("commentCount"))
+            comment_count = parsed_comment_count if parsed_comment_count is not None else 0
+        neg_risk_group_id = raw.get("negRiskMarketID") or raw.get("negRiskRequestID") or None
         markets.append(
             MarketMetadata(
                 market_id=market_id,
@@ -210,7 +235,7 @@ def parse_market_discovery_rows(
                 start_time_ms=int(start_ts * 1000) if start_ts is not None else None,
                 end_time_ms=int(end_ts * 1000),
                 asset_slug=asset_slug,
-                is_active=bool(raw.get("active", True)),
+                is_active=bool(raw.get("active", True)) and not bool(raw.get("closed")) and not bool(raw.get("archived")),
                 duration_seconds=implied_duration_seconds if implied_duration_seconds is not None else duration_seconds,
                 fees_enabled=fees_enabled,
                 fee_rate_bps=fee_rate_bps,
@@ -221,6 +246,17 @@ def parse_market_discovery_rows(
                 yes_outcome_name=yes_outcome_name,
                 no_outcome_name=no_outcome_name,
                 fee_info=fee_info,
+                category=infer_market_category(raw, event0),
+                slug=str(raw.get("slug")) if raw.get("slug") is not None else None,
+                volume_usdc=volume,
+                liquidity_usdc=liquidity,
+                best_ask=_parse_float(raw.get("bestAsk")),
+                best_bid=_parse_float(raw.get("bestBid")),
+                last_trade_price=_parse_float(raw.get("lastTradePrice")),
+                comment_count=comment_count,
+                neg_risk=bool(raw.get("negRisk", False)),
+                neg_risk_group_id=str(neg_risk_group_id) if neg_risk_group_id is not None else None,
+                total_duration_seconds=duration_seconds,
             )
         )
         stats["eligible_markets"] += 1
@@ -404,6 +440,13 @@ def _load_json_list(value: Any) -> list[Any]:
 def _parse_float(value: Any) -> float | None:
     try:
         return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
 

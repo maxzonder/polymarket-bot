@@ -21,6 +21,12 @@ def _market(
     no: str | None = None,
     end_time_ms: int | None = 1_000_000,
     duration_seconds: int | None = 3600,
+    volume_usdc: float = 1_000.0,
+    total_duration_seconds: int | None = 3600,
+    fees_enabled: bool = False,
+    fee_rate_bps: float | None = None,
+    category: str | None = "crypto",
+    slug: str | None = None,
 ) -> MarketMetadata:
     return MarketMetadata(
         market_id=market_id,
@@ -33,9 +39,14 @@ def _market(
         asset_slug="bitcoin",
         is_active=active,
         duration_seconds=duration_seconds,
-        fees_enabled=False,
-        fee_rate_bps=None,
         tick_size=0.01,
+        category=category,
+        slug=slug or f"slug-{market_id}",
+        volume_usdc=volume_usdc,
+        liquidity_usdc=250.0,
+        fees_enabled=fees_enabled,
+        fee_rate_bps=fee_rate_bps,
+        total_duration_seconds=total_duration_seconds,
     )
 
 
@@ -96,6 +107,36 @@ class UniverseSelectorTests(unittest.TestCase):
         self.assertEqual(plan.selected_token_ids, ("no-m1",))
         self.assertNotIn("yes-m1", plan.token_to_market_id)
         self.assertEqual(plan.token_to_side_index["no-m1"], 1)
+
+    def test_applies_cheap_metadata_gates_without_categoric_policy(self) -> None:
+        plan = build_subscription_plan(
+            [
+                _market("thin", volume_usdc=10.0),
+                _market("short", total_duration_seconds=300),
+                _market("fees", fees_enabled=True, fee_rate_bps=4.0),
+                _market("expensive-fee", fees_enabled=False, fee_rate_bps=40.0),
+                _market("ok", volume_usdc=1_000.0, total_duration_seconds=3600, fee_rate_bps=4.0),
+            ],
+            config=UniverseSelectorConfig(
+                min_volume_usdc=50.0,
+                min_total_duration_seconds=900,
+                reject_fees_enabled=True,
+                max_fee_rate_bps=10.0,
+            ),
+        )
+
+        self.assertEqual(plan.selected_market_ids, ("ok",))
+        self.assertEqual(plan.rejection_counts["volume_below_min"], 1)
+        self.assertEqual(plan.rejection_counts["total_duration_below_min"], 1)
+        self.assertEqual(plan.rejection_counts["fees_enabled"], 1)
+        self.assertEqual(plan.rejection_counts["fee_rate_above_max"], 1)
+
+        ok_decision = plan.decisions[-1]
+        self.assertEqual(ok_decision.stage, "selected")
+        self.assertEqual(ok_decision.category, "crypto")
+        self.assertEqual(ok_decision.slug, "slug-ok")
+        self.assertEqual(ok_decision.duration_bucket, "1h")
+        self.assertEqual(ok_decision.volume_usdc, 1_000.0)
 
 
 if __name__ == "__main__":

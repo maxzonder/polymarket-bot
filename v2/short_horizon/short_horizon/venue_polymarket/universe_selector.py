@@ -12,6 +12,13 @@ UniverseRejectReason = Literal[
     "missing_market_id",
     "missing_token_ids",
     "missing_end_time",
+    "missing_total_duration",
+    "volume_below_min",
+    "volume_above_max",
+    "total_duration_below_min",
+    "total_duration_above_max",
+    "fees_enabled",
+    "fee_rate_above_max",
     "cap_markets",
     "cap_tokens",
 ]
@@ -21,17 +28,24 @@ UniverseRejectReason = Literal[
 class UniverseSelectorConfig:
     """Pre-subscription selector controls for black-swan WS universe narrowing.
 
-    This is intentionally not a money/risk config.  It only decides which
+    This is intentionally not a money/risk config. It only decides which
     already-discovered markets/tokens are worth subscribing to before the later
     WS trigger → screener → pattern → order pipeline runs.
 
-    A value of 0 for caps means unlimited.
+    A value of 0 for caps means unlimited/disabled.
     """
 
     max_markets: int = 0
     max_tokens: int = 0
     include_yes_token: bool = True
     include_no_token: bool = True
+    min_volume_usdc: float = 0.0
+    max_volume_usdc: float = 0.0
+    min_total_duration_seconds: int = 0
+    max_total_duration_seconds: int = 0
+    require_total_duration: bool = False
+    reject_fees_enabled: bool = False
+    max_fee_rate_bps: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -44,7 +58,13 @@ class UniverseDecision:
     subscription_score: float = 0.0
     reject_reason: UniverseRejectReason | None = None
     asset_slug: str | None = None
+    category: str | None = None
+    slug: str | None = None
     duration_bucket: str | None = None
+    volume_usdc: float = 0.0
+    liquidity_usdc: float = 0.0
+    neg_risk: bool = False
+    neg_risk_group_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -72,9 +92,10 @@ def build_subscription_plan(
 ) -> SubscriptionPlan:
     """Build a deterministic token subscription plan from market metadata.
 
-    This first slice is deliberately conservative: only technical validity plus
-    global caps.  Strategy policy, scoring, hysteresis, and pattern priors will
-    layer on top of the same decision model in later UN steps.
+    This slice is still policy-neutral: technical validity plus cheap metadata
+    gates and global caps. Strategic category/catalyst scoring, hysteresis, and
+    pattern priors will layer on top of the same decision model in later UN
+    steps.
     """
 
     cfg = config or UniverseSelectorConfig()
@@ -131,6 +152,28 @@ def _technical_reject_reason(
         return "missing_end_time"
     if not _selected_market_tokens(market, cfg):
         return "missing_token_ids"
+
+    volume = float(getattr(market, "volume_usdc", 0.0) or 0.0)
+    if cfg.min_volume_usdc > 0 and volume < cfg.min_volume_usdc:
+        return "volume_below_min"
+    if cfg.max_volume_usdc > 0 and volume > cfg.max_volume_usdc:
+        return "volume_above_max"
+
+    total_duration = getattr(market, "total_duration_seconds", None)
+    if cfg.require_total_duration and total_duration is None:
+        return "missing_total_duration"
+    if total_duration is not None:
+        if cfg.min_total_duration_seconds > 0 and total_duration < cfg.min_total_duration_seconds:
+            return "total_duration_below_min"
+        if cfg.max_total_duration_seconds > 0 and total_duration > cfg.max_total_duration_seconds:
+            return "total_duration_above_max"
+
+    if cfg.reject_fees_enabled and bool(getattr(market, "fees_enabled", False)):
+        return "fees_enabled"
+    fee_rate_bps = getattr(market, "fee_rate_bps", None)
+    if cfg.max_fee_rate_bps > 0 and fee_rate_bps is not None and float(fee_rate_bps) > cfg.max_fee_rate_bps:
+        return "fee_rate_above_max"
+
     return None
 
 
@@ -158,7 +201,13 @@ def _decision(
         selected_token_ids=selected_token_ids,
         reject_reason=reject_reason,
         asset_slug=market.asset_slug,
-        duration_bucket=_duration_bucket(market.duration_seconds),
+        category=getattr(market, "category", None),
+        slug=getattr(market, "slug", None),
+        duration_bucket=_duration_bucket(getattr(market, "total_duration_seconds", None) or market.duration_seconds),
+        volume_usdc=float(getattr(market, "volume_usdc", 0.0) or 0.0),
+        liquidity_usdc=float(getattr(market, "liquidity_usdc", 0.0) or 0.0),
+        neg_risk=bool(getattr(market, "neg_risk", False)),
+        neg_risk_group_id=getattr(market, "neg_risk_group_id", None),
     )
 
 

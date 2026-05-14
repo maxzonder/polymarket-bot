@@ -8,25 +8,48 @@
     "outcomes": "[\"Yes\", \"No\"]",
     "startDate": "2026-04-01T00:00:00Z",
     "feesEnabled": true,
-    "feeSchedule": {"rate": "0.0035"},
+    "feeSchedule": {
+      "rate": "0.0035"
+    },
     "orderPriceMinTickSize": "0.01",
     "orderMinSize": "5",
     "events": [
       {
         "startTime": "2026-04-20T14:00:00Z",
         "endDate": "2026-04-20T14:14:10Z",
-        "series": [{"recurrence": "15m", "slug": "bitcoin-up-or-down-15m"}],
-        "seriesSlug": "bitcoin-up-or-down-15m"
+        "series": [
+          {
+            "recurrence": "15m",
+            "slug": "bitcoin-up-or-down-15m"
+          }
+        ],
+        "seriesSlug": "bitcoin-up-or-down-15m",
+        "commentCount": "17"
       }
-    ]
+    ],
+    "category": "Crypto",
+    "slug": "bitcoin-up-or-down-test",
+    "volumeNum": "1234.50",
+    "liquidityNum": "321.25",
+    "bestAsk": "0.42",
+    "bestBid": "0.40",
+    "lastTradePrice": "0.41",
+    "negRisk": true,
+    "negRiskMarketID": "neg-group-1"
   },
   {
     "id": "m_eth_960",
     "conditionId": "cond_eth_960",
     "question": "Ethereum Up or Down?",
     "active": true,
-    "clobTokenIds": ["tok_eth_yes", "tok_eth_no"],
-    "outcomes": ["Yes", "No"],
+    "clobTokenIds": [
+      "tok_eth_yes",
+      "tok_eth_no"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
     "feesEnabled": true,
     "takerBaseFee": "8",
     "orderPriceMinTickSize": "0.01",
@@ -35,7 +58,12 @@
       {
         "startTime": "2026-04-20T14:00:00Z",
         "endDate": "2026-04-20T14:16:00Z",
-        "series": [{"recurrence": "15m", "slug": "ethereum-up-or-down-15m"}],
+        "series": [
+          {
+            "recurrence": "15m",
+            "slug": "ethereum-up-or-down-15m"
+          }
+        ],
         "seriesSlug": "ethereum-up-or-down-15m"
       }
     ]
@@ -45,13 +73,24 @@
     "conditionId": "cond_eth_961",
     "question": "Ethereum Up or Down?",
     "active": true,
-    "clobTokenIds": ["tok_eth_961_yes", "tok_eth_961_no"],
-    "outcomes": ["Yes", "No"],
+    "clobTokenIds": [
+      "tok_eth_961_yes",
+      "tok_eth_961_no"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
     "events": [
       {
         "startTime": "2026-04-20T14:00:00Z",
         "endDate": "2026-04-20T14:16:01Z",
-        "series": [{"recurrence": "15m", "slug": "ethereum-up-or-down-15m-961"}],
+        "series": [
+          {
+            "recurrence": "15m",
+            "slug": "ethereum-up-or-down-15m-961"
+          }
+        ],
         "seriesSlug": "ethereum-up-or-down-15m-961"
       }
     ]
@@ -61,13 +100,24 @@
     "conditionId": "cond_doge_900",
     "question": "Dogecoin Up or Down?",
     "active": true,
-    "clobTokenIds": ["tok_doge_yes", "tok_doge_no"],
-    "outcomes": ["Yes", "No"],
+    "clobTokenIds": [
+      "tok_doge_yes",
+      "tok_doge_no"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
     "events": [
       {
         "startTime": "2026-04-20T14:00:00Z",
         "endDate": "2026-04-20T14:15:00Z",
-        "series": [{"recurrence": "15m", "slug": "dogecoin-up-or-down-15m"}],
+        "series": [
+          {
+            "recurrence": "15m",
+            "slug": "dogecoin-up-or-down-15m"
+          }
+        ],
         "seriesSlug": "dogecoin-up-or-down-15m"
       }
     ]
@@ -77,12 +127,23 @@
     "conditionId": "cond_missing_end",
     "question": "Bitcoin Up or Down?",
     "active": true,
-    "clobTokenIds": ["tok_missing_yes", "tok_missing_no"],
-    "outcomes": ["Yes", "No"],
+    "clobTokenIds": [
+      "tok_missing_yes",
+      "tok_missing_no"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
     "events": [
       {
         "startTime": "2026-04-20T14:00:00Z",
-        "series": [{"recurrence": "15m", "slug": "bitcoin-up-or-down-15m-missing-end"}],
+        "series": [
+          {
+            "recurrence": "15m",
+            "slug": "bitcoin-up-or-down-15m-missing-end"
+          }
+        ],
         "seriesSlug": "bitcoin-up-or-down-15m-missing-end"
       }
     ]
@@ -92,13 +153,24 @@
     "conditionId": "cond_eth_dup",
     "question": "Ethereum Up or Down?",
     "active": true,
-    "clobTokenIds": ["tok_eth_dup_yes", "tok_eth_dup_no"],
-    "outcomes": ["Yes", "No"],
+    "clobTokenIds": [
+      "tok_eth_dup_yes",
+      "tok_eth_dup_no"
+    ],
+    "outcomes": [
+      "Yes",
+      "No"
+    ],
     "events": [
       {
         "startTime": "2026-04-20T14:00:00Z",
         "endDate": "2026-04-20T14:16:00Z",
-        "series": [{"recurrence": "15m", "slug": "ethereum-up-or-down-15m"}],
+        "series": [
+          {
+            "recurrence": "15m",
+            "slug": "ethereum-up-or-down-15m"
+          }
+        ],
         "seriesSlug": "ethereum-up-or-down-15m"
       }
     ]
