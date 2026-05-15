@@ -971,9 +971,13 @@ async def run_swan_live(
             raise RuntimeError("execution_client required for live mode")
         credentials = execution_client.api_credentials()
         user_stream = PolymarketUserStream(auth=credentials)
-        source = LiveEventSource(user_stream=user_stream, websocket=_NoopWebsocket())
+        source = LiveEventSource(
+            user_stream=user_stream,
+            websocket=_NoopWebsocket(),
+            auto_subscribe_market_refresh=False,
+        )
     else:
-        source = LiveEventSource(websocket=_NoopWebsocket())
+        source = LiveEventSource(websocket=_NoopWebsocket(), auto_subscribe_market_refresh=False)
 
     # Override market discovery with swan's wide universe.
     from short_horizon.venue_polymarket import MarketRefreshLoop, FeeMetadataRefreshLoop, SharedMarketDiscovery

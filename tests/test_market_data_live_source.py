@@ -274,6 +274,60 @@ class LiveEventSourceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.subscribe_calls, [["tok_no", "tok_yes"]])
         self.assertEqual(websocket.unsubscribe_calls, [["tok_no", "tok_yes"]])
 
+    async def test_live_event_source_can_forward_market_refresh_without_auto_subscribing(self) -> None:
+        market_events = [
+            MarketStateUpdate(
+                event_time_ms=1000,
+                ingest_time_ms=1000,
+                market_id="m1",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                status=MarketStatus.ACTIVE,
+                token_yes_id="tok_yes",
+                token_no_id="tok_no",
+                asset_slug="bitcoin",
+                is_active=True,
+                source="polymarket.gamma.refresh",
+            ),
+            MarketStateUpdate(
+                event_time_ms=2000,
+                ingest_time_ms=2000,
+                market_id="m1",
+                condition_id="c1",
+                question="Bitcoin Up or Down?",
+                status=MarketStatus.CLOSED,
+                token_yes_id="tok_yes",
+                token_no_id="tok_no",
+                asset_slug="bitcoin",
+                is_active=False,
+                source="polymarket.gamma.refresh",
+            ),
+        ]
+        websocket = _FakeWebsocket(messages=[])
+        user_stream = _FakeUserStream(events=[])
+        source = LiveEventSource(
+            market_refresh=_AsyncEventStream(market_events),
+            fee_refresh=_AsyncEventStream([]),
+            websocket=websocket,
+            user_stream=user_stream,
+            clock_ms=lambda: 5000,
+            auto_subscribe_market_refresh=False,
+        )
+
+        await source.start()
+        try:
+            emitted = [await asyncio.wait_for(source.__anext__(), timeout=1.0) for _ in range(4)]
+        finally:
+            await source.stop()
+
+        self.assertEqual(len(emitted), 4)
+        self.assertEqual({event.token_id for event in emitted[:2]}, {"tok_yes", "tok_no"})
+        self.assertEqual({event.token_id for event in emitted[2:]}, {"tok_yes", "tok_no"})
+        self.assertEqual(websocket.subscribe_calls, [])
+        self.assertEqual(websocket.unsubscribe_calls, [])
+        self.assertEqual(user_stream.subscribe_calls, [])
+        self.assertEqual(user_stream.unsubscribe_calls, [])
+
     async def test_live_event_source_handles_decoded_batch_websocket_payload(self) -> None:
         fixture_path = FIXTURES_DIR / "clob_ws_mixed_batch.json"
         websocket = _FakeWebsocket(messages=[json.loads(fixture_path.read_text(encoding="utf-8"))])

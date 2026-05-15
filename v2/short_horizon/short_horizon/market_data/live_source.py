@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from ..config import MarketDiscoveryConfig
@@ -34,8 +34,9 @@ class LiveEventSource:
         spot_feed: AsyncIterator[NormalizedEvent] | Any | None = None,
         book_normalizer: BookNormalizer | None = None,
         trade_normalizer: TradeNormalizer | None = None,
-        clock_ms: callable | None = None,
+        clock_ms: Callable[[], int] | None = None,
         fee_info_fetcher: Any | None = None,
+        auto_subscribe_market_refresh: bool = True,
     ):
         discovery_config = MarketDiscoveryConfig()
         shared_discovery = SharedMarketDiscovery(
@@ -54,6 +55,7 @@ class LiveEventSource:
         self.book_normalizer = book_normalizer or BookNormalizer()
         self.trade_normalizer = trade_normalizer or TradeNormalizer()
         self.clock_ms = clock_ms or _default_clock_ms
+        self.auto_subscribe_market_refresh = bool(auto_subscribe_market_refresh)
         self.logger = get_logger("short_horizon.market_data.live_source")
         self._queue: asyncio.Queue[NormalizedEvent | object] = asyncio.Queue()
         self._sentinel = object()
@@ -129,7 +131,8 @@ class LiveEventSource:
         try:
             async for event in self.market_refresh:
                 self._register_market_event(event)
-                await self._reconcile_market_subscriptions(event)
+                if self.auto_subscribe_market_refresh:
+                    await self._reconcile_market_subscriptions(event)
                 for token_event in expand_market_state_update(event):
                     await self._queue.put(token_event)
         except asyncio.CancelledError:
