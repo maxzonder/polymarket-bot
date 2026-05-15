@@ -64,11 +64,17 @@ class SwanConfig:
     max_resting_per_cluster: int = 1  # max bids per neg-risk group (unused for now)
     max_total_stake_usdc: float = 500.0
     stale_order_ttl_seconds: float = 3600.0
+    # Optional relative stale TTL. If set and duration is known, effective TTL
+    # is min(stale_order_ttl_seconds, duration * fraction). This prevents a
+    # fixed multi-hour TTL from dominating short-duration markets.
+    stale_order_ttl_fraction_of_duration: float = 0.0
     # Cancel resting bids when a market enters its final N seconds to close.
-    # Issue #180 Phase B3: final_hour cohort has 54.7% hit-rate (worst), avoid
-    # filling there. Screener already filters at placement; this catches
-    # markets that aged into the danger zone after placement.
+    # This is the absolute fallback/cap. If cancel_when_remaining_fraction_lt
+    # is set and market duration is known, the effective threshold is
+    # min(absolute_seconds, duration * fraction). Screener already filters at
+    # placement; this catches markets that aged into the danger zone.
     cancel_when_remaining_seconds_lt: float = 3600.0
+    cancel_when_remaining_fraction_lt: float = 0.0
 
     # Lifecycle (phase) stake multipliers (issue #180 P1.3). Tuple of
     # (max_lifecycle_fraction, multiplier); first match wins. Empty = no scaling.
@@ -228,11 +234,10 @@ class SwanStrategyV1:
         if not event.is_active and event.market_id in self._bids_by_market:
             return self._cancel_market_bids(event.market_id, reason="market_no_longer_active")
         # Cancel bids on markets that aged into the final-window danger zone.
-        if (event.market_id in self._bids_by_market
-                and event.end_time_ms is not None
-                and self.config.cancel_when_remaining_seconds_lt > 0):
+        if event.market_id in self._bids_by_market and event.end_time_ms is not None:
+            threshold_s = self._final_window_threshold_seconds(event)
             remaining_s = (event.end_time_ms - self.clock.now_ms()) / 1000.0
-            if 0 < remaining_s < self.config.cancel_when_remaining_seconds_lt:
+            if threshold_s > 0 and 0 < remaining_s < threshold_s:
                 return self._cancel_market_bids(
                     event.market_id, reason="market_entered_final_window"
                 )
@@ -382,8 +387,8 @@ class SwanStrategyV1:
 
     def _cleanup_stale_orders(self, now_ms: int) -> list[StrategyIntent]:
         intents: list[StrategyIntent] = []
-        ttl_ms = int(self.config.stale_order_ttl_seconds * 1000)
         for oid, bid in list(self._resting_bids.items()):
+            ttl_ms = int(self._stale_order_ttl_seconds(bid) * 1000)
             if now_ms - bid.placed_at_ms > ttl_ms:
                 intents.append(CancelOrder(
                     market_id=bid.market_id,
@@ -524,6 +529,34 @@ class SwanStrategyV1:
                 min_order_shares=min_order_shares,
             ),
         )
+
+    def _final_window_threshold_seconds(self, event: MarketStateUpdate) -> float:
+        absolute = float(self.config.cancel_when_remaining_seconds_lt or 0.0)
+        fraction = float(getattr(self.config, "cancel_when_remaining_fraction_lt", 0.0) or 0.0)
+        duration_s = self._market_duration_seconds(event.market_id, event)
+        if fraction > 0.0 and duration_s and duration_s > 0:
+            relative = float(duration_s) * fraction
+            return min(absolute, relative) if absolute > 0.0 else relative
+        return absolute
+
+    def _stale_order_ttl_seconds(self, bid: _RestingBid) -> float:
+        absolute = float(self.config.stale_order_ttl_seconds or 0.0)
+        fraction = float(getattr(self.config, "stale_order_ttl_fraction_of_duration", 0.0) or 0.0)
+        duration_s = self._market_duration_seconds(bid.market_id)
+        if fraction > 0.0 and duration_s and duration_s > 0:
+            relative = float(duration_s) * fraction
+            return min(absolute, relative) if absolute > 0.0 else relative
+        return absolute
+
+    def _market_duration_seconds(self, market_id: str, event: MarketStateUpdate | None = None) -> float | None:
+        meta = event or self._market_meta.get(market_id)
+        if meta is None:
+            return None
+        if meta.duration_seconds is not None and meta.duration_seconds > 0:
+            return float(meta.duration_seconds)
+        if meta.start_time_ms is not None and meta.end_time_ms is not None and meta.end_time_ms > meta.start_time_ms:
+            return float(meta.end_time_ms - meta.start_time_ms) / 1000.0
+        return None
 
     @staticmethod
     def _entry_level_key(market_id: str, token_id: str, level: float) -> tuple[str, str, float]:

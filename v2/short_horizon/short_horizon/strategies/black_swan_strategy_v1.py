@@ -37,17 +37,22 @@ class BlackSwanConfig(SwanConfig):
     max_resting_markets: int = 5000
     max_total_stake_usdc: float = 1000.0
     # Most events resolve within 6h of entry (final_6h cohort dominates).
+    # For short markets, use a relative cap so a fixed 6h TTL does not dominate
+    # the whole market lifecycle (1h market → 30m TTL).
     stale_order_ttl_seconds: float = 21600.0
-    # Match BLACK_SWAN_MODE.min_hours_to_close (0.4h = 24min) so existing
-    # bids are pulled at the same boundary the screener stops adding new
-    # ones. The 1h SwanConfig default would conflict for 45-60m markets
-    # that are now in scope.
+    stale_order_ttl_fraction_of_duration: float = 0.50
+    # Match BLACK_SWAN_MODE's relative remaining-time gate. 24m remains the
+    # fallback/cap for markets missing total-duration metadata, but known 1h
+    # markets use the final 10% (~6m) instead of the old fixed 24m window.
     cancel_when_remaining_seconds_lt: float = 1440.0
-    # Venue-minimum guardrail: BLACK_SWAN_MODE is budgeted at about $1 per
-    # market.  Without effective-notional caps, --stake-per-level=1.0 submits
-    # roughly one venue-minimum order at every ladder level (~$5/market).
+    cancel_when_remaining_fraction_lt: float = 0.10
+    # Venue-minimum guardrail: allow the full BLACK_SWAN_MODE ladder with
+    # --stake-per-level=1.0 while bounding each market around one effective
+    # venue-minimum order per level.  The previous ~$1/market cap intentionally
+    # narrowed paper to 0.005-only; issue #202 switches paper coverage to the
+    # full 0.005..0.05 low-zone ladder for #196 validation.
     use_effective_notional_for_caps: bool = True
-    max_effective_notional_per_market_usdc: float = 1.05
+    max_effective_notional_per_market_usdc: float = 5.5
     skip_below_venue_min_effective_notional: bool = True
     venue_min_order_notional_usdc: float = 1.0
     venue_min_order_shares_fallback: float = 5.0

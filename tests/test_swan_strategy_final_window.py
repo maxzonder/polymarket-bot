@@ -40,7 +40,7 @@ class _FixedClock:
         self._now_ms += dt_ms
 
 
-def _make_market_state(market_id: str, end_time_ms: int) -> MarketStateUpdate:
+def _make_market_state(market_id: str, end_time_ms: int, *, duration_seconds: int | None = None) -> MarketStateUpdate:
     return MarketStateUpdate(
         event_time_ms=0,
         ingest_time_ms=0,
@@ -49,6 +49,7 @@ def _make_market_state(market_id: str, end_time_ms: int) -> MarketStateUpdate:
         status="active",
         is_active=True,
         end_time_ms=end_time_ms,
+        duration_seconds=duration_seconds,
     )
 
 
@@ -137,6 +138,11 @@ def test_black_swan_default_ttl_is_six_hours():
     assert cfg.stale_order_ttl_seconds == 21600.0  # 6h
 
 
+def test_black_swan_per_market_cap_allows_full_one_dollar_ladder():
+    cfg = BlackSwanConfig()
+    assert cfg.max_effective_notional_per_market_usdc == 5.5
+
+
 def test_black_swan_strategy_inherits_final_window_cancel():
     clock = _FixedClock(now_ms=1_000_000_000_000)
     strategy = BlackSwanStrategyV1(config=BlackSwanConfig(), clock=clock)
@@ -145,3 +151,39 @@ def test_black_swan_strategy_inherits_final_window_cancel():
     intents = strategy.on_market_state(_make_market_state("m1", end_ms))
     assert len(intents) == 1
     assert intents[0].reason == "market_entered_final_window"
+
+
+def test_black_swan_relative_final_window_keeps_hour_market_with_twenty_minutes_left():
+    clock = _FixedClock(now_ms=1_000_000_000_000)
+    strategy = BlackSwanStrategyV1(config=BlackSwanConfig(), clock=clock)
+    _seed_resting_bid(strategy, market_id="m1", token_id="t1")
+    end_ms = clock.now_ms() + 20 * 60 * 1000
+
+    intents = strategy.on_market_state(_make_market_state("m1", end_ms, duration_seconds=3600))
+
+    assert intents == []
+
+
+def test_black_swan_relative_final_window_cancels_hour_market_in_final_five_minutes():
+    clock = _FixedClock(now_ms=1_000_000_000_000)
+    strategy = BlackSwanStrategyV1(config=BlackSwanConfig(), clock=clock)
+    _seed_resting_bid(strategy, market_id="m1", token_id="t1")
+    end_ms = clock.now_ms() + 5 * 60 * 1000
+
+    intents = strategy.on_market_state(_make_market_state("m1", end_ms, duration_seconds=3600))
+
+    assert len(intents) == 1
+    assert intents[0].reason == "market_entered_final_window"
+
+
+def test_black_swan_relative_stale_ttl_caps_short_market_by_duration():
+    clock = _FixedClock(now_ms=1_000_000_000_000)
+    strategy = BlackSwanStrategyV1(config=BlackSwanConfig(), clock=clock)
+    _seed_resting_bid(strategy, market_id="m1", token_id="t1")
+    strategy.on_market_state(_make_market_state("m1", clock.now_ms() + 60 * 60 * 1000, duration_seconds=3600))
+
+    clock.advance_ms(31 * 60 * 1000)
+    intents = strategy._cleanup_stale_orders(clock.now_ms())
+
+    assert len(intents) == 1
+    assert intents[0].reason == "stale_order_ttl_expired"

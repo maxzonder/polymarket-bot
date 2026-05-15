@@ -273,7 +273,8 @@ class Screener:
                 _log("rejected_hours_to_close_null")
                 return []
             _log("hours_to_close_null_default_applied")
-        if hours < mc.min_hours_to_close:
+        min_hours_to_close = _effective_min_hours_to_close(mc, m)
+        if hours < min_hours_to_close:
             _log("rejected_hours_to_close_min")
             return []
         if hours > mc.max_hours_to_close:
@@ -672,6 +673,26 @@ def _duration_bucket(hours: float) -> str:
     if hours <= 168.0:
         return "1-7d"
     return "long"
+
+
+def _effective_min_hours_to_close(mc, m: MarketInfo) -> float:
+    """Return the remaining-time floor for this market.
+
+    `mc.min_hours_to_close` is the absolute fallback/cap.  If configured and
+    total duration is known, use a fraction of the market lifespan, capped by
+    the absolute value so short markets are not excluded too early.
+    """
+    absolute = float(getattr(mc, "min_hours_to_close", 0.0) or 0.0)
+    fraction = float(getattr(mc, "min_hours_to_close_fraction_of_duration", 0.0) or 0.0)
+    total_duration_hours = getattr(m, "total_duration_hours", None)
+    if fraction > 0.0 and total_duration_hours is not None:
+        try:
+            relative = float(total_duration_hours) * fraction
+        except (TypeError, ValueError):
+            relative = 0.0
+        if relative > 0.0:
+            return min(absolute, relative) if absolute > 0.0 else relative
+    return absolute
 
 
 def _cluster_multiplier(

@@ -60,6 +60,60 @@ class ScreenerTotalDurationGateTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         self.assertIn("passed_to_order_manager", [entry[8] for entry in log_entries])
 
+    def test_relative_remaining_gate_keeps_late_one_hour_market(self) -> None:
+        screener = Screener(BotConfig(mode="black_swan_mode"), market_scorer=None, skip_logging=True)
+        market = MarketInfo(
+            market_id="m-hour-late",
+            condition_id="c-hour-late",
+            question="Will the price of Ethereum be above $2,600 on May 14?",
+            category="crypto",
+            token_ids=["yes", "no"],
+            outcome_names=["Yes", "No"],
+            best_ask=0.01,
+            best_bid=0.005,
+            last_trade_price=0.01,
+            volume_usdc=100.0,
+            liquidity_usdc=50.0,
+            comment_count=0,
+            fees_enabled=False,
+            end_date_ts=None,
+            hours_to_close=0.20,  # 12m: below old fixed 24m gate
+            total_duration_hours=1.0,
+        )
+        log_entries = []
+
+        candidates = screener._evaluate_market(market, log_entries)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertIn("passed_to_order_manager", [entry[8] for entry in log_entries])
+
+    def test_relative_remaining_gate_rejects_final_slice_of_one_hour_market(self) -> None:
+        screener = Screener(BotConfig(mode="black_swan_mode"), market_scorer=None, skip_logging=True)
+        market = MarketInfo(
+            market_id="m-hour-final",
+            condition_id="c-hour-final",
+            question="Will the price of Ethereum be above $2,600 on May 14?",
+            category="crypto",
+            token_ids=["yes", "no"],
+            outcome_names=["Yes", "No"],
+            best_ask=0.01,
+            best_bid=0.005,
+            last_trade_price=0.01,
+            volume_usdc=100.0,
+            liquidity_usdc=50.0,
+            comment_count=0,
+            fees_enabled=False,
+            end_date_ts=None,
+            hours_to_close=0.05,  # 3m: below 10% of a 1h market
+            total_duration_hours=1.0,
+        )
+        log_entries = []
+
+        candidates = screener._evaluate_market(market, log_entries)
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(log_entries[-1][8], "rejected_hours_to_close_min")
+
     def test_parse_market_computes_total_duration_hours(self) -> None:
         from api.gamma_client import _parse_market
 

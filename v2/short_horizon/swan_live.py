@@ -938,7 +938,14 @@ async def run_swan_live(
         reconcile_runtime_orders(runtime=runtime, execution_client=execution_client, execution_mode=resolved_mode)
 
     # ── Market event source ───────────────────────────────────────────────────
-    _min_secs = int((min_hours_to_close if min_hours_to_close is not None else mode_config.min_hours_to_close) * 3600)
+    # If the selected mode uses a duration-relative minimum remaining-time gate,
+    # discovery must not pre-filter with the absolute fallback/cap (e.g. 24m for
+    # black_swan), otherwise 45-60m markets are removed before the screener can
+    # apply the relative threshold. CLI --min-hours-to-close remains absolute.
+    if min_hours_to_close is None and getattr(mode_config, "min_hours_to_close_fraction_of_duration", 0.0):
+        _min_secs = 0
+    else:
+        _min_secs = int((min_hours_to_close if min_hours_to_close is not None else mode_config.min_hours_to_close) * 3600)
     _max_secs = int(max_hours_to_close * 3600) if max_hours_to_close is not None else int(mode_config.max_hours_to_close * 3600)
     universe_filter = UniverseFilter(allowed_assets=())  # empty = all assets
     duration_window = DurationWindow(

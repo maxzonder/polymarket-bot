@@ -64,8 +64,14 @@ class ModeConfig:
     max_resting_per_cluster: int    # max markets per neg-risk group
 
     # ── Time window ───────────────────────────────────────────────────────────
-    min_hours_to_close: float   # reject markets closing sooner than this
+    min_hours_to_close: float   # reject markets closing sooner than this (absolute cap/fallback)
     max_hours_to_close: float   # reject markets closing later than this
+    # Optional relative minimum remaining-time gate.  When total market duration
+    # is known, the effective minimum is:
+    #   min(min_hours_to_close, total_duration_hours * fraction)
+    # This keeps short markets tradable late in their lifecycle while preserving
+    # min_hours_to_close as a safe fallback for missing duration metadata.
+    min_hours_to_close_fraction_of_duration: float = 0.0
 
     # ── Price-tier stake schedule ──────────────────────────────────────────────
     # Tuple of (max_entry_price, stake_usdc) sorted ascending by price.
@@ -328,12 +334,13 @@ BLACK_SWAN_MODE = ModeConfig(
     max_resting_markets=20000,
     max_resting_per_cluster=1,
     max_cohort_size=5,
-    # 0.4h (24 min): captures 45-60m duration markets in their first 21-36 min.
-    # Excludes 15m markets (≤15min remaining always < 24min) — those use a
-    # separate strategy. Issue #180 follow-up: 45-60m cohort = 63.6% WR / 49x
-    # avg X / $245 vol, currently profitable; was being dropped by the prior
-    # 1.0h gate.
+    # Relative final-window gate: keep the absolute 0.4h as fallback/cap for
+    # markets missing total-duration metadata, but when duration is known use
+    # the final 10% of market life.  This fixes 45-60m markets: 24m was 40% of
+    # a 1h market, while 10% is ~6m.  True 15m markets remain excluded by the
+    # total-duration gate below.
     min_hours_to_close=0.4,
+    min_hours_to_close_fraction_of_duration=0.10,
     max_hours_to_close=168.0,
     # 50 min: include one-hour markets while still excluding true 15m/ultra-short
     # markets by planned start/end duration when Gamma provides both timestamps.
