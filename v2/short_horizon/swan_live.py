@@ -1025,6 +1025,15 @@ async def run_swan_live(
     run_context = RunContext(run_id=run_id, strategy_id=strategy_id, mode=resolved_mode.value, config_hash=strategy_id)
     store = SQLiteRuntimeStore(db_path, run=run_context)
     runtime = StrategyRuntime(strategy=strategy, intent_store=store, clock=clock)
+    persisted_orders = store.load_all_orders()
+    hydrate_open_orders = getattr(strategy, "hydrate_open_orders", None)
+    if callable(hydrate_open_orders):
+        hydrate_open_orders(persisted_orders)
+        logger.info(
+            "strategy_open_orders_hydrated",
+            persisted_orders=len(persisted_orders),
+            non_terminal_orders=sum(1 for row in persisted_orders if str(row.get("state") or "") in {"accepted", "partially_filled", "unknown"}),
+        )
 
     # ── Execution client ──────────────────────────────────────────────────────
     execution_client: PolymarketExecutionClient | None = None
