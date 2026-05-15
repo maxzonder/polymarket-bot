@@ -322,6 +322,85 @@ def _market_with_trigger_price(
     )
 
 
+def _log_universe_selector_decisions(*, logger, selector_plan, observe_only: bool) -> None:
+    """Emit per-market selector decisions for post-run funnel analysis.
+
+    The aggregate ``ws_universe_selector_observation`` log is useful for live
+    sanity checks, but it cannot answer questions like "which rejected market
+    later resolved to $1?" because it does not preserve market_id -> reason.
+    These structured rows intentionally duplicate each selector cycle so an
+    offline report can either count cycles or collapse to the latest decision
+    per market.
+    """
+
+    for decision in selector_plan.decisions:
+        logger.info(
+            "ws_universe_selector_decision",
+            observe_only=observe_only,
+            market_id=decision.market_id,
+            condition_id=decision.condition_id,
+            question=(decision.question or "")[:240],
+            stage=decision.stage,
+            reject_reason=decision.reject_reason,
+            selected_token_count=len(decision.selected_token_ids),
+            selected_token_ids=decision.selected_token_ids,
+            subscription_score=decision.subscription_score,
+            asset_slug=decision.asset_slug,
+            category=decision.category,
+            slug=decision.slug,
+            duration_bucket=decision.duration_bucket,
+            volume_usdc=decision.volume_usdc,
+            liquidity_usdc=decision.liquidity_usdc,
+            neg_risk=decision.neg_risk,
+            neg_risk_group_id=decision.neg_risk_group_id,
+            catalyst_kind=decision.catalyst_kind,
+            catalyst_reason=decision.catalyst_reason,
+            retained_market=decision.retained_market,
+        )
+
+
+def _summarize_screener_entries_for_trigger(log_entries: list[tuple], *, token_id: str) -> dict:
+    """Condense screener_log rows into a structured WS trigger decision payload."""
+
+    outcome_counts: dict[str, int] = {}
+    target_outcomes: list[str] = []
+    target_prices: list[float | None] = []
+    market_level_outcomes: list[str] = []
+    market_score_values: list[float] = []
+    pattern_labels: list[str] = []
+    for entry in log_entries:
+        entry_token_id = entry[2] if len(entry) > 2 else None
+        price = entry[5] if len(entry) > 5 else None
+        outcome = entry[8] if len(entry) > 8 else None
+        market_score = entry[10] if len(entry) > 10 else None
+        pattern_label = entry[11] if len(entry) > 11 else None
+        if outcome:
+            outcome_counts[str(outcome)] = outcome_counts.get(str(outcome), 0) + 1
+        if entry_token_id == token_id:
+            if outcome:
+                target_outcomes.append(str(outcome))
+            target_prices.append(price)
+        elif entry_token_id is None and outcome:
+            market_level_outcomes.append(str(outcome))
+        if isinstance(market_score, (int, float)):
+            market_score_values.append(float(market_score))
+        if pattern_label:
+            pattern_labels.append(str(pattern_label))
+
+    primary_outcome = target_outcomes[0] if target_outcomes else (market_level_outcomes[0] if market_level_outcomes else None)
+    return {
+        "primary_outcome": primary_outcome,
+        "target_outcomes": tuple(target_outcomes),
+        "market_level_outcomes": tuple(market_level_outcomes),
+        "outcome_counts": dict(sorted(outcome_counts.items())),
+        "target_prices": tuple(target_prices),
+        "market_score_min": min(market_score_values) if market_score_values else None,
+        "market_score_max": max(market_score_values) if market_score_values else None,
+        "pattern_labels": tuple(sorted(set(pattern_labels))),
+        "screener_log_rows": len(log_entries),
+    }
+
+
 async def _ws_universe_builder_loop(
     *,
     ws: PolymarketWebsocket,
@@ -362,6 +441,11 @@ async def _ws_universe_builder_loop(
                     legacy_tokens=len(legacy_tokens),
                     token_reduction=max(0, len(legacy_tokens) - selector_plan.selected_tokens_count),
                     **asdict(selector_plan.summary(top_n=10)),
+                )
+                _log_universe_selector_decisions(
+                    logger=logger,
+                    selector_plan=selector_plan,
+                    observe_only=not apply_selector_plan,
                 )
 
             tokens: set[str] = set()
@@ -764,6 +848,18 @@ async def _ws_trigger_screener(
     finally:
         if log_entries:
             screener._flush_screener_log(log_entries)
+
+    screener_summary = _summarize_screener_entries_for_trigger(log_entries, token_id=token_id)
+    logger.info(
+        "ws_price_trigger_screener_outcome",
+        token_id=token_id,
+        ask=ask,
+        market_id=market_id,
+        side_index=side_index,
+        retry_attempt=retry_attempt,
+        candidates=len(candidates),
+        **screener_summary,
+    )
 
     if not candidates:
         deferred_pattern = any(

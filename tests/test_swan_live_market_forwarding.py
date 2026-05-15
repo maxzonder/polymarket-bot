@@ -292,6 +292,13 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(payload["token_reduction"], 2)
         self.assertEqual(payload["rejection_counts"], {"cap_markets": 1})
         self.assertEqual(payload["top_selected_market_ids"], ("weather",))
+        decision_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_selector_decision",)]
+        self.assertEqual(len(decision_logs), 2)
+        by_market = {entry[1]["market_id"]: entry[1] for entry in decision_logs}
+        self.assertEqual(by_market["weather"]["stage"], "selected")
+        self.assertEqual(by_market["weather"]["selected_token_count"], 2)
+        self.assertEqual(by_market["random"]["stage"], "rejected")
+        self.assertEqual(by_market["random"]["reject_reason"], "cap_markets")
 
     def test_universe_builder_can_apply_selector_with_safe_unsubscribe(self) -> None:
         async def run():
@@ -348,6 +355,24 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertTrue(all(entry[1]["selector_applied"] for entry in universe_logs))
         self.assertEqual(universe_logs[-1][1]["pruned_candidates"], 1)
         self.assertEqual(strategy.candidate_updates[-1], [])
+
+    def test_ws_trigger_screener_summary_preserves_reject_reasons(self) -> None:
+        rows = [
+            (1, "m1", None, "Question", "sports", None, 3.0, 1000.0, "rejected_market_score", "", 0.12, None, None, None, None, None, None),
+            (1, "m1", "tok-no", "Question", "sports", 0.04, 3.0, 1000.0, "rejected_pattern", "", 0.22, "grind_down", 0.0, 4, 0.5, 0.1, 0.3),
+            (1, "m1", "tok-yes", "Question", "sports", 0.01, 3.0, 1000.0, "passed_to_order_manager", "cid", 0.33, "floor", 1.0, 8, 0.5, 0.1, 0.3),
+        ]
+
+        summary = swan_live_module._summarize_screener_entries_for_trigger(rows, token_id="tok-no")
+
+        self.assertEqual(summary["primary_outcome"], "rejected_pattern")
+        self.assertEqual(summary["target_outcomes"], ("rejected_pattern",))
+        self.assertEqual(summary["market_level_outcomes"], ("rejected_market_score",))
+        self.assertEqual(summary["outcome_counts"]["passed_to_order_manager"], 1)
+        self.assertEqual(summary["target_prices"], (0.04,))
+        self.assertEqual(summary["market_score_min"], 0.12)
+        self.assertEqual(summary["market_score_max"], 0.33)
+        self.assertEqual(summary["pattern_labels"], ("floor", "grind_down"))
 
     def test_universe_builder_retains_protected_held_tokens_when_selector_applies(self) -> None:
         async def run():
