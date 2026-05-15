@@ -36,6 +36,21 @@ class TPLevel:
 
 
 @dataclass(frozen=True)
+class SportsSubtypeRejectRule:
+    """Single hard-reject rule for weak sports subtypes.
+
+    Keep sports filtering in one place: a market is rejected only when one of
+    these named rules matches either the normalized slug prefix or the question
+    text. Everything else stays eligible for the normal score/pattern/price
+    gates instead of being excluded by a broad allowlist.
+    """
+
+    name: str
+    slug_prefixes: tuple[str, ...] = ()
+    question_keywords: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ModeConfig:
     """Complete strategy configuration for one trading mode."""
 
@@ -130,22 +145,10 @@ class ModeConfig:
     # on total market lifespan at load time.
     min_total_duration_hours: float = 0.0
 
-    # ── Question-text exclusion keywords ─────────────────────────────────────
-    # Reject a market if its question contains ANY of these substrings (case-insensitive).
-    # Used to filter weak sports subtypes (tennis, F1, CS2, Valorant) that have
-    # materially lower WR (<60%) in black_swan analysis.
-    exclude_question_keywords: tuple[str, ...] = ()
-
-    # ── Slug prefix filters (issue #180 Phase A) ─────────────────────────────
-    # Asset-slug-based filtering. More reliable than question keywords because
-    # slugs follow consistent prefixes per league/type. Both lists default to
-    # empty (no slug filtering). When either is non-empty:
-    #   exclude_slug_prefixes — reject if slug starts with any of these
-    #   include_slug_prefixes — for sports markets only, REQUIRE slug to start
-    #     with one of these (allowlist). Non-sports categories are not gated
-    #     by include list. Keeps filter scope-bounded.
-    exclude_slug_prefixes: tuple[str, ...] = ()
-    include_slug_prefixes_for_sports: tuple[str, ...] = ()
+    # ── Sports subtype hard rejects ──────────────────────────────────────────
+    # One unified gate for weak sports subtypes.  Broad allowlists are avoided:
+    # non-matching sports markets continue to normal score/pattern/price gates.
+    sports_subtype_reject_rules: tuple[SportsSubtypeRejectRule, ...] = ()
 
     # ── Duration-aware stake multipliers (issue #180 P1.2) ───────────────────
     # Multiplier applied to per-level stake based on hours_to_close at screen time.
@@ -365,28 +368,21 @@ BLACK_SWAN_MODE = ModeConfig(
         ("category",     0.15),
     ),
     prefer_long_duration=True,  # flat score=1.0 up to 168h
-    # Exclude weak sports subtypes (WR < 60% in phase A3 analysis):
-    #   Tennis ~54%, F1 ~46%, CS2 ~60%, Valorant ~58%
-    exclude_question_keywords=(
-        "tennis", " atp ", "wta ", "wimbledon", "roland garros",
-        "formula 1", "formula one", "grand prix", "f1 race",
-        "counter-strike", " cs2 ", "blast premier", "esl pro league",
-        "valorant", " vct ",
-    ),
-    # Slug prefix filters from issue #180 Phase A.
-    # Block weak subtypes; require strong subtypes for sports markets only.
-    exclude_slug_prefixes=(
-        "atp-", "wta-", "f1-", "grand-prix-",
-        "cfb-", "cbb-", "cs2-", "es2-", "val-",
-    ),
-    include_slug_prefixes_for_sports=(
-        # soccer leagues
-        "epl-", "lal-", "ucl-", "uel-", "bun-", "fl1-", "sea-", "elc-",
-        "spl-", "ere-", "bl2-", "tur-", "por-", "arg-", "mex-",
-        # major US leagues
-        "nba-", "nhl-", "mlb-", "nfl-", "mls-",
-        # esports (strong)
-        "lol-", "league-of-legends-",
+    # Hard-reject only the weakest sports subtypes after the #196 re-check.
+    # No broad sports allowlist: Dota2/UFC/cricket/golf/tennis/CS2/other live
+    # sports remain eligible and are handled by score, pattern, price, and
+    # duration gates. F1 and Valorant were the clearest low-quality pockets in
+    # the same low-zone strict sports comparison.
+    sports_subtype_reject_rules=(
+        SportsSubtypeRejectRule(
+            name="formula_1",
+            slug_prefixes=("f1-", "grand-prix-"),
+            question_keywords=("formula 1", "formula one", "grand prix", "f1 race"),
+        ),
+        SportsSubtypeRejectRule(
+            name="valorant",
+            question_keywords=("valorant", " vct "),
+        ),
     ),
     duration_stake_multipliers=(
         # ≤15m: no analytics yet — very short lifecycle, high variance.

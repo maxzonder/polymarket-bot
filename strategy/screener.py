@@ -289,25 +289,9 @@ class Screener:
             _log("rejected_total_duration_min")
             return []
 
-        # Question-keyword exclusion (e.g. weak sports subtypes).
-        if mc.exclude_question_keywords:
-            q_lower = q.lower()
-            if any(kw in q_lower for kw in mc.exclude_question_keywords):
-                _log("rejected_excluded_keyword")
-                return []
-
-        # Slug prefix filters (issue #180 Phase A).
-        # Reliable than question keywords; slug follows league/type prefix.
-        slug_lower = (m.slug or "").lower()
-        if slug_lower and mc.exclude_slug_prefixes:
-            if any(slug_lower.startswith(p) for p in mc.exclude_slug_prefixes):
-                _log("rejected_excluded_slug")
-                return []
-        if (m.category == "sports"
-                and mc.include_slug_prefixes_for_sports
-                and slug_lower
-                and not any(slug_lower.startswith(p) for p in mc.include_slug_prefixes_for_sports)):
-            _log("rejected_sports_slug_not_in_allowlist")
+        sports_subtype_rule = _matching_sports_subtype_reject_rule(mc, m)
+        if sports_subtype_rule is not None:
+            _log(f"rejected_sports_subtype_{sports_subtype_rule.name}")
             return []
 
         # Hard filter: must have token IDs
@@ -660,6 +644,29 @@ class Screener:
             )
 
         return round(score, 4)
+
+
+def _matching_sports_subtype_reject_rule(mc, m: MarketInfo):
+    """Return the matching sports hard-reject rule, if any.
+
+    This intentionally replaces the previous combination of question-keyword
+    excludes, slug-prefix excludes, and a hard sports allowlist. The policy is:
+    reject only explicitly weak sports subtypes; leave all other sports markets
+    to the normal score/pattern/price gates.
+    """
+    if m.category != "sports":
+        return None
+    rules = getattr(mc, "sports_subtype_reject_rules", ()) or ()
+    if not rules:
+        return None
+    question_lower = (m.question or "").lower()
+    slug_lower = (m.slug or "").lower()
+    for rule in rules:
+        if slug_lower and any(slug_lower.startswith(prefix) for prefix in rule.slug_prefixes):
+            return rule
+        if any(keyword in question_lower for keyword in rule.question_keywords):
+            return rule
+    return None
 
 
 def _duration_bucket(hours: float) -> str:
