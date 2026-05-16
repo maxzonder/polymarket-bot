@@ -40,10 +40,11 @@ class BlackSwanConfig(SwanConfig):
     max_open_resting_bids: int = 500
     max_resting_markets: int = 5000
     max_total_stake_usdc: float = 1000.0
-    # Most events resolve within 6h of entry (final_6h cohort dominates).
-    # For short markets, use a relative cap so a fixed 6h TTL does not dominate
-    # the whole market lifecycle (1h market → 30m TTL).
-    stale_order_ttl_seconds: float = 21600.0
+    # Most events resolve within 6h of entry (final_6h cohort dominates), but
+    # issue #203 paper audit showed the old 6h cap caused unnecessary
+    # cancel/reopen churn on long markets. Keep the duration-relative guard for
+    # short markets while allowing long-market bids to rest up to 10h.
+    stale_order_ttl_seconds: float = 36000.0
     stale_order_ttl_fraction_of_duration: float = 0.50
     # Match BLACK_SWAN_MODE's relative remaining-time gate. 24m remains the
     # fallback/cap for markets missing total-duration metadata, but known 1h

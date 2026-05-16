@@ -130,12 +130,13 @@ def test_inactive_market_takes_priority():
     assert intents[0].reason == "market_no_longer_active"
 
 
-def test_black_swan_default_ttl_is_six_hours():
+def test_black_swan_default_ttl_is_ten_hours():
     """Regression: BlackSwanConfig must own its TTL — issue #180 found
     swan_live.py was overriding it with mode_config.max_hours_to_close*3600
-    (168h for BLACK_SWAN_MODE), defeating the 6h cleanup intent."""
+    (168h for BLACK_SWAN_MODE). Issue #203 moved the long-market cap from 6h
+    to 10h to reduce cancel/reopen churn while keeping duration-relative TTL."""
     cfg = BlackSwanConfig()
-    assert cfg.stale_order_ttl_seconds == 21600.0  # 6h
+    assert cfg.stale_order_ttl_seconds == 36000.0  # 10h
 
 
 def test_black_swan_has_no_separate_manual_per_market_money_cap():
