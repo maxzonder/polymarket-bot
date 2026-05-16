@@ -19,7 +19,11 @@ from ..core.events import (
 )
 from ..core.models import OrderIntent, SkipDecision, TouchSignal
 from ..core.order_state import OrderState
-from ..execution.order_translator import VenueConstraints, estimate_effective_buy_notional
+from ..execution.order_translator import (
+    DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC,
+    VenueConstraints,
+    estimate_effective_buy_notional,
+)
 from ..strategy_api import CancelOrder, Noop, PlaceOrder, StrategyIntent
 
 TIMER_SCREENER_REFRESH = "swan_screener_refresh"
@@ -93,7 +97,7 @@ class SwanConfig:
     max_effective_notional_per_market_usdc: float = 0.0
     skip_below_venue_min_effective_notional: bool = False
     venue_tick_size_fallback: float = 0.01
-    venue_min_order_notional_usdc: float = 1.0
+    venue_min_order_notional_usdc: float = DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC
     venue_min_order_shares_fallback: float = 0.0
 
 

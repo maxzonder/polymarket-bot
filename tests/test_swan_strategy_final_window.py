@@ -138,9 +138,9 @@ def test_black_swan_default_ttl_is_six_hours():
     assert cfg.stale_order_ttl_seconds == 21600.0  # 6h
 
 
-def test_black_swan_per_market_cap_allows_full_one_dollar_ladder():
+def test_black_swan_has_no_separate_manual_per_market_money_cap():
     cfg = BlackSwanConfig()
-    assert cfg.max_effective_notional_per_market_usdc == 5.5
+    assert cfg.max_effective_notional_per_market_usdc == 0.0
 
 
 def test_black_swan_strategy_inherits_final_window_cancel():

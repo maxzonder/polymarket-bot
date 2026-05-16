@@ -9,6 +9,10 @@ from ..core.models import OrderIntent
 from ..venue_polymarket.execution_client import VenueOrderRequest
 from ..venue_polymarket.markets import MarketMetadata
 
+DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC = 1.0
+DEFAULT_POLYMARKET_MIN_ORDER_SHARES_FALLBACK = 5.0
+DEFAULT_VENUE_MIN_NOTIONAL_BUFFER_USDC = 0.01
+
 
 class VenueTranslationError(RuntimeError):
     pass
@@ -20,7 +24,7 @@ class VenueConstraints:
     min_order_size: float
     min_order_shares: float | None = None
     size_decimals: int = 6
-    min_notional_buffer: float = 0.01
+    min_notional_buffer: float = DEFAULT_VENUE_MIN_NOTIONAL_BUFFER_USDC
 
 
 @dataclass(frozen=True)
@@ -190,6 +194,9 @@ def _client_order_id(*, intent: OrderIntent, seed: str | None) -> str:
 
 
 __all__ = [
+    "DEFAULT_POLYMARKET_MIN_ORDER_SHARES_FALLBACK",
+    "DEFAULT_VENUE_MIN_NOTIONAL_BUFFER_USDC",
+    "DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC",
     "TranslationPolicy",
     "VenueConstraints",
     "VenueTranslationError",
