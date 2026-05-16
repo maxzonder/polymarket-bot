@@ -1367,6 +1367,57 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(resolved_events[0].source, "runtime.market_resolution_settlement")
         self.assertAlmostEqual(resolved_events[0].estimated_pnl_usdc, 3.8)
 
+    def test_runtime_resolves_inventory_filled_on_prior_day(self) -> None:
+        engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=InMemoryIntentStore())
+        engine.on_market_state(self._market_state(token_id="tok_yes"))
+        engine.store.insert_order(
+            order_id="ord_buy_prior_day_001",
+            market_id="m1",
+            token_id="tok_yes",
+            side="BUY",
+            price=0.05,
+            size=20.0,
+            state=OrderState.FILLED,
+            client_order_id="cli_buy_prior_day_001",
+            intent_created_at_ms=200_000,
+            last_state_change_at_ms=210_000,
+            remaining_size=0.0,
+        )
+        engine.store.insert_fill(
+            fill_id="fill_buy_prior_day_001",
+            order_id="ord_buy_prior_day_001",
+            market_id="m1",
+            token_id="tok_yes",
+            price=0.05,
+            size=20.0,
+            filled_at_ms=210_000,
+            source="test",
+            fee_paid_usdc=0.0,
+        )
+
+        outputs = engine.on_market_state(MarketStateUpdate(
+            event_time_ms=86_600_000,
+            ingest_time_ms=86_600_050,
+            market_id="m1",
+            token_id="tok_yes",
+            token_yes_id="tok_yes",
+            token_no_id="tok_no",
+            condition_id="c1",
+            question="Bitcoin Up or Down?",
+            asset_slug="bitcoin",
+            status="resolved",
+            is_active=False,
+            end_time_ms=86_600_000,
+            resolved_token_id="tok_yes",
+        ))
+
+        self.assertEqual(outputs, [])
+        resolved_events = [event for event in engine.store.events if isinstance(event, MarketResolvedWithInventory)]
+        self.assertEqual(len(resolved_events), 1)
+        self.assertEqual(resolved_events[0].size, 20.0)
+        self.assertEqual(resolved_events[0].outcome_price, 1.0)
+        self.assertAlmostEqual(resolved_events[0].estimated_pnl_usdc, 19.0)
+
     def test_runtime_blocks_new_intent_when_max_consecutive_rejects_reached(self) -> None:
         engine = ShortHorizonEngine(
             config=ShortHorizonConfig(

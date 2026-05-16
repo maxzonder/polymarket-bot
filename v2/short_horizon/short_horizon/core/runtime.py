@@ -357,7 +357,7 @@ class StrategyRuntime:
         if event.is_active and (event.end_time_ms is None or event.event_time_ms < event.end_time_ms):
             return []
 
-        inventory_lots = _build_intraday_inventory_lots(
+        inventory_lots = _build_inventory_lots(
             orders=self.store.load_all_orders(),
             fills=self.store.load_fills(),
             event_time_ms=event.event_time_ms,
@@ -677,11 +677,21 @@ def _compute_intraday_realized_sell_pnl_usdc(*, orders: list[dict], fills: list[
 
 def _build_intraday_inventory_lots(*, orders: list[dict], fills: list[dict], event_time_ms: int) -> dict[tuple[str | None, str | None], list[list[float]]]:
     target_day = _iso_day_from_ms(event_time_ms)
+    return _build_inventory_lots(orders=orders, fills=fills, event_time_ms=event_time_ms, target_day=target_day)
+
+
+def _build_inventory_lots(
+    *,
+    orders: list[dict],
+    fills: list[dict],
+    event_time_ms: int,
+    target_day: str | None = None,
+) -> dict[tuple[str | None, str | None], list[list[float]]]:
     order_by_id = {str(row.get("order_id")): row for row in orders if row.get("order_id") is not None}
     inventory_lots: dict[tuple[str | None, str | None], list[list[float]]] = defaultdict(list)
     for fill in sorted(fills, key=lambda row: (str(row.get("filled_at") or ""), str(row.get("fill_id") or ""))):
         filled_at = str(fill.get("filled_at") or "")
-        if not filled_at.startswith(target_day):
+        if target_day is not None and not filled_at.startswith(target_day):
             continue
         order = order_by_id.get(str(fill.get("order_id") or ""), {})
         side = str(order.get("side") or "").upper()
