@@ -29,7 +29,8 @@ import os
 import sys
 import time
 import uuid
-from dataclasses import asdict, replace as dataclass_replace
+from collections import Counter
+from dataclasses import asdict, dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -72,7 +73,7 @@ from short_horizon.venue_polymarket.execution_client import (
     PRIVATE_KEY_ENV_VAR,
     PolymarketExecutionClient,
 )
-from short_horizon.venue_polymarket.markets import DurationWindow, UniverseFilter
+from short_horizon.venue_polymarket.markets import DurationWindow, MarketMetadata, UniverseFilter
 from short_horizon.venue_polymarket.book_channel import BookNormalizer
 from short_horizon.venue_polymarket.websocket import PolymarketWebsocket
 
@@ -303,6 +304,170 @@ class _WsCandidateCache:
             return removed
 
 
+@dataclass(frozen=True)
+class _WatchlistDecision:
+    market_id: str
+    stage: str
+    reason: str | None
+    watch_score: float | None
+    market_score_total: float | None
+    market_score_tier: str | None
+    category: str | None
+    volume_usdc: float
+    hours_to_close: float | None
+    selected_token_count: int
+
+
+@dataclass(frozen=True)
+class _WatchlistPlan:
+    markets: tuple[MarketMetadata, ...]
+    subscription_scores: dict[str, float]
+    decisions: tuple[_WatchlistDecision, ...]
+    rejection_counts: dict[str, int]
+
+    @property
+    def selected_markets_count(self) -> int:
+        return len(self.markets)
+
+    @property
+    def selected_tokens_count(self) -> int:
+        return sum(
+            int(bool(market.token_yes_id)) + int(bool(market.token_no_id))
+            for market in self.markets
+        )
+
+
+def _market_metadata_to_info(market: MarketMetadata, *, now_s: float) -> MarketInfo:
+    end_date_ts = int(market.end_time_ms / 1000) if market.end_time_ms is not None else None
+    hours_to_close = None
+    if end_date_ts is not None:
+        hours_to_close = max(0.0, (float(end_date_ts) - float(now_s)) / 3600.0)
+    total_duration_hours = None
+    if market.total_duration_seconds is not None:
+        total_duration_hours = float(market.total_duration_seconds) / 3600.0
+    token_ids = [token_id for token_id in (market.token_yes_id, market.token_no_id) if token_id]
+    outcome_names = [
+        market.yes_outcome_name or "Yes",
+        market.no_outcome_name or "No",
+    ][:len(token_ids)]
+    return MarketInfo(
+        market_id=str(market.market_id),
+        condition_id=str(market.condition_id),
+        question=str(market.question or ""),
+        category=market.category,
+        token_ids=token_ids,
+        outcome_names=outcome_names,
+        best_ask=market.best_ask,
+        best_bid=market.best_bid,
+        last_trade_price=market.last_trade_price,
+        volume_usdc=float(market.volume_usdc or 0.0),
+        liquidity_usdc=float(market.liquidity_usdc or 0.0),
+        comment_count=int(market.comment_count or 0),
+        fees_enabled=bool(market.fees_enabled),
+        end_date_ts=end_date_ts,
+        hours_to_close=hours_to_close,
+        neg_risk=bool(market.neg_risk),
+        neg_risk_group_id=market.neg_risk_group_id,
+        slug=market.slug,
+        total_duration_hours=total_duration_hours,
+    )
+
+
+def _build_black_swan_watchlist_plan(
+    markets: Iterable[MarketMetadata],
+    *,
+    screener: Screener,
+    active_market_ids: Iterable[str] | None = None,
+    now_s: float | None = None,
+) -> _WatchlistPlan:
+    """Rank markets for black_swan WS subscription before live price triggers.
+
+    This is deliberately not the final entry screener: it applies market-level
+    gates/scoring only and does not require the current price to be below the
+    entry threshold. WS remains responsible for finding the price edge, and
+    ``_ws_trigger_screener`` still runs the full token-level entry evaluation.
+    """
+    now_s = float(time.time() if now_s is None else now_s)
+    active_ids = {str(market_id) for market_id in (active_market_ids or ())}
+    decisions: list[_WatchlistDecision] = []
+    selected: list[tuple[MarketMetadata, float]] = []
+    rejection_counts: Counter[str] = Counter()
+
+    for market in markets:
+        info = _market_metadata_to_info(market, now_s=now_s)
+        reason: str | None = None
+        watch_score: float | None = None
+        market_score_total: float | None = None
+        market_score_tier: str | None = None
+        market_score_obj = None
+        hours = info.hours_to_close if info.hours_to_close is not None else screener.mc.hours_to_close_null_default
+
+        if not market.is_active:
+            reason = "inactive"
+        else:
+            market_eval = screener.evaluate_market_level(info)
+            hours = market_eval.hours
+            market_score_obj = market_eval.market_score
+            if market_score_obj is not None:
+                market_score_total = market_score_obj.total
+                market_score_tier = market_score_obj.tier
+            if not market_eval.passed:
+                reason = market_eval.reason
+
+        if reason is None:
+            watch_score = screener._compute_total_score(info, market_score_obj, hours=hours)
+            if str(market.market_id) in active_ids:
+                watch_score += 0.0001
+            selected.append((market, watch_score))
+            stage = "selected"
+        else:
+            rejection_counts[reason] += 1
+            stage = "rejected"
+
+        decisions.append(_WatchlistDecision(
+            market_id=str(market.market_id),
+            stage=stage,
+            reason=reason,
+            watch_score=watch_score,
+            market_score_total=market_score_total,
+            market_score_tier=market_score_tier,
+            category=market.category,
+            volume_usdc=float(market.volume_usdc or 0.0),
+            hours_to_close=hours,
+            selected_token_count=(len(info.token_ids) if stage == "selected" else 0),
+        ))
+
+    selected.sort(key=lambda item: (-item[1], str(item[0].market_id)))
+    return _WatchlistPlan(
+        markets=tuple(market for market, _ in selected),
+        subscription_scores={str(market.market_id): score for market, score in selected},
+        decisions=tuple(decisions),
+        rejection_counts=dict(rejection_counts),
+    )
+
+
+def _apply_black_swan_watchlist_selector(strategy_name: str) -> bool:
+    """black_swan uses screener/watchlist-first WS subscriptions by default."""
+    return strategy_name == "black_swan"
+
+
+def _log_black_swan_watchlist_decisions(*, logger, plan: _WatchlistPlan) -> None:
+    for decision in plan.decisions:
+        logger.info(
+            "black_swan_watchlist_decision",
+            market_id=decision.market_id,
+            stage=decision.stage,
+            reason=decision.reason,
+            watch_score=decision.watch_score,
+            market_score_total=decision.market_score_total,
+            market_score_tier=decision.market_score_tier,
+            category=decision.category,
+            volume_usdc=decision.volume_usdc,
+            hours_to_close=decision.hours_to_close,
+            selected_token_count=decision.selected_token_count,
+        )
+
+
 def _market_with_trigger_price(
     market: MarketInfo, *, token_id: str, side_index: int | None, ask: float
 ) -> MarketInfo:
@@ -419,6 +584,7 @@ async def _ws_universe_builder_loop(
     protected_market_tokens_fn: Callable[[], Iterable[tuple[str, str]]] | None = None,
     candidate_cache: _WsCandidateCache | None = None,
     strategy_for_cache_prune: SwanStrategyV1 | None = None,
+    black_swan_watchlist_screener: Screener | None = None,
 ) -> None:
     """Periodically syncs CLOB WS subscription to the already-discovered market universe.
 
@@ -434,13 +600,57 @@ async def _ws_universe_builder_loop(
                 duration_window=duration_window,
                 max_rows=5_000,
             )
+            subscription_markets = markets
+            watchlist_plan: _WatchlistPlan | None = None
+            if black_swan_watchlist_screener is not None:
+                active_market_ids = (
+                    strategy_for_cache_prune.get_active_market_ids()
+                    if strategy_for_cache_prune is not None
+                    else frozenset()
+                )
+                watchlist_plan = await asyncio.to_thread(
+                    _build_black_swan_watchlist_plan,
+                    markets,
+                    screener=black_swan_watchlist_screener,
+                    active_market_ids=active_market_ids,
+                )
+                subscription_markets = list(watchlist_plan.markets)
+                logger.info(
+                    "black_swan_watchlist_refresh",
+                    discovered_markets=len(markets),
+                    watchlist_markets=watchlist_plan.selected_markets_count,
+                    watchlist_tokens=watchlist_plan.selected_tokens_count,
+                    rejected_markets=sum(watchlist_plan.rejection_counts.values()),
+                    rejection_counts=watchlist_plan.rejection_counts,
+                    top_watchlist_market_ids=tuple(str(m.market_id) for m in watchlist_plan.markets[:10]),
+                    top_watchlist_scores=tuple(
+                        watchlist_plan.subscription_scores[str(m.market_id)]
+                        for m in watchlist_plan.markets[:10]
+                    ),
+                )
+                _log_black_swan_watchlist_decisions(logger=logger, plan=watchlist_plan)
+
             legacy_tokens, legacy_token_to_market_id, legacy_token_to_side_index = _legacy_token_subscription_maps(markets)
             selector_plan = None
             if selector_observation_config is not None:
-                selector_plan = build_subscription_plan(markets, config=selector_observation_config)
+                selector_config = selector_observation_config
+                if watchlist_plan is not None:
+                    selector_config = dataclass_replace(
+                        selector_observation_config,
+                        subscription_scores=watchlist_plan.subscription_scores,
+                        fair_category_allocation=False,
+                    )
+                selector_plan = build_subscription_plan(subscription_markets, config=selector_config)
                 logger.info(
                     "ws_universe_selector_observation",
                     observe_only=not apply_selector_plan,
+                    raw_discovered_markets=len(markets),
+                    watchlist_markets=(
+                        watchlist_plan.selected_markets_count if watchlist_plan is not None else None
+                    ),
+                    watchlist_tokens=(
+                        watchlist_plan.selected_tokens_count if watchlist_plan is not None else None
+                    ),
                     legacy_tokens=len(legacy_tokens),
                     token_reduction=max(0, len(legacy_tokens) - selector_plan.selected_tokens_count),
                     **asdict(selector_plan.summary(top_n=10)),
@@ -1374,6 +1584,7 @@ async def run_swan_live(
     token_to_market_id: dict[str, str] = {}
     token_to_side_index: dict[str, int] = {}
     ws_candidate_cache = _WsCandidateCache()
+    apply_watchlist_selector = _apply_black_swan_watchlist_selector(strategy_name)
     selector_observation_config = (
         _build_black_swan_universe_selector_config(
             max_markets=universe_selector_max_markets,
@@ -1383,14 +1594,15 @@ async def run_swan_live(
             min_volume_usdc=universe_selector_min_volume_usdc,
             reject_random_walk=universe_selector_reject_random_walk,
         )
-        if strategy_name == "black_swan" and (resolved_mode is ExecutionMode.DRY_RUN or apply_universe_selector)
+        if strategy_name == "black_swan"
         else None
     )
     if selector_observation_config is not None:
         logger.info(
             "ws_universe_selector_configured",
-            apply_selector=apply_universe_selector and strategy_name == "black_swan",
-            observe_only=not (apply_universe_selector and strategy_name == "black_swan"),
+            apply_selector=apply_watchlist_selector,
+            observe_only=not apply_watchlist_selector,
+            legacy_apply_selector_flag=apply_universe_selector,
             **asdict(selector_observation_config),
         )
 
@@ -1432,10 +1644,11 @@ async def run_swan_live(
             logger=logger,
             shutdown=shutdown,
             selector_observation_config=selector_observation_config,
-            apply_selector_plan=apply_universe_selector and strategy_name == "black_swan",
+            apply_selector_plan=apply_watchlist_selector,
             protected_market_tokens_fn=lambda: _held_or_open_market_tokens(store),
             candidate_cache=ws_candidate_cache,
             strategy_for_cache_prune=strategy,
+            black_swan_watchlist_screener=(screener if strategy_name == "black_swan" else None),
         ),
         name="swan_ws_universe_loop",
     )
@@ -1534,7 +1747,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    dest="min_total_duration_hours",
                    help="Override min total market lifespan (hours) from mode config")
     p.add_argument("--apply-universe-selector", action="store_true",
-                   help="Use the black_swan universe selector to narrow CLOB WS subscriptions (default: observe/log only in dry-run)")
+                   help="Legacy flag retained for compatibility; black_swan applies the watchlist selector by default")
     p.add_argument("--universe-selector-max-markets", type=int, default=None,
                    help="Override black_swan selector max markets before WS subscription (0 = unlimited)")
     p.add_argument("--universe-selector-max-tokens", type=int, default=None,

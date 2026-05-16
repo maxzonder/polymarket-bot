@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +71,21 @@ class EntryCandidate:
     candidate_id: str = ""      # UUID linking screener_log → scan_log → resting_orders
     rationale: str = ""         # human-readable explanation
     market_score: Optional[MarketScore] = None  # v1.1: market-level score breakdown
+
+
+@dataclass
+class MarketLevelEvaluation:
+    """Market-level screener result before token price/pattern entry gates."""
+
+    hours: float
+    reason: Optional[str] = None
+    market_score: Optional[MarketScore] = None
+    token_market_scores: dict[int, MarketScore] = field(default_factory=dict)
+    hours_to_close_null_default_applied: bool = False
+
+    @property
+    def passed(self) -> bool:
+        return self.reason is None
 
 
 class Screener:
@@ -218,6 +233,110 @@ class Screener:
         except Exception as e:
             logger.debug(f"screener_log flush failed: {e}")
 
+    def evaluate_market_level(self, m: MarketInfo) -> MarketLevelEvaluation:
+        """Apply market-level gates/scoring without token price entry checks.
+
+        This is shared by the polling screener and the black_swan WS watchlist:
+        it rejects structurally unsuitable markets and computes the ranking
+        signal, but deliberately does not require any token to be below the
+        entry price threshold.
+        """
+        mc = self.mc
+        null_default_applied = False
+        if m.hours_to_close is None:
+            if mc.hours_to_close_null_reject:
+                return MarketLevelEvaluation(
+                    hours=mc.hours_to_close_null_default,
+                    reason="rejected_hours_to_close_null",
+                )
+            null_default_applied = True
+
+        hours: float = m.hours_to_close if m.hours_to_close is not None else mc.hours_to_close_null_default
+        min_hours_to_close = _effective_min_hours_to_close(mc, m)
+        if hours < min_hours_to_close:
+            return MarketLevelEvaluation(
+                hours=hours,
+                reason="rejected_hours_to_close_min",
+                hours_to_close_null_default_applied=null_default_applied,
+            )
+        if hours > mc.max_hours_to_close:
+            return MarketLevelEvaluation(
+                hours=hours,
+                reason="rejected_hours_to_close_max",
+                hours_to_close_null_default_applied=null_default_applied,
+            )
+        total_duration_hours = getattr(m, "total_duration_hours", None)
+        if (
+            mc.min_total_duration_hours > 0
+            and total_duration_hours is not None
+            and total_duration_hours < mc.min_total_duration_hours
+        ):
+            return MarketLevelEvaluation(
+                hours=hours,
+                reason="rejected_total_duration_min",
+                hours_to_close_null_default_applied=null_default_applied,
+            )
+
+        sports_subtype_rule = _matching_sports_subtype_reject_rule(mc, m)
+        if sports_subtype_rule is not None:
+            return MarketLevelEvaluation(
+                hours=hours,
+                reason=f"rejected_sports_subtype_{sports_subtype_rule.name}",
+                hours_to_close_null_default_applied=null_default_applied,
+            )
+
+        if not m.token_ids:
+            return MarketLevelEvaluation(
+                hours=hours,
+                reason="rejected_missing_token_ids",
+                hours_to_close_null_default_applied=null_default_applied,
+            )
+
+        if self.market_scorer is not None and not self.market_scorer.is_ready:
+            return MarketLevelEvaluation(
+                hours=hours,
+                reason="market_scorer_not_ready",
+                hours_to_close_null_default_applied=null_default_applied,
+            )
+
+        ms_obj: Optional[MarketScore] = None
+        token_market_scores: dict[int, MarketScore] = {}
+        if self.market_scorer is not None:
+            if m.neg_risk:
+                token_market_scores = {
+                    i: self.market_scorer.score(
+                        m,
+                        hours_to_close=hours,
+                        is_no_token=(i > 0),
+                    )
+                    for i in range(len(m.token_ids))
+                }
+                ms_obj = max(token_market_scores.values(), key=lambda ms: ms.total, default=None)
+                if ms_obj is None or all(ms.tier == "reject" for ms in token_market_scores.values()):
+                    return MarketLevelEvaluation(
+                        hours=hours,
+                        reason="rejected_market_score",
+                        market_score=ms_obj,
+                        token_market_scores=token_market_scores,
+                        hours_to_close_null_default_applied=null_default_applied,
+                    )
+            else:
+                ms_obj = self.market_scorer.score(m, hours_to_close=hours)
+                if ms_obj.tier == "reject":
+                    return MarketLevelEvaluation(
+                        hours=hours,
+                        reason="rejected_market_score",
+                        market_score=ms_obj,
+                        hours_to_close_null_default_applied=null_default_applied,
+                    )
+
+        return MarketLevelEvaluation(
+            hours=hours,
+            market_score=ms_obj,
+            token_market_scores=token_market_scores,
+            hours_to_close_null_default_applied=null_default_applied,
+        )
+
     def _evaluate_market(
         self,
         m: MarketInfo,
@@ -232,8 +351,8 @@ class Screener:
         q = (m.question or "")[:120]
 
         # Resolve hours_to_close once: gate, scoring, and logging all use the same value.
-        mc = self.config.mode_config
-        hours: float = m.hours_to_close if m.hours_to_close is not None else mc.hours_to_close_null_default
+        market_eval = self.evaluate_market_level(m)
+        hours = market_eval.hours
 
         def _log(
             outcome: str,
@@ -268,60 +387,19 @@ class Screener:
                 pattern_floor_duration_fraction,
             ))
 
-        if m.hours_to_close is None:
-            if mc.hours_to_close_null_reject:
-                _log("rejected_hours_to_close_null")
-                return []
+        if market_eval.hours_to_close_null_default_applied:
             _log("hours_to_close_null_default_applied")
-        min_hours_to_close = _effective_min_hours_to_close(mc, m)
-        if hours < min_hours_to_close:
-            _log("rejected_hours_to_close_min")
-            return []
-        if hours > mc.max_hours_to_close:
-            _log("rejected_hours_to_close_max")
-            return []
-        total_duration_hours = getattr(m, "total_duration_hours", None)
-        if (
-            mc.min_total_duration_hours > 0
-            and total_duration_hours is not None
-            and total_duration_hours < mc.min_total_duration_hours
-        ):
-            _log("rejected_total_duration_min")
-            return []
-
-        sports_subtype_rule = _matching_sports_subtype_reject_rule(mc, m)
-        if sports_subtype_rule is not None:
-            _log(f"rejected_sports_subtype_{sports_subtype_rule.name}")
-            return []
-
-        # Hard filter: must have token IDs
-        if not m.token_ids:
-            _log("rejected_missing_token_ids")
+        if not market_eval.passed:
+            _log(
+                market_eval.reason or "rejected_market_level",
+                ms=market_eval.market_score.total if market_eval.market_score else None,
+            )
             return []
 
         # Market-level score gate runs before any downstream price/depth work so we
         # reject bad markets early using the single live ranking signal.
-        ms_obj: Optional[MarketScore] = None
-        token_market_scores: dict[int, MarketScore] = {}
-        if self.market_scorer is not None:
-            if m.neg_risk:
-                token_market_scores = {
-                    i: self.market_scorer.score(
-                        m,
-                        hours_to_close=hours,
-                        is_no_token=(i > 0),
-                    )
-                    for i in range(len(m.token_ids))
-                }
-                ms_obj = max(token_market_scores.values(), key=lambda ms: ms.total, default=None)
-                if ms_obj is None or all(ms.tier == "reject" for ms in token_market_scores.values()):
-                    _log("rejected_market_score", ms=ms_obj.total if ms_obj else None)
-                    return []
-            else:
-                ms_obj = self.market_scorer.score(m, hours_to_close=hours)
-                if ms_obj.tier == "reject":
-                    _log("rejected_market_score", ms=ms_obj.total)
-                    return []
+        ms_obj = market_eval.market_score
+        token_market_scores = market_eval.token_market_scores
 
         # Dead market filter: reject if no trades in the last dead_market_hours.
         # Checked after market_score gate to avoid hitting Data API for bad markets.

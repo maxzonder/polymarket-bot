@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -16,10 +17,14 @@ from short_horizon.core.events import BookUpdate, MarketStateUpdate, TradeTick
 from short_horizon.market_data import LiveEventSource
 from short_horizon.strategies.swan_strategy_v1 import SwanCandidate
 from short_horizon.venue_polymarket import MarketMetadata, black_swan_universe_config
-from config import BLACK_SWAN_MODE
+from config import BLACK_SWAN_MODE, BotConfig
+from strategy.market_scorer import MarketScore
+from strategy.screener import Screener
 import v2.short_horizon.swan_live as swan_live_module
 from v2.short_horizon.swan_live import (
     _WsCandidateCache,
+    _apply_black_swan_watchlist_selector,
+    _build_black_swan_watchlist_plan,
     _build_arg_parser,
     _build_black_swan_universe_selector_config,
     _held_or_open_market_tokens,
@@ -115,6 +120,34 @@ class _NoopLogger:
         self.infos.append((args, kwargs))
 
 
+class _FakeMarketScorer:
+    def __init__(self, scores: dict[str, float], *, is_ready: bool = True):
+        self.scores = scores
+        self.is_ready = is_ready
+
+    def score(self, market, *, hours_to_close=None, is_no_token=False):
+        total = float(self.scores.get(market.market_id, 0.0))
+        tier = "reject" if total < 0.25 else ("top10" if total >= 0.60 else "pass")
+        return MarketScore(
+            market_id=market.market_id,
+            liquidity_score=total,
+            time_score=1.0,
+            analogy_score=0.0,
+            context_score=0.0,
+            total=total,
+            tier=tier,
+            rationale=f"fake={total}",
+        )
+
+
+def _black_swan_screener_with_scores(scores: dict[str, float], *, is_ready: bool = True) -> Screener:
+    return Screener(
+        config=BotConfig(mode="black_swan_mode"),
+        market_scorer=_FakeMarketScorer(scores, is_ready=is_ready),
+        skip_logging=True,
+    )
+
+
 def _candidate(market_id: str, token_id: str) -> SwanCandidate:
     return SwanCandidate(
         market_id=market_id,
@@ -128,7 +161,15 @@ def _candidate(market_id: str, token_id: str) -> SwanCandidate:
     )
 
 
-def _market(market_id: str, *, question: str, category: str = "crypto") -> MarketMetadata:
+def _market(
+    market_id: str,
+    *,
+    question: str,
+    category: str = "crypto",
+    end_time_ms: int = 1_000_000,
+    total_duration_seconds: int = 3600,
+    best_ask: float | None = None,
+) -> MarketMetadata:
     return MarketMetadata(
         market_id=market_id,
         condition_id=f"cond-{market_id}",
@@ -136,7 +177,7 @@ def _market(market_id: str, *, question: str, category: str = "crypto") -> Marke
         token_yes_id=f"yes-{market_id}",
         token_no_id=f"no-{market_id}",
         start_time_ms=0,
-        end_time_ms=1_000_000,
+        end_time_ms=end_time_ms,
         asset_slug="bitcoin",
         is_active=True,
         duration_seconds=3600,
@@ -145,7 +186,8 @@ def _market(market_id: str, *, question: str, category: str = "crypto") -> Marke
         tick_size=0.01,
         category=category,
         volume_usdc=1_000.0,
-        total_duration_seconds=3600,
+        total_duration_seconds=total_duration_seconds,
+        best_ask=best_ask,
     )
 
 
@@ -259,6 +301,40 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
 
         self.assertEqual(cfg.min_volume_usdc, 100.0)
 
+    def test_black_swan_watchlist_selector_is_default_subscription_path(self) -> None:
+        self.assertTrue(_apply_black_swan_watchlist_selector("black_swan"))
+        self.assertFalse(_apply_black_swan_watchlist_selector("swan"))
+
+    def test_black_swan_watchlist_ranks_by_market_score_without_price_gate(self) -> None:
+        now_s = 1_000_000.0
+        future_end_ms = int((now_s + 24 * 3600) * 1000)
+        screener = _black_swan_screener_with_scores({"low": 0.30, "reject": 0.10, "high": 0.90})
+
+        plan = _build_black_swan_watchlist_plan(
+            [
+                _market("low", question="Will low pass?", end_time_ms=future_end_ms),
+                _market("reject", question="Will reject fail?", end_time_ms=future_end_ms),
+                _market(
+                    "high",
+                    question="Will high pass?",
+                    end_time_ms=future_end_ms,
+                    category="weather",
+                    best_ask=0.60,
+                ),
+            ],
+            screener=screener,
+            now_s=now_s,
+        )
+
+        self.assertEqual([market.market_id for market in plan.markets], ["high", "low"])
+        self.assertGreater(plan.subscription_scores["high"], plan.subscription_scores["low"])
+        by_market = {decision.market_id: decision for decision in plan.decisions}
+        self.assertEqual(by_market["reject"].stage, "rejected")
+        self.assertEqual(by_market["reject"].reason, "rejected_market_score")
+        # Watchlist selection is intentionally pre-price: final entry price is
+        # checked later by the WS trigger + full screener path.
+        self.assertEqual(by_market["high"].stage, "selected")
+
     def test_universe_builder_logs_selector_observation_without_changing_subscription(self) -> None:
         async def run():
             shutdown = asyncio.Event()
@@ -312,6 +388,83 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(by_market["random"]["selected_token_count"], 2)
         self.assertEqual(by_market["weather"]["stage"], "deferred")
         self.assertEqual(by_market["weather"]["reject_reason"], "capacity")
+
+    def test_black_swan_universe_builder_subscribes_from_watchlist_scores_before_ws(self) -> None:
+        async def run():
+            shutdown = asyncio.Event()
+            ws = _FakeWs(shutdown)
+            logger = _NoopLogger()
+            future_end_ms = int((time.time() + 24 * 3600) * 1000)
+            markets = [
+                _market("a-low", question="Low score market", end_time_ms=future_end_ms),
+                _market("z-high", question="High score market", category="weather", end_time_ms=future_end_ms),
+            ]
+            token_to_market_id: dict[str, str] = {}
+            token_to_side_index: dict[str, int] = {}
+
+            await _ws_universe_builder_loop(
+                ws=ws,
+                shared_discovery=_FakeSharedDiscovery(shutdown, markets),
+                token_to_market_id=token_to_market_id,
+                token_to_side_index=token_to_side_index,
+                duration_window=object(),
+                universe_filter=object(),
+                logger=logger,
+                shutdown=shutdown,
+                selector_observation_config=black_swan_universe_config(max_markets=1),
+                apply_selector_plan=True,
+                black_swan_watchlist_screener=_black_swan_screener_with_scores({"a-low": 0.30, "z-high": 0.90}),
+            )
+            return ws, logger, token_to_market_id, token_to_side_index
+
+        ws, logger, token_to_market_id, token_to_side_index = asyncio.run(run())
+
+        self.assertEqual(set(ws.subscribed[0]), {"yes-z-high", "no-z-high"})
+        self.assertEqual(token_to_market_id, {"yes-z-high": "z-high", "no-z-high": "z-high"})
+        selector_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_selector_observation",)]
+        self.assertEqual(selector_logs[-1][1]["watchlist_markets"], 2)
+        self.assertEqual(selector_logs[-1][1]["selected_markets"], 1)
+        watchlist_logs = [entry for entry in logger.infos if entry[0] == ("black_swan_watchlist_refresh",)]
+        self.assertEqual(watchlist_logs[-1][1]["watchlist_markets"], 2)
+
+    def test_black_swan_watchlist_fail_closed_when_market_scorer_not_ready(self) -> None:
+        async def run():
+            shutdown = asyncio.Event()
+            ws = _FakeWs(shutdown)
+            logger = _NoopLogger()
+            future_end_ms = int((time.time() + 24 * 3600) * 1000)
+            token_to_market_id: dict[str, str] = {}
+            token_to_side_index: dict[str, int] = {}
+
+            await _ws_universe_builder_loop(
+                ws=ws,
+                shared_discovery=_FakeSharedDiscovery(
+                    shutdown,
+                    [_market("candidate", question="Candidate market", end_time_ms=future_end_ms)],
+                ),
+                token_to_market_id=token_to_market_id,
+                token_to_side_index=token_to_side_index,
+                duration_window=object(),
+                universe_filter=object(),
+                logger=logger,
+                shutdown=shutdown,
+                selector_observation_config=black_swan_universe_config(max_markets=1),
+                apply_selector_plan=True,
+                black_swan_watchlist_screener=_black_swan_screener_with_scores({"candidate": 0.90}, is_ready=False),
+            )
+            return ws, logger, token_to_market_id, token_to_side_index
+
+        ws, logger, token_to_market_id, token_to_side_index = asyncio.run(run())
+
+        self.assertEqual(ws.subscribed, [])
+        self.assertEqual(token_to_market_id, {})
+        self.assertEqual(token_to_side_index, {})
+        watchlist_logs = [entry for entry in logger.infos if entry[0] == ("black_swan_watchlist_refresh",)]
+        self.assertEqual(watchlist_logs[-1][1]["watchlist_markets"], 0)
+        self.assertEqual(watchlist_logs[-1][1]["rejection_counts"], {"market_scorer_not_ready": 1})
+        universe_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_updated",)]
+        self.assertTrue(universe_logs[-1][1]["selector_applied"])
+        self.assertEqual(universe_logs[-1][1]["tokens"], 0)
 
     def test_universe_builder_can_apply_selector_with_safe_unsubscribe(self) -> None:
         async def run():
@@ -423,5 +576,83 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(token_to_market_id["yes-random"], "random")
         self.assertEqual(token_to_side_index["yes-random"], 0)
         self.assertNotIn("no-random", token_to_market_id)
+        universe_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_updated",)]
+        self.assertEqual(universe_logs[-1][1]["protected_tokens"], 1)
+
+    def test_black_swan_watchlist_builder_still_retains_protected_held_tokens(self) -> None:
+        async def run():
+            shutdown = asyncio.Event()
+            ws = _FakeWs(shutdown)
+            logger = _NoopLogger()
+            token_to_market_id: dict[str, str] = {}
+            token_to_side_index: dict[str, int] = {}
+            future_end_ms = int((time.time() + 24 * 3600) * 1000)
+
+            await _ws_universe_builder_loop(
+                ws=ws,
+                shared_discovery=_FakeSharedDiscovery(
+                    shutdown,
+                    [
+                        _market("ranked", question="High score market", end_time_ms=future_end_ms),
+                        _market("held", question="Low score held market", end_time_ms=future_end_ms),
+                    ],
+                ),
+                token_to_market_id=token_to_market_id,
+                token_to_side_index=token_to_side_index,
+                duration_window=object(),
+                universe_filter=object(),
+                logger=logger,
+                shutdown=shutdown,
+                selector_observation_config=black_swan_universe_config(max_markets=1),
+                apply_selector_plan=True,
+                protected_market_tokens_fn=lambda: [("held", "yes-held")],
+                black_swan_watchlist_screener=_black_swan_screener_with_scores({"ranked": 0.90, "held": 0.10}),
+            )
+            return ws, logger, token_to_market_id, token_to_side_index
+
+        ws, logger, token_to_market_id, token_to_side_index = asyncio.run(run())
+
+        self.assertEqual(set(ws.subscribed[0]), {"yes-ranked", "no-ranked", "yes-held"})
+        self.assertEqual(token_to_market_id["yes-held"], "held")
+        self.assertEqual(token_to_side_index["yes-held"], 0)
+        self.assertNotIn("no-held", token_to_market_id)
+        watchlist_decisions = [entry for entry in logger.infos if entry[0] == ("black_swan_watchlist_decision",)]
+        held_decision = [entry for entry in watchlist_decisions if entry[1]["market_id"] == "held"][-1]
+        self.assertEqual(held_decision[1]["stage"], "rejected")
+        self.assertEqual(held_decision[1]["reason"], "rejected_market_score")
+
+    def test_black_swan_watchlist_retains_protected_token_absent_from_discovery(self) -> None:
+        async def run():
+            shutdown = asyncio.Event()
+            ws = _FakeWs(shutdown)
+            logger = _NoopLogger()
+            token_to_market_id: dict[str, str] = {}
+            token_to_side_index: dict[str, int] = {}
+            future_end_ms = int((time.time() + 24 * 3600) * 1000)
+
+            await _ws_universe_builder_loop(
+                ws=ws,
+                shared_discovery=_FakeSharedDiscovery(
+                    shutdown,
+                    [_market("ranked", question="High score market", end_time_ms=future_end_ms)],
+                ),
+                token_to_market_id=token_to_market_id,
+                token_to_side_index=token_to_side_index,
+                duration_window=object(),
+                universe_filter=object(),
+                logger=logger,
+                shutdown=shutdown,
+                selector_observation_config=black_swan_universe_config(max_markets=1),
+                apply_selector_plan=True,
+                protected_market_tokens_fn=lambda: [("missing-held", "tok-missing-held")],
+                black_swan_watchlist_screener=_black_swan_screener_with_scores({"ranked": 0.90}),
+            )
+            return ws, logger, token_to_market_id, token_to_side_index
+
+        ws, logger, token_to_market_id, token_to_side_index = asyncio.run(run())
+
+        self.assertEqual(set(ws.subscribed[0]), {"yes-ranked", "no-ranked", "tok-missing-held"})
+        self.assertEqual(token_to_market_id["tok-missing-held"], "missing-held")
+        self.assertEqual(token_to_side_index["tok-missing-held"], 0)
         universe_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_updated",)]
         self.assertEqual(universe_logs[-1][1]["protected_tokens"], 1)

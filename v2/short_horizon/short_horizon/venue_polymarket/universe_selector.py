@@ -70,6 +70,10 @@ class UniverseSelectorConfig:
     retained for observability/backward-compatible config parsing, but they do
     not hard-filter markets before WS.
 
+    Callers that already ran a strategic watchlist scorer may pass explicit
+    ``subscription_scores`` and disable fair category allocation so capacity is
+    applied after that ranking instead of over the raw discovery order.
+
     A value of 0 for caps means unlimited/disabled.
     """
 
@@ -93,6 +97,8 @@ class UniverseSelectorConfig:
     retained_score_bonus: float = 0.0
     prefer_retained_on_score_tie: bool = True
     base_subscription_score: float = 1.0
+    subscription_scores: dict[str, float] = field(default_factory=dict)
+    fair_category_allocation: bool = True
     catalyst_multiplier: float = 1.0
     random_walk_multiplier: float = 1.0
     ambiguous_multiplier: float = 1.0
@@ -223,7 +229,8 @@ def build_subscription_plan(
         ))
 
     ranked_candidates = _fair_capacity_order(
-        candidate for candidate in evaluated if candidate.reject_reason is None
+        (candidate for candidate in evaluated if candidate.reject_reason is None),
+        cfg=cfg,
     )
 
     for candidate in ranked_candidates:
@@ -392,7 +399,14 @@ def _subscription_score(
     *,
     retained_market: bool = False,
 ) -> float:
-    score = float(cfg.base_subscription_score)
+    market_id = str(market.market_id or "")
+    if market_id and market_id in cfg.subscription_scores:
+        try:
+            score = float(cfg.subscription_scores[market_id])
+        except (TypeError, ValueError):
+            score = float(cfg.base_subscription_score)
+    else:
+        score = float(cfg.base_subscription_score)
     _ = (market, catalyst)
     if retained_market and cfg.retained_score_bonus > 0:
         score += float(cfg.retained_score_bonus)
@@ -406,23 +420,28 @@ def _candidate_sort_key(candidate: _Candidate, cfg: UniverseSelectorConfig) -> t
     return (-candidate.subscription_score, retained_rank, int(end_time_rank), market_id, candidate.index)
 
 
-def _fair_capacity_order(candidates: Iterable[_Candidate]) -> list[_Candidate]:
-    """Return stable capacity ordering without semantic score weights.
+def _fair_capacity_order(candidates: Iterable[_Candidate], *, cfg: UniverseSelectorConfig) -> list[_Candidate]:
+    """Return stable capacity ordering for eligible markets.
 
-    Retained markets are considered first, then non-retained markets are
-    interleaved by category so a single prolific category cannot consume the
-    whole WS window solely due to discovery order.
+    By default, retained markets are considered first, then non-retained markets
+    are interleaved by category so a single prolific category cannot consume the
+    whole WS window solely due to discovery order.  When a caller provides an
+    upstream strategic ranking, ``fair_category_allocation=False`` preserves the
+    global score order instead.
     """
 
     candidates = list(candidates)
+    if not cfg.fair_category_allocation:
+        return sorted(candidates, key=lambda candidate: _candidate_sort_key(candidate, cfg))
+
     retained = sorted(
         (candidate for candidate in candidates if candidate.retained_market),
-        key=lambda candidate: _candidate_sort_key(candidate, UniverseSelectorConfig()),
+        key=lambda candidate: _candidate_sort_key(candidate, cfg),
     )
     buckets: dict[str, deque[_Candidate]] = defaultdict(deque)
     for candidate in sorted(
         (candidate for candidate in candidates if not candidate.retained_market),
-        key=lambda candidate: _candidate_sort_key(candidate, UniverseSelectorConfig()),
+        key=lambda candidate: _candidate_sort_key(candidate, cfg),
     ):
         buckets[_norm(getattr(candidate.market, "category", None)) or "unknown"].append(candidate)
 

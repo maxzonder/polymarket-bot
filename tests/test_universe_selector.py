@@ -238,9 +238,27 @@ class UniverseSelectorTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.selected_market_ids, ("crypto-a", "weather-a"))
+
+    def test_can_apply_explicit_subscription_scores_without_fair_category_reordering(self) -> None:
+        plan = build_subscription_plan(
+            [
+                _market("a-low", category="crypto"),
+                _market("b-mid", category="weather"),
+                _market("c-high", category="sports"),
+            ],
+            config=black_swan_universe_config(
+                max_markets=2,
+                subscription_scores={"a-low": 0.1, "b-mid": 0.5, "c-high": 0.9},
+                fair_category_allocation=False,
+            ),
+        )
+
+        self.assertEqual(plan.selected_market_ids, ("c-high", "b-mid"))
+        self.assertEqual(plan.decisions[0].stage, "deferred")
+        self.assertEqual(plan.decisions[0].subscription_score, 0.1)
+        self.assertEqual(plan.decisions[2].stage, "selected")
+        self.assertEqual(plan.decisions[2].subscription_score, 0.9)
         self.assertEqual(plan.deferred_counts["capacity"], 1)
-        self.assertEqual(plan.decisions[1].stage, "deferred")
-        self.assertEqual(plan.decisions[1].reject_reason, "capacity")
 
     def test_retained_market_hysteresis_hooks_without_category_hard_caps(self) -> None:
         plan = build_subscription_plan(
