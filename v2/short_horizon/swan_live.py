@@ -27,8 +27,10 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 import uuid
 from dataclasses import asdict, replace as dataclass_replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -40,7 +42,7 @@ for _p in (_REPO_ROOT, _V2_SH_DIR):
         sys.path.insert(0, str(_p))
 
 from short_horizon.core.clock import SystemClock
-from short_horizon.core.events import BookLevel, BookUpdate, TimerEvent
+from short_horizon.core.events import BookLevel, BookUpdate, MarketStateUpdate, TimerEvent
 from short_horizon.core.runtime import StrategyRuntime
 from short_horizon.execution import ExecutionEngine, ExecutionMode
 from short_horizon.live_runner import (
@@ -88,6 +90,8 @@ _CLEANUP_INTERVAL_SECONDS = 1800   # 30 min
 _HELD_BOOK_REFRESH_INTERVAL_SECONDS = 60
 _HELD_BOOK_STALE_AFTER_MS = 2 * 60 * 1000
 _HELD_BOOK_REFRESH_MAX_TOKENS_PER_PASS = 150
+_HELD_RESOLUTION_REFRESH_INTERVAL_SECONDS = 300
+_HELD_RESOLUTION_REFRESH_MAX_MARKETS_PER_PASS = 100
 
 _STRATEGY_REGISTRY = {
     "swan": {
@@ -735,6 +739,90 @@ async def _held_book_snapshot_refresh_loop(
             pass
 
 
+async def _held_resolution_refresh_loop(
+    *,
+    runtime: StrategyRuntime,
+    source: LiveEventSource,
+    clock: SystemClock,
+    interval_seconds: float,
+    max_markets_per_pass: int,
+    logger,
+    shutdown: asyncio.Event,
+) -> None:
+    """Poll Gamma resolution for markets where this run still has inventory.
+
+    The broad market refresh only sees markets that remain in the active
+    discovery universe, plus dropped-market transitions.  Held markets can end
+    and resolve after they have fallen out of that path, leaving paper/live
+    accounting stuck at mark-to-market.  This loop is intentionally narrow: it
+    only checks markets with open orders or positive filled inventory, and only
+    injects a MarketStateUpdate when Gamma exposes canonical binary settlement.
+    """
+    from short_horizon.venue_polymarket.market_refresh import _fetch_market_resolution_snapshot
+
+    while not shutdown.is_set():
+        try:
+            now_ms = int(clock.now_ms())
+            market_ids = _held_or_open_market_ids(runtime.store)
+            attempted = 0
+            pending = 0
+            emitted = 0
+            missing_metadata = 0
+            failed = 0
+
+            for market_id in market_ids[:max_markets_per_pass]:
+                attempted += 1
+                try:
+                    snapshot = await _fetch_market_resolution_snapshot(market_id)
+                except Exception as exc:
+                    failed += 1
+                    logger.warning(
+                        "held_resolution_refresh_failed",
+                        market_id=market_id,
+                        error=str(exc),
+                    )
+                    continue
+                if (
+                    snapshot is None
+                    or snapshot.is_active
+                    or snapshot.resolved_token_id is None
+                    or snapshot.settlement_prices is None
+                ):
+                    pending += 1
+                    continue
+                event = _build_resolution_market_state_event(
+                    runtime.store,
+                    market_id=market_id,
+                    snapshot=snapshot,
+                    now_ms=now_ms,
+                )
+                if event is None:
+                    missing_metadata += 1
+                    continue
+                source.inject(event)
+                emitted += 1
+
+            if market_ids or attempted:
+                logger.info(
+                    "held_resolution_refresh_check",
+                    held_markets=len(market_ids),
+                    attempted=attempted,
+                    pending=pending,
+                    emitted=emitted,
+                    missing_metadata=missing_metadata,
+                    failed=failed,
+                    max_markets_per_pass=max_markets_per_pass,
+                    interval_seconds=interval_seconds,
+                )
+        except Exception:
+            logger.exception("held_resolution_refresh_loop_error")
+
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _fetch_book_snapshot_event(*, market_id: str, token_id: str, clock: SystemClock) -> BookUpdate:
     from api.clob_client import get_orderbook
 
@@ -760,6 +848,10 @@ async def _fetch_book_snapshot_event(*, market_id: str, token_id: str, clock: Sy
         is_snapshot=True,
         source="polymarket_clob_rest_snapshot",
     )
+
+
+def _held_or_open_market_ids(store) -> list[str]:
+    return sorted({market_id for market_id, _token_id in _held_or_open_market_tokens(store)})
 
 
 def _held_or_open_market_tokens(store) -> list[tuple[str, str]]:
@@ -795,6 +887,78 @@ def _held_or_open_market_tokens(store) -> list[tuple[str, str]]:
                 tokens.add(key)
 
     return sorted(tokens)
+
+
+def _build_resolution_market_state_event(
+    store,
+    *,
+    market_id: str,
+    snapshot,
+    now_ms: int,
+) -> MarketStateUpdate | None:
+    latest = None
+    load_latest_market_state = getattr(store, "load_latest_market_state", None)
+    if callable(load_latest_market_state):
+        latest = load_latest_market_state(market_id)
+    if latest is not None:
+        return dataclass_replace(
+            latest,
+            event_time_ms=now_ms,
+            ingest_time_ms=now_ms,
+            status=snapshot.status,
+            is_active=snapshot.is_active,
+            source="polymarket.gamma.resolution_refresh",
+            resolved_token_id=snapshot.resolved_token_id,
+            settlement_prices=snapshot.settlement_prices,
+        )
+
+    row = _load_persisted_market_row(store, market_id)
+    if row is None:
+        return None
+    start_ms = _iso_to_ms(row.get("start_time_latest"))
+    end_ms = _iso_to_ms(row.get("end_time_latest"))
+    if start_ms is None or end_ms is None:
+        return None
+    return MarketStateUpdate(
+        event_time_ms=now_ms,
+        ingest_time_ms=now_ms,
+        market_id=str(market_id),
+        condition_id=str(row.get("condition_id") or "") or None,
+        question=str(row.get("question") or "") or None,
+        status=snapshot.status,
+        start_time_ms=start_ms,
+        end_time_ms=end_ms,
+        duration_seconds=int(row.get("duration_seconds_snapshot") or 0) or None,
+        token_yes_id=str(row.get("token_yes_id") or "") or None,
+        token_no_id=str(row.get("token_no_id") or "") or None,
+        fee_rate_bps=float(row["fee_rate_bps_latest"]) if row.get("fee_rate_bps_latest") is not None else None,
+        fees_enabled=bool(row["fees_enabled"]) if row.get("fees_enabled") is not None else None,
+        source="polymarket.gamma.resolution_refresh",
+        is_active=snapshot.is_active,
+        metadata_is_fresh=True,
+        resolved_token_id=snapshot.resolved_token_id,
+        settlement_prices=snapshot.settlement_prices,
+    )
+
+
+def _load_persisted_market_row(store, market_id: str) -> dict | None:
+    conn = getattr(store, "conn", None)
+    if conn is None:
+        return None
+    row = conn.execute("SELECT * FROM markets WHERE market_id = ?", (str(market_id),)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _iso_to_ms(value: object) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
 
 
 async def _ws_trigger_screener(
@@ -1307,11 +1471,23 @@ async def run_swan_live(
         ),
         name="swan_held_book_snapshot_refresh_loop",
     )
+    held_resolution_refresh_task = asyncio.create_task(
+        _held_resolution_refresh_loop(
+            runtime=runtime,
+            source=source,
+            clock=clock,
+            interval_seconds=_HELD_RESOLUTION_REFRESH_INTERVAL_SECONDS,
+            max_markets_per_pass=_HELD_RESOLUTION_REFRESH_MAX_MARKETS_PER_PASS,
+            logger=logger,
+            shutdown=shutdown,
+        ),
+        name="swan_held_resolution_refresh_loop",
+    )
 
     try:
         summary = await _run_event_stream()
     finally:
-        tasks = [cleanup_task, ws_universe_task, ws_monitor_task, held_book_refresh_task]
+        tasks = [cleanup_task, ws_universe_task, ws_monitor_task, held_book_refresh_task, held_resolution_refresh_task]
         if screener_task is not None:
             tasks.append(screener_task)
         for t in tasks:

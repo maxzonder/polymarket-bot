@@ -325,6 +325,8 @@ def expand_market_state_update(event: MarketStateUpdate) -> list[MarketStateUpda
                 is_active=event.is_active,
                 metadata_is_fresh=event.metadata_is_fresh,
                 fee_metadata_age_ms=event.fee_metadata_age_ms,
+                resolved_token_id=event.resolved_token_id,
+                settlement_prices=event.settlement_prices,
             )
         )
     return expanded

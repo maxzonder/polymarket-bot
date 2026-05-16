@@ -126,6 +126,8 @@ class LiveSourceHelpersTest(unittest.TestCase):
             is_active=True,
             metadata_is_fresh=True,
             fee_metadata_age_ms=0,
+            resolved_token_id="tok_yes",
+            settlement_prices={"tok_yes": 1.0, "tok_no": 0.0},
             source="polymarket.gamma.refresh",
         )
 
@@ -136,6 +138,8 @@ class LiveSourceHelpersTest(unittest.TestCase):
         self.assertTrue(all(item.market_id == "m1" for item in expanded))
         self.assertTrue(all(item.fee_rate_bps == 35.0 for item in expanded))
         self.assertTrue(all(item.fee_fetched_at_ms == 1001 for item in expanded))
+        self.assertTrue(all(item.resolved_token_id == "tok_yes" for item in expanded))
+        self.assertTrue(all(item.settlement_prices == {"tok_yes": 1.0, "tok_no": 0.0} for item in expanded))
 
     def test_extract_market_token_ids_includes_compatibility_token_id(self) -> None:
         event = MarketStateUpdate(
