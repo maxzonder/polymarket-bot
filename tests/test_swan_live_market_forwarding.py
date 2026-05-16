@@ -247,7 +247,7 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(cfg.max_markets_per_category, 5)
         self.assertEqual(cfg.min_volume_usdc, 2500.0)
         self.assertTrue(cfg.reject_random_walk)
-        self.assertIn("weather", cfg.category_multipliers)
+        self.assertEqual(cfg.category_multipliers, {})
 
     def test_black_swan_mode_owns_default_stake_and_selector_min_volume(self) -> None:
         self.assertEqual(BLACK_SWAN_MODE.stake_per_level, 1.0)
@@ -301,15 +301,17 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(payload["legacy_tokens"], 4)
         self.assertEqual(payload["selected_tokens"], 2)
         self.assertEqual(payload["token_reduction"], 2)
-        self.assertEqual(payload["rejection_counts"], {"cap_markets": 1})
-        self.assertEqual(payload["top_selected_market_ids"], ("weather",))
+        self.assertEqual(payload["rejection_counts"], {})
+        self.assertEqual(payload["deferred_counts"], {"capacity": 1})
+        self.assertEqual(payload["deferred_markets"], 1)
+        self.assertEqual(payload["top_selected_market_ids"], ("random",))
         decision_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_selector_decision",)]
         self.assertEqual(len(decision_logs), 2)
         by_market = {entry[1]["market_id"]: entry[1] for entry in decision_logs}
-        self.assertEqual(by_market["weather"]["stage"], "selected")
-        self.assertEqual(by_market["weather"]["selected_token_count"], 2)
-        self.assertEqual(by_market["random"]["stage"], "rejected")
-        self.assertEqual(by_market["random"]["reject_reason"], "cap_markets")
+        self.assertEqual(by_market["random"]["stage"], "selected")
+        self.assertEqual(by_market["random"]["selected_token_count"], 2)
+        self.assertEqual(by_market["weather"]["stage"], "deferred")
+        self.assertEqual(by_market["weather"]["reject_reason"], "capacity")
 
     def test_universe_builder_can_apply_selector_with_safe_unsubscribe(self) -> None:
         async def run():
@@ -353,9 +355,9 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
 
         ws, logger, token_to_market_id, token_to_side_index, strategy = asyncio.run(run())
 
-        self.assertEqual(set(ws.subscribed[0]), {"yes-weather", "no-weather"})
-        self.assertEqual(set(ws.subscribed[1]), {"yes-random", "no-random"})
-        self.assertEqual(set(ws.unsubscribed[0]), {"yes-weather", "no-weather"})
+        self.assertEqual(set(ws.subscribed[0]), {"yes-random", "no-random"})
+        self.assertEqual(len(ws.subscribed), 1)
+        self.assertEqual(ws.unsubscribed, [])
         self.assertEqual(token_to_market_id, {"yes-random": "random", "no-random": "random"})
         self.assertEqual(token_to_side_index, {"yes-random": 0, "no-random": 1})
 
@@ -364,8 +366,9 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertFalse(selector_logs[0][1]["observe_only"])
         universe_logs = [entry for entry in logger.infos if entry[0] == ("ws_universe_updated",)]
         self.assertTrue(all(entry[1]["selector_applied"] for entry in universe_logs))
-        self.assertEqual(universe_logs[-1][1]["pruned_candidates"], 1)
-        self.assertEqual(strategy.candidate_updates[-1], [])
+        self.assertEqual(universe_logs[-1][1]["pruned_candidates"], 0)
+        self.assertEqual(len(strategy.candidate_updates), 1)
+        self.assertEqual(strategy.candidate_updates[-1][0].market_id, "weather")
 
     def test_ws_trigger_screener_summary_preserves_reject_reasons(self) -> None:
         rows = [
@@ -398,8 +401,8 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
                 shared_discovery=_FakeSharedDiscovery(
                     shutdown,
                     [
-                        _market("random", question="Will the price of Bitcoin close above $100,000 today?"),
                         _market("weather", category="weather", question="Will a hurricane hit Florida?"),
+                        _market("random", category="zzzz", question="Will the price of Bitcoin close above $100,000 today?"),
                     ],
                 ),
                 token_to_market_id=token_to_market_id,

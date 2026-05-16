@@ -85,15 +85,17 @@ class UniverseSelectorTests(unittest.TestCase):
             "missing_end_time",
         ])
 
-    def test_applies_global_market_and_token_caps_before_subscription(self) -> None:
+    def test_defers_capacity_overflow_instead_of_rejecting_it(self) -> None:
         plan = build_subscription_plan(
             [_market("m1"), _market("m2"), _market("m3")],
             config=UniverseSelectorConfig(max_markets=2),
         )
 
         self.assertEqual(plan.selected_market_ids, ("m1", "m2"))
-        self.assertEqual(plan.rejection_counts["cap_markets"], 1)
-        self.assertEqual(plan.decisions[-1].reject_reason, "cap_markets")
+        self.assertEqual(plan.rejection_counts, {})
+        self.assertEqual(plan.deferred_counts["capacity"], 1)
+        self.assertEqual(plan.decisions[-1].stage, "deferred")
+        self.assertEqual(plan.decisions[-1].reject_reason, "capacity")
 
         token_capped = build_subscription_plan(
             [_market("m1"), _market("m2")],
@@ -102,7 +104,8 @@ class UniverseSelectorTests(unittest.TestCase):
 
         self.assertEqual(token_capped.selected_market_ids, ("m1",))
         self.assertEqual(token_capped.selected_token_ids, ("yes-m1", "no-m1"))
-        self.assertEqual(token_capped.rejection_counts["cap_tokens"], 1)
+        self.assertEqual(token_capped.rejection_counts, {})
+        self.assertEqual(token_capped.deferred_counts["capacity"], 1)
 
     def test_can_select_only_one_side_for_subscription(self) -> None:
         plan = build_subscription_plan(
@@ -168,7 +171,7 @@ class UniverseSelectorTests(unittest.TestCase):
         self.assertEqual(ambiguous.kind, "ambiguous")
         self.assertEqual(ambiguous.reason, "mentioned")
 
-    def test_applies_black_swan_policy_without_live_wiring(self) -> None:
+    def test_black_swan_policy_knobs_do_not_hard_filter_before_ws(self) -> None:
         plan = build_subscription_plan(
             [
                 _market(
@@ -199,49 +202,47 @@ class UniverseSelectorTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(plan.selected_market_ids, ("hurricane",))
-        self.assertEqual(plan.rejection_counts["random_walk_rejected"], 1)
-        self.assertEqual(plan.rejection_counts["category_blocked"], 1)
-        self.assertEqual(plan.rejection_counts["category_not_allowed"], 1)
+        self.assertEqual(plan.selected_market_ids, ("btc-random", "sports", "tech", "hurricane"))
+        self.assertEqual(plan.rejection_counts, {})
+        self.assertEqual(plan.deferred_counts, {})
 
         selected = plan.decisions[0]
         self.assertEqual(selected.catalyst_kind, "catalyst")
         self.assertEqual(selected.catalyst_reason, "hurricane")
-        self.assertGreater(selected.subscription_score, 1.0)
+        self.assertEqual(selected.subscription_score, 1.0)
 
         random_walk = plan.decisions[1]
         self.assertEqual(random_walk.catalyst_kind, "random_walk")
-        self.assertLess(random_walk.subscription_score, 1.0)
+        self.assertEqual(random_walk.subscription_score, 1.0)
 
-    def test_ranks_before_applying_global_caps(self) -> None:
+    def test_uses_fair_category_order_before_applying_global_caps(self) -> None:
         plan = build_subscription_plan(
             [
                 _market(
-                    "low",
+                    "crypto-a",
                     category="crypto",
                     question="Will the price of Bitcoin close above $100,000 today?",
                 ),
                 _market(
-                    "high",
-                    category="weather",
-                    question="Will a hurricane make landfall in Florida by Friday?",
+                    "crypto-b",
+                    category="crypto",
+                    question="Will ETH hit a new all-time high this week?",
                 ),
                 _market(
-                    "medium",
-                    category="politics",
-                    question="Will the election be won by Party A?",
+                    "weather-a",
+                    category="weather",
+                    question="Will a hurricane make landfall in Florida by Friday?",
                 ),
             ],
             config=black_swan_universe_config(max_markets=2),
         )
 
-        self.assertEqual(plan.selected_market_ids, ("high", "medium"))
-        self.assertEqual(plan.rejection_counts["cap_markets"], 1)
-        self.assertEqual(plan.decisions[0].reject_reason, "cap_markets")
-        self.assertGreater(plan.decisions[1].subscription_score, plan.decisions[2].subscription_score)
-        self.assertGreater(plan.decisions[2].subscription_score, plan.decisions[0].subscription_score)
+        self.assertEqual(plan.selected_market_ids, ("crypto-a", "weather-a"))
+        self.assertEqual(plan.deferred_counts["capacity"], 1)
+        self.assertEqual(plan.decisions[1].stage, "deferred")
+        self.assertEqual(plan.decisions[1].reject_reason, "capacity")
 
-    def test_supports_category_caps_and_retained_market_hysteresis_hooks(self) -> None:
+    def test_retained_market_hysteresis_hooks_without_category_hard_caps(self) -> None:
         plan = build_subscription_plan(
             [
                 _market("weather-a", category="weather", question="Will a hurricane hit Florida?"),
@@ -255,9 +256,9 @@ class UniverseSelectorTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(plan.selected_market_ids, ("weather-b", "legal"))
-        self.assertEqual(plan.rejection_counts["cap_category"], 1)
-        self.assertEqual(plan.decisions[0].reject_reason, "cap_category")
+        self.assertEqual(plan.selected_market_ids, ("weather-b", "legal", "weather-a"))
+        self.assertEqual(plan.rejection_counts, {})
+        self.assertEqual(plan.deferred_counts, {})
         self.assertTrue(plan.decisions[1].retained_market)
         self.assertGreater(plan.decisions[1].subscription_score, plan.decisions[0].subscription_score)
 
@@ -282,14 +283,17 @@ class UniverseSelectorTests(unittest.TestCase):
         self.assertEqual(summary.discovered_markets, 4)
         self.assertEqual(summary.selected_markets, 2)
         self.assertEqual(summary.selected_tokens, 4)
-        self.assertEqual(summary.rejected_markets, 2)
-        self.assertEqual(summary.rejection_counts, {"cap_markets": 1, "volume_below_min": 1})
-        self.assertEqual(summary.selected_by_category, {"legal": 1, "weather": 1})
-        self.assertEqual(summary.selected_by_catalyst, {"catalyst": 2})
-        self.assertEqual(summary.rejected_by_catalyst, {"none": 1, "random_walk": 1})
+        self.assertEqual(summary.deferred_markets, 1)
+        self.assertEqual(summary.rejected_markets, 1)
+        self.assertEqual(summary.rejection_counts, {"volume_below_min": 1})
+        self.assertEqual(summary.deferred_counts, {"capacity": 1})
+        self.assertEqual(summary.selected_by_category, {"crypto": 1, "legal": 1})
+        self.assertEqual(summary.selected_by_catalyst, {"catalyst": 1, "random_walk": 1})
+        self.assertEqual(summary.rejected_by_catalyst, {"none": 1})
+        self.assertEqual(summary.deferred_by_catalyst, {"catalyst": 1})
         self.assertEqual(summary.selected_by_duration_bucket, {"1h": 2})
         self.assertEqual(summary.retained_selected_markets, 1)
-        self.assertEqual(summary.top_selected_market_ids, ("weather",))
+        self.assertEqual(summary.top_selected_market_ids, ("legal",))
         self.assertGreaterEqual(summary.max_selected_score, summary.min_selected_score)
 
 
