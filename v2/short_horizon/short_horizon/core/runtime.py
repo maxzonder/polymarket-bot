@@ -52,7 +52,7 @@ class StrategyRuntime:
         self.latest_book_ingest_ms_by_market_token: dict[tuple[str, str], int] = {}
         self.latest_spot_by_asset: dict[str, SpotPriceUpdate] = {}
         self.resolved_inventory_marks_by_market_token: dict[tuple[str, str], MarketResolvedWithInventory] = {}
-        self._reported_resolved_inventory: set[tuple[str, str]] = set()
+        self._reported_resolved_inventory: set[tuple[str, str]] = _load_reported_resolved_inventory_keys(intent_store)
 
     def on_market_state(self, event: MarketStateUpdate) -> list[StrategyIntent]:
         log = self.logger.bind(**event_log_fields(event))
@@ -673,6 +673,36 @@ def _compute_intraday_realized_sell_pnl_usdc(*, orders: list[dict], fills: list[
             continue
         realized_pnl_usdc -= fee_paid_usdc
     return realized_pnl_usdc
+
+
+def _load_reported_resolved_inventory_keys(store) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    in_memory_events = getattr(store, "events", None)
+    if in_memory_events is not None:
+        for event in in_memory_events:
+            if isinstance(event, MarketResolvedWithInventory):
+                keys.add((str(event.market_id), str(event.token_id)))
+
+    conn = getattr(store, "conn", None)
+    current_run_id = getattr(store, "current_run_id", None)
+    if conn is not None and current_run_id is not None:
+        try:
+            rows = conn.execute(
+                """
+                SELECT market_id, token_id
+                FROM events_log
+                WHERE run_id = ? AND event_type = 'MarketResolvedWithInventory'
+                """,
+                (current_run_id,),
+            ).fetchall()
+        except Exception:
+            rows = []
+        for row in rows:
+            market_id = row["market_id"] if hasattr(row, "keys") else row[0]
+            token_id = row["token_id"] if hasattr(row, "keys") else row[1]
+            if market_id is not None and token_id is not None:
+                keys.add((str(market_id), str(token_id)))
+    return keys
 
 
 def _build_intraday_inventory_lots(*, orders: list[dict], fills: list[dict], event_time_ms: int) -> dict[tuple[str | None, str | None], list[list[float]]]:

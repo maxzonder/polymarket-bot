@@ -1395,7 +1395,7 @@ class ShortHorizonEngineTest(unittest.TestCase):
             fee_paid_usdc=0.0,
         )
 
-        outputs = engine.on_market_state(MarketStateUpdate(
+        resolution = MarketStateUpdate(
             event_time_ms=86_600_000,
             ingest_time_ms=86_600_050,
             market_id="m1",
@@ -1409,7 +1409,8 @@ class ShortHorizonEngineTest(unittest.TestCase):
             is_active=False,
             end_time_ms=86_600_000,
             resolved_token_id="tok_yes",
-        ))
+        )
+        outputs = engine.on_market_state(resolution)
 
         self.assertEqual(outputs, [])
         resolved_events = [event for event in engine.store.events if isinstance(event, MarketResolvedWithInventory)]
@@ -1417,6 +1418,11 @@ class ShortHorizonEngineTest(unittest.TestCase):
         self.assertEqual(resolved_events[0].size, 20.0)
         self.assertEqual(resolved_events[0].outcome_price, 1.0)
         self.assertAlmostEqual(resolved_events[0].estimated_pnl_usdc, 19.0)
+
+        restarted_engine = ShortHorizonEngine(config=ShortHorizonConfig(), intent_store=engine.store)
+        restarted_engine.on_market_state(resolution)
+        resolved_events = [event for event in engine.store.events if isinstance(event, MarketResolvedWithInventory)]
+        self.assertEqual(len(resolved_events), 1)
 
     def test_runtime_blocks_new_intent_when_max_consecutive_rejects_reached(self) -> None:
         engine = ShortHorizonEngine(
