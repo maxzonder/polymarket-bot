@@ -16,6 +16,7 @@ from short_horizon.core.events import BookUpdate, MarketStateUpdate, TradeTick
 from short_horizon.market_data import LiveEventSource
 from short_horizon.strategies.swan_strategy_v1 import SwanCandidate
 from short_horizon.venue_polymarket import MarketMetadata, black_swan_universe_config
+from config import BLACK_SWAN_MODE
 import v2.short_horizon.swan_live as swan_live_module
 from v2.short_horizon.swan_live import (
     _WsCandidateCache,
@@ -247,6 +248,16 @@ class SwanLiveMarketForwardingTest(unittest.TestCase):
         self.assertEqual(cfg.min_volume_usdc, 2500.0)
         self.assertTrue(cfg.reject_random_walk)
         self.assertIn("weather", cfg.category_multipliers)
+
+    def test_black_swan_mode_owns_default_stake_and_selector_min_volume(self) -> None:
+        self.assertEqual(BLACK_SWAN_MODE.stake_per_level, 1.0)
+        self.assertEqual(BLACK_SWAN_MODE.universe_selector_min_volume_usdc, 100.0)
+
+        cfg = _build_black_swan_universe_selector_config(
+            default_min_volume_usdc=BLACK_SWAN_MODE.universe_selector_min_volume_usdc,
+        )
+
+        self.assertEqual(cfg.min_volume_usdc, 100.0)
 
     def test_universe_builder_logs_selector_observation_without_changing_subscription(self) -> None:
         async def run():

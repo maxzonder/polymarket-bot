@@ -145,6 +145,17 @@ class ModeConfig:
     # on total market lifespan at load time.
     min_total_duration_hours: float = 0.0
 
+    # Explicit per-entry-level stake for live/paper swan runners.  A value of
+    # 0.0 means the runner falls back to stake_usdc.  black_swan sets this to
+    # 1.0 so ladder sizing is visible in BLACK_SWAN_MODE rather than hidden in
+    # swan_live.py.
+    stake_per_level: float = 0.0
+
+    # ── Pre-subscription universe selector ────────────────────────────────────
+    # Minimum Gamma volume for the black_swan WS universe selector.  0.0 keeps
+    # the selector default disabled for legacy modes.
+    universe_selector_min_volume_usdc: float = 0.0
+
     # ── Sports subtype hard rejects ──────────────────────────────────────────
     # One unified gate for weak sports subtypes.  Broad allowlists are avoided:
     # non-matching sports markets continue to normal score/pattern/price gates.
@@ -333,6 +344,7 @@ BLACK_SWAN_MODE = ModeConfig(
     ),
     moonbag_fraction=0.80,     # hold 80% to resolution — high-X tail is the edge
     stake_usdc=0.20,           # fallback
+    stake_per_level=1.0,       # live/paper runner: $1 configured per entry level
     max_open_positions=2000,
     max_resting_markets=20000,
     max_resting_per_cluster=1,
@@ -348,13 +360,16 @@ BLACK_SWAN_MODE = ModeConfig(
     # 50 min: include one-hour markets while still excluding true 15m/ultra-short
     # markets by planned start/end duration when Gamma provides both timestamps.
     min_total_duration_hours=50.0 / 60.0,
+    universe_selector_min_volume_usdc=100.0,
     hours_to_close_null_default=48.0,
     hours_to_close_null_reject=True,   # reject markets with unknown end_date (#184)
     # #196 audit: keep MarketScorer as a real hard gate, not just a ranking log.
     # Conservative starting threshold; revisit with score-bucket replay once more
     # paper outcomes accumulate.
     min_market_score=0.25,
-    # Lower prices = higher X: allocate more stake there
+    # Legacy analyzer/screener tiers.  Active black_swan swan_live sizing uses
+    # stake_per_level above; keep these untouched until the broader legacy/15m
+    # sizing refactor.
     stake_tiers=(
         (0.005, _BSV1_BUDGET * 0.40),  # 0.5c tier: 40¢
         (0.01,  _BSV1_BUDGET * 0.25),  # 1c tier:   25¢

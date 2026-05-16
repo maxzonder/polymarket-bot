@@ -88,7 +88,6 @@ _CLEANUP_INTERVAL_SECONDS = 1800   # 30 min
 _HELD_BOOK_REFRESH_INTERVAL_SECONDS = 60
 _HELD_BOOK_STALE_AFTER_MS = 2 * 60 * 1000
 _HELD_BOOK_REFRESH_MAX_TOKENS_PER_PASS = 150
-_DEFAULT_STAKE_PER_LEVEL = 1.0     # target ~1 USDC notional per entry level (~5 USDC/market ladder)
 
 _STRATEGY_REGISTRY = {
     "swan": {
@@ -949,6 +948,7 @@ def _build_black_swan_universe_selector_config(
     max_markets: int | None = None,
     max_tokens: int | None = None,
     max_markets_per_category: int | None = None,
+    default_min_volume_usdc: float = 0.0,
     min_volume_usdc: float | None = None,
     reject_random_walk: bool = False,
 ) -> UniverseSelectorConfig:
@@ -959,8 +959,9 @@ def _build_black_swan_universe_selector_config(
         overrides["max_tokens"] = max(0, int(max_tokens))
     if max_markets_per_category is not None:
         overrides["max_markets_per_category"] = max(0, int(max_markets_per_category))
-    if min_volume_usdc is not None:
-        overrides["min_volume_usdc"] = max(0.0, float(min_volume_usdc))
+    effective_min_volume_usdc = default_min_volume_usdc if min_volume_usdc is None else min_volume_usdc
+    if effective_min_volume_usdc is not None:
+        overrides["min_volume_usdc"] = max(0.0, float(effective_min_volume_usdc))
     if reject_random_walk:
         overrides["reject_random_walk"] = True
     return black_swan_universe_config(**overrides)
@@ -1152,9 +1153,17 @@ async def run_swan_live(
         market_scorer=market_scorer,
         pattern_tracker=pattern_tracker,
     )
-    # Per-level stake: default targets ~1 USDC per level, i.e. ~5 USDC
-    # per full 5-level black_swan ladder before duration/phase multipliers.
-    _stake_per_level = stake_per_level if stake_per_level is not None else _DEFAULT_STAKE_PER_LEVEL
+    configured_stake_per_level = float(getattr(mode_config, "stake_per_level", 0.0) or 0.0)
+    if configured_stake_per_level <= 0:
+        configured_stake_per_level = float(getattr(mode_config, "stake_usdc", 0.0) or 0.0)
+    _stake_per_level = float(stake_per_level if stake_per_level is not None else configured_stake_per_level)
+    logger.info(
+        "swan_live_stake_configured",
+        configured_stake_per_level=configured_stake_per_level,
+        cli_stake_per_level=stake_per_level,
+        effective_stake_per_level=_stake_per_level,
+        entry_price_levels=tuple(mode_config.entry_price_levels),
+    )
 
     # ── Redeem sweeper ────────────────────────────────────────────────────────
     redeem_sweeper: PeriodicResolvedRedeemSweeper | None = None
@@ -1206,6 +1215,7 @@ async def run_swan_live(
             max_markets=universe_selector_max_markets,
             max_tokens=universe_selector_max_tokens,
             max_markets_per_category=universe_selector_max_markets_per_category,
+            default_min_volume_usdc=float(getattr(mode_config, "universe_selector_min_volume_usdc", 0.0) or 0.0),
             min_volume_usdc=universe_selector_min_volume_usdc,
             reject_random_walk=universe_selector_reject_random_walk,
         )
@@ -1337,7 +1347,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Seconds between resolved-position redeem sweeps (live mode only)")
     p.add_argument("--stake-per-level", type=float, default=None,
                    dest="stake_per_level",
-                   help="USDC notional per entry level (default: 1.0)")
+                   help="USDC notional per entry level (default: selected mode_config.stake_per_level)")
     p.add_argument("--max-hours-to-close", type=float, default=None,
                    dest="max_hours_to_close",
                    help="Override max hours to close from mode config")

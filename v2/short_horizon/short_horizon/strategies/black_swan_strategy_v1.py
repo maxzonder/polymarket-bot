@@ -27,6 +27,10 @@ from dataclasses import dataclass
 from .swan_strategy_v1 import SwanCandidate, SwanConfig, SwanStrategyV1
 
 from ..core.clock import Clock
+from ..execution.order_translator import (
+    DEFAULT_POLYMARKET_MIN_ORDER_SHARES_FALLBACK,
+    DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC,
+)
 
 
 @dataclass
@@ -46,16 +50,15 @@ class BlackSwanConfig(SwanConfig):
     # markets use the final 10% (~6m) instead of the old fixed 24m window.
     cancel_when_remaining_seconds_lt: float = 1440.0
     cancel_when_remaining_fraction_lt: float = 0.10
-    # Venue-minimum guardrail: allow the full BLACK_SWAN_MODE ladder with
-    # --stake-per-level=1.0 while bounding each market around one effective
-    # venue-minimum order per level.  The previous ~$1/market cap intentionally
-    # narrowed paper to 0.005-only; issue #202 switches paper coverage to the
-    # full 0.005..0.05 low-zone ladder for #196 validation.
+    # Venue-minimum guardrail: allow BLACK_SWAN_MODE.stake_per_level=1.0 to be
+    # translated into venue-valid orders.  Per-market ladder size is controlled
+    # by BLACK_SWAN_MODE.entry_price_levels + stake_per_level, not by a separate
+    # manually maintained 5.5 USDC cap.
     use_effective_notional_for_caps: bool = True
-    max_effective_notional_per_market_usdc: float = 5.5
+    max_effective_notional_per_market_usdc: float = 0.0
     skip_below_venue_min_effective_notional: bool = True
-    venue_min_order_notional_usdc: float = 1.0
-    venue_min_order_shares_fallback: float = 5.0
+    venue_min_order_notional_usdc: float = DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC
+    venue_min_order_shares_fallback: float = DEFAULT_POLYMARKET_MIN_ORDER_SHARES_FALLBACK
 
 
 class BlackSwanStrategyV1(SwanStrategyV1):

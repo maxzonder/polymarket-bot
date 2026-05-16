@@ -17,6 +17,7 @@ from ..telemetry import get_logger
 from ..venue_polymarket.execution_client import VenueOrderRequest, VenueOrderState, VenuePlaceResult
 from ..venue_polymarket.markets import MarketMetadata
 from .order_translator import (
+    DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC,
     TranslationPolicy,
     VenueConstraints,
     VenueTranslationError,
@@ -247,7 +248,7 @@ class ExecutionEngine:
         client: ExecutionVenueClient | None = None,
         mode: ExecutionMode | str = ExecutionMode.SYNTHETIC,
         tick_size: float = 0.01,
-        min_order_size: float = 1.0,
+        min_order_size: float = DEFAULT_VENUE_MIN_ORDER_NOTIONAL_USDC,
         venue_min_order_shares_fallback: float = 0.0,
         translation_policy: TranslationPolicy | None = None,
         live_submit_guard: LiveSubmitGuard | None = None,

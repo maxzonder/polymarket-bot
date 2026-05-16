@@ -53,6 +53,10 @@
 
 - `stake_usdc`
   - fallback stake, если ни один tier не сработал
+- `stake_per_level`
+  - explicit stake на один entry level для live/paper swan runner
+  - `0.0` значит fallback на `stake_usdc`
+  - для `black_swan_mode` активное значение — `$1.00` на каждый level
 - `max_open_positions`
   - максимум одновременно открытых позиций
 - `max_resting_markets`
@@ -73,6 +77,9 @@
 - `max_exposure_per_market`
   - потолок суммарного USDC на один `(market_id, token_id)`
   - `0.0` отключает cap
+- `universe_selector_min_volume_usdc`
+  - минимальный Gamma volume для pre-subscription WS selector
+  - для `black_swan_mode` active default — `$100`
 
 ### Поля временного окна
 
@@ -228,6 +235,24 @@ Derived-константы:
   - `scoring_weights=(('market_score', 0.50), ('duration', 0.25), ('liq', 0.15), ('category', 0.10))`
   - `prefer_long_duration=False`
 
+### `black_swan_mode`
+
+Строгий low-zone режим для black_swan paper/live runner.
+
+- вход
+  - `entry_price_levels=(0.005, 0.01, 0.02, 0.03, 0.05)`
+  - `entry_price_max=0.05`
+  - `use_resting_bids=True`
+  - `scanner_entry=False`
+- размер
+  - `stake_per_level=1.0`
+  - это human-facing настройка: `$1.00` на каждый entry level
+  - execution/order translator сам округляет shares и добавляет venue min-notional buffer `$0.01`, поэтому фактический venue order обычно около `$1.01`
+  - отдельный ручной `5.5 USDC` cap на рынок не поддерживается как operator config; размер ladder задаётся `entry_price_levels + stake_per_level`
+- universe selector
+  - `universe_selector_min_volume_usdc=100.0`
+  - CLI `--universe-selector-min-volume-usdc` остаётся runtime override
+
 ## MODES
 
 `MODES` это registry режимов:
@@ -235,6 +260,7 @@ Derived-константы:
 - `balanced_mode -> BALANCED_MODE`
 - `big_swan_mode -> BIG_SWAN_MODE`
 - `small_swan_mode -> SMALL_SWAN_MODE`
+- `black_swan_mode -> BLACK_SWAN_MODE`
 
 `BotConfig.mode_config` всегда берёт активный режим из этого словаря.
 
