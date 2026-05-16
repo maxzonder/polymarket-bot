@@ -80,6 +80,7 @@
 - `universe_selector_min_volume_usdc`
   - минимальный Gamma volume для pre-subscription WS selector
   - для `black_swan_mode` active default — `$100`
+  - это config-owned значение; в штатном paper/live запуске не надо перебивать его CLI-флагом
 
 ### Поля временного окна
 
@@ -251,7 +252,16 @@ Derived-константы:
   - отдельный ручной `5.5 USDC` cap на рынок не поддерживается как operator config; размер ladder задаётся `entry_price_levels + stake_per_level`
 - universe selector
   - `universe_selector_min_volume_usdc=100.0`
-  - CLI `--universe-selector-min-volume-usdc` остаётся runtime override
+  - `reject_random_walk=false` в штатном запуске; selector больше не использует random-walk/category/catalyst как pre-WS фильтры или score penalty
+  - selector caps по умолчанию не включены: `max_markets=0`, `max_tokens=0`, `max_markets_per_category=0`
+  - не добавлять `--universe-selector-*` CLI overrides в обычный запуск, если нет отдельной явной причины
+  - особенно не использовать старые validation-флаги:
+    - `--universe-selector-min-volume-usdc 1000`
+    - `--universe-selector-reject-random-walk`
+    - `--universe-selector-max-markets 200`
+    - `--universe-selector-max-tokens 400`
+    - `--universe-selector-max-markets-per-category 75`
+  - единственный selector-флаг, который нужен для штатного paper запуска: `--apply-universe-selector`, чтобы selector реально был subscription boundary
 
 ## MODES
 
