@@ -686,6 +686,59 @@ def mtm_summary(con: sqlite3.Connection) -> dict[str, Any]:
     return totals
 
 
+def resolved_inventory_summary(con: sqlite3.Connection) -> dict[str, Any]:
+    questions = {str(r["market_id"]): r["question"] for r in rows(con, "select market_id, question from markets")}
+    settlements: list[dict[str, Any]] = []
+    total_size = 0.0
+    total_cost = 0.0
+    total_payout = 0.0
+    total_pnl = 0.0
+    for r in rows(
+        con,
+        """
+        select event_time, market_id, token_id, payload_json
+        from events_log
+        where event_type='MarketResolvedWithInventory'
+        order by event_time asc, seq asc
+        """,
+    ):
+        try:
+            payload = json.loads(r["payload_json"])
+        except Exception:
+            payload = {}
+        size = float(payload.get("size") or 0.0)
+        avg_entry = float(payload.get("average_entry_price") or 0.0)
+        outcome_price = float(payload.get("outcome_price") or 0.0)
+        pnl = float(payload.get("estimated_pnl_usdc") or (size * (outcome_price - avg_entry)))
+        cost = size * avg_entry
+        payout = size * outcome_price
+        total_size += size
+        total_cost += cost
+        total_payout += payout
+        total_pnl += pnl
+        market_id = str(r["market_id"])
+        settlements.append({
+            "event_time": r["event_time"],
+            "market_id": market_id,
+            "token_id": str(r["token_id"]),
+            "question": questions.get(market_id),
+            "size": size,
+            "average_entry_price": avg_entry,
+            "outcome_price": outcome_price,
+            "cost_basis": cost,
+            "payout": payout,
+            "estimated_pnl_usdc": pnl,
+        })
+    return {
+        "count": len(settlements),
+        "total_size": total_size,
+        "total_cost_basis": total_cost,
+        "total_payout": total_payout,
+        "total_pnl": total_pnl,
+        "settlements": settlements,
+    }
+
+
 def cancel_reasons(con: sqlite3.Connection) -> list[tuple[str, int]]:
     out = Counter()
     for r in rows(con, "select payload_json from events_log where event_type='OrderCanceled'"):
@@ -743,6 +796,7 @@ def render_report(ctx: RunContext, *, max_log_bytes: int | None = None, skip_mtm
     category = category_summary(paper, screener, ctx.run_started_ts)
     funnel, funnel_category = screener_funnel(screener, ctx.run_started_ts)
     mtm = {"tokens_marked": 0} if skip_mtm else mtm_summary(paper)
+    resolved_inventory = resolved_inventory_summary(paper)
     questions = top_questions(paper)
     log_summary = stream_log(ctx.log_path, max_bytes=max_log_bytes)
 
@@ -861,6 +915,25 @@ def render_report(ctx: RunContext, *, max_log_bytes: int | None = None, skip_mtm
     lines.append(f"- Cancel rate by orders: {fmt_pct(cancel_rate)} ({fmt_num(canceled, 0)} / {fmt_num(order_count, 0)})")
     lines.append(f"- Avg fill price: {fmt_num(fills.get('avg_fill_price'), 5)}; shares bought={fmt_num(fills.get('shares'), 2)}; fees={fmt_money(fills.get('fees'), 6)}")
     lines.append(f"- Fill window: first={fills.get('first_fill_at') or 'n/a'}, last={fills.get('last_fill_at') or 'n/a'}")
+    lines.append("")
+
+    lines.append("### Resolved inventory settlements")
+    if resolved_inventory.get("count"):
+        lines.append(
+            f"- Settled inventory events: {fmt_num(resolved_inventory.get('count'), 0)}; "
+            f"cost={fmt_money(resolved_inventory.get('total_cost_basis'), 4)}, "
+            f"payout={fmt_money(resolved_inventory.get('total_payout'), 4)}, "
+            f"PnL={fmt_money(resolved_inventory.get('total_pnl'), 4, signed=True)}"
+        )
+        for s in resolved_inventory.get("settlements", [])[:10]:
+            lines.append(
+                f"  - {s['event_time']} market={s['market_id']} token={str(s['token_id'])[:10]}… "
+                f"shares={fmt_num(s['size'], 2)} avg_entry={fmt_num(s['average_entry_price'], 5)} "
+                f"outcome={fmt_num(s['outcome_price'], 4)} PnL={fmt_money(s['estimated_pnl_usdc'], 4, signed=True)} — "
+                f"{one_line(s.get('question'), 120)}"
+            )
+    else:
+        lines.append("- No `MarketResolvedWithInventory` events yet; canonical Gamma settlement has not hit any held filled inventory in this run.")
     lines.append("")
 
     lines.append("### Mark-to-market PnL")
